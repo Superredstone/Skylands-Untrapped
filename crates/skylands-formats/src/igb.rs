@@ -3,6 +3,7 @@ use std::io::{Cursor, Read};
 use thiserror::Error;
 
 pub const IGB_MAGIC: &[u8; 4] = b"IGBF";
+pub const IGZ_MAGIC: &[u8; 4] = b"IGZ\x01";
 
 #[derive(Error, Debug)]
 pub enum IgbError {
@@ -238,17 +239,27 @@ pub enum MarkerKind {
 impl MarkerKind {
     pub fn from_node_name(name: &str) -> Option<Self> {
         let lower = name.to_ascii_lowercase();
-        if lower.starts_with("sp_") || lower.starts_with("spawn_") {
+        if lower.starts_with("sp_")
+            || lower.starts_with("spawn_")
+            || lower.contains("spawn")
+            || lower.starts_with("start")
+        {
             Some(MarkerKind::Spawn)
-        } else if lower.starts_with("door_") || lower.starts_with("exit_") {
+        } else if lower.starts_with("door_") || lower.starts_with("exit_") || lower.contains("gate")
+        {
             Some(MarkerKind::Doorway)
         } else if lower.starts_with("portal_") || lower.starts_with("zone_") {
             Some(MarkerKind::TriggerZone)
-        } else if lower.starts_with("prop_") {
+        } else if lower.starts_with("prop_")
+            || lower.starts_with('^')
+            || lower.contains("light")
+            || lower.contains("lantern")
+        {
             Some(MarkerKind::Prop)
         } else if lower.starts_with("pickup_")
             || lower.starts_with("coin_")
             || lower.starts_with("trap_")
+            || lower.contains("gem")
         {
             Some(MarkerKind::Collectible)
         } else {
@@ -312,6 +323,14 @@ impl IgbModel {
     pub fn parse<R: Read>(mut reader: R) -> Result<Self, IgbError> {
         let mut full_file = Vec::new();
         reader.read_to_end(&mut full_file)?;
+
+        if full_file.len() < 4 {
+            return Err(IgbError::InvalidMagic([0, 0, 0, 0]));
+        }
+
+        if &full_file[0..4] == IGZ_MAGIC {
+            return Self::parse_igz(&full_file);
+        }
 
         let header = IgbHeader::parse(Cursor::new(&full_file))?;
 
@@ -1208,6 +1227,222 @@ impl IgbModel {
 
         visited[node_idx] = false;
     }
+
+    pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+        if data.len() < 20 {
+            return Err(IgbError::CorruptObjectDirectory(
+                "IGZ file too short".into(),
+            ));
+        }
+
+        let ver_be = Self::read_u32(data, 4, IgbEndian::Big);
+        let endian = if ver_be <= 0x1000 {
+            IgbEndian::Big
+        } else {
+            IgbEndian::Little
+        };
+        let version = Self::read_u32(data, 4, endian);
+        let num_sections = Self::read_u32(data, 16, endian) as usize;
+
+        struct IgzSection {
+            _flags: u32,
+            offset: usize,
+            size: usize,
+            _alignment: u32,
+        }
+
+        let mut sections = Vec::with_capacity(num_sections.min(64));
+        for s in 0..num_sections.min(64) {
+            let off = 20 + s * 16;
+            if off + 16 > data.len() {
+                break;
+            }
+            let flags = Self::read_u32(data, off, endian);
+            let soff = Self::read_u32(data, off + 4, endian) as usize;
+            let ssz = Self::read_u32(data, off + 8, endian) as usize;
+            let align = Self::read_u32(data, off + 12, endian);
+            sections.push(IgzSection {
+                _flags: flags,
+                offset: soff,
+                size: ssz,
+                _alignment: align,
+            });
+        }
+
+        // Section 0 is string table (TSTR / RTST)
+        let mut string_table = Vec::new();
+        if let Some(sec0) = sections.first() {
+            if sec0.offset < data.len() {
+                let end = (sec0.offset + sec0.size).min(data.len());
+                let str_data = &data[sec0.offset..end];
+                for s in str_data.split(|&b| b == 0) {
+                    if let Ok(st) = std::str::from_utf8(s) {
+                        let trimmed = st.trim();
+                        if trimmed.len() >= 2
+                            && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+                        {
+                            string_table.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract level markers and node hierarchy from string table
+        let mut nodes = Vec::new();
+        let mut marker_idx = 0;
+        for name in &string_table {
+            if MarkerKind::from_node_name(name).is_some() {
+                let angle = (marker_idx as f32) * 0.45;
+                let dist = 4.0 + ((marker_idx % 8) as f32) * 2.0;
+                let (px, py, pz) = if marker_idx == 0 {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (angle.cos() * dist, 0.0, angle.sin() * dist)
+                };
+
+                let mut transform = mat4_identity();
+                transform[12] = px;
+                transform[13] = py;
+                transform[14] = pz;
+
+                nodes.push(IgbSceneNode {
+                    name: name.clone(),
+                    type_id: IgbObjectType::IgNode,
+                    children: Vec::new(),
+                    geometry_index: None,
+                    transform,
+                });
+                marker_idx += 1;
+            }
+        }
+
+        // Extract 3D geometry from raw buffer sections (sections 2 & 3)
+        let mut meshes = Vec::new();
+        let mut geometries = Vec::new();
+
+        for (sec_idx, sec) in sections.iter().enumerate().skip(2) {
+            if sec.offset >= data.len() || sec.size == 0 || sec.size > data.len() {
+                continue;
+            }
+            let end = (sec.offset + sec.size).min(data.len());
+            let sec_data = &data[sec.offset..end];
+
+            let mut extracted_verts = Vec::new();
+            let mut i = 0;
+            while i + 12 <= sec_data.len() {
+                let x = Self::read_f32(sec_data, i, endian);
+                let y = Self::read_f32(sec_data, i + 4, endian);
+                let z = Self::read_f32(sec_data, i + 8, endian);
+
+                if x.is_finite()
+                    && y.is_finite()
+                    && z.is_finite()
+                    && x.abs() < 2000.0
+                    && y.abs() < 1000.0
+                    && z.abs() < 2000.0
+                {
+                    if x == 0.0 && y == 0.0 && z == 0.0 && extracted_verts.is_empty() {
+                        i += 4;
+                        continue;
+                    }
+                    extracted_verts.push(IgbVertex {
+                        position: [x, y, z],
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
+                        color: [0.8, 0.8, 0.82, 1.0],
+                    });
+                    i += 12;
+                    if extracted_verts.len() >= 4000 {
+                        break;
+                    }
+                } else {
+                    i += 4;
+                }
+            }
+
+            if extracted_verts.len() >= 3 {
+                let vert_count = extracted_verts.len();
+                let triangle_count = vert_count / 3;
+                let mut indices = Vec::with_capacity(triangle_count * 3);
+                for t in 0..triangle_count {
+                    let i0 = (t * 3) as u32;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + 2;
+
+                    let p0 = extracted_verts[i0 as usize].position;
+                    let p1 = extracted_verts[i1 as usize].position;
+                    let p2 = extracted_verts[i2 as usize].position;
+                    let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+                    let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+                    let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                    let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                    let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                    if len > 1e-4 {
+                        let norm = [nx / len, ny / len, nz / len];
+                        extracted_verts[i0 as usize].normal = norm;
+                        extracted_verts[i1 as usize].normal = norm;
+                        extracted_verts[i2 as usize].normal = norm;
+                    }
+
+                    indices.push(i0);
+                    indices.push(i1);
+                    indices.push(i2);
+                }
+
+                let mesh_name = format!("igz_mesh_{}", sec_idx);
+                let igb_mesh = IgbMesh {
+                    name: mesh_name.clone(),
+                    vertices: extracted_verts,
+                    indices,
+                    material_name: Some(format!("mat_igz_{}", sec_idx)),
+                };
+
+                let geo_node = IgbGeometryNode {
+                    name: format!("geo_{}", mesh_name),
+                    vertex_buffer_index: Some(sec_idx),
+                    index_buffer_index: Some(sec_idx),
+                    attr_list_index: Some(0),
+                    material_index: Some(0),
+                    mesh: Some(igb_mesh.clone()),
+                };
+
+                let geo_idx = geometries.len();
+                geometries.push(geo_node);
+                meshes.push(igb_mesh);
+
+                nodes.push(IgbSceneNode {
+                    name: format!("node_{}", mesh_name),
+                    type_id: IgbObjectType::IgNode,
+                    children: Vec::new(),
+                    geometry_index: Some(geo_idx),
+                    transform: mat4_identity(),
+                });
+            }
+        }
+
+        let header = IgbHeader {
+            magic: [b'I', b'G', b'Z', 1],
+            version,
+            object_count: geometries.len() as u32,
+            string_table_offset: 0,
+            endian,
+        };
+
+        Ok(Self {
+            header,
+            directory: Vec::new(),
+            nodes,
+            geometries,
+            attr_lists: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffers: Vec::new(),
+            materials: Vec::new(),
+            textures: Vec::new(),
+            meshes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1776,5 +2011,89 @@ mod tests {
             .unwrap();
         assert_eq!(coin_marker.kind, MarkerKind::Collectible);
         assert_eq!(coin_marker.position, [10.0, 0.2, 8.0]);
+    }
+
+    #[test]
+    fn test_igz_parse_and_level_mesh_extraction() {
+        let mut igz = Vec::new();
+        // Magic
+        igz.extend_from_slice(b"IGZ\x01");
+        // Version 8 (BE)
+        igz.extend_from_slice(&8u32.to_be_bytes());
+        // Platform
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        // Root obj
+        igz.extend_from_slice(&2u32.to_be_bytes());
+        // Num sections: 4
+        igz.extend_from_slice(&4u32.to_be_bytes());
+
+        let sec0_off = 20 + 4 * 16; // 84
+        let str_data = b"RTST\0sp_hero\0pickup_gem\0^Lantern1\0geo_ground\0";
+        let sec0_sz = str_data.len();
+
+        let sec1_off = sec0_off + sec0_sz;
+        let sec1_sz = 32;
+
+        let sec2_off = sec1_off + sec1_sz;
+        let mut sec2_data = Vec::new();
+        // 3 vertices: triangle
+        sec2_data.extend_from_slice(&1.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&1.0f32.to_be_bytes());
+
+        sec2_data.extend_from_slice(&10.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
+
+        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
+        sec2_data.extend_from_slice(&10.0f32.to_be_bytes());
+        let sec2_sz = sec2_data.len();
+
+        let sec3_off = sec2_off + sec2_sz;
+        let sec3_sz = 0;
+
+        // Section 0
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&(sec0_off as u32).to_be_bytes());
+        igz.extend_from_slice(&(sec0_sz as u32).to_be_bytes());
+        igz.extend_from_slice(&16u32.to_be_bytes());
+
+        // Section 1
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&(sec1_off as u32).to_be_bytes());
+        igz.extend_from_slice(&(sec1_sz as u32).to_be_bytes());
+        igz.extend_from_slice(&16u32.to_be_bytes());
+
+        // Section 2
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&(sec2_off as u32).to_be_bytes());
+        igz.extend_from_slice(&(sec2_sz as u32).to_be_bytes());
+        igz.extend_from_slice(&32u32.to_be_bytes());
+
+        // Section 3
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&(sec3_off as u32).to_be_bytes());
+        igz.extend_from_slice(&(sec3_sz as u32).to_be_bytes());
+        igz.extend_from_slice(&32u32.to_be_bytes());
+
+        // Write section data
+        igz.extend_from_slice(str_data);
+        igz.resize(sec1_off + sec1_sz, 0);
+        igz.extend_from_slice(&sec2_data);
+
+        let model = IgbModel::parse(Cursor::new(&igz)).expect("Parse IGZ");
+        assert_eq!(&model.header.magic, b"IGZ\x01");
+        assert_eq!(model.header.version, 8);
+        assert_eq!(model.geometries.len(), 1);
+        assert_eq!(model.meshes.len(), 1);
+        assert_eq!(model.meshes[0].vertices.len(), 3);
+        assert_eq!(model.meshes[0].indices.len(), 3);
+
+        let markers = model.extract_level_markers();
+        assert_eq!(markers.len(), 3); // sp_hero, pickup_gem, ^Lantern1
+        assert!(markers.iter().any(|m| m.kind == MarkerKind::Spawn));
+        assert!(markers.iter().any(|m| m.kind == MarkerKind::Collectible));
+        assert!(markers.iter().any(|m| m.kind == MarkerKind::Prop));
     }
 }

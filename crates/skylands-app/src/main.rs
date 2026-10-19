@@ -217,10 +217,12 @@ impl GameEngine {
             path.to_string(),
             format!("{}.igb", path),
             format!("{}.bld", path),
+            "Level_Hub_2014_01.bld".to_string(),
+            "level_hub_2014_01.bld".to_string(),
+            "Arena_Mesh_300.bld".to_string(),
             "wii_courtyard.bld".to_string(),
             "levels/hub.igb".to_string(),
             "maps/courtyard.igb".to_string(),
-            "level_hub_2014_01.bld".to_string(),
         ];
         for cand in &candidates {
             if self.assets.has_file(cand) {
@@ -240,6 +242,28 @@ impl GameEngine {
                     }
                     if !markers.is_empty() {
                         self.world.load_level_entities(&markers);
+                    }
+                    if combined_mesh.triangles.is_empty() {
+                        for comp in [
+                            "Arena_Mesh_300.bld",
+                            "challengeMesh_outdoor.bld",
+                            "challengeMesh_Ruins.bld",
+                        ] {
+                            if self.assets.has_file(comp) {
+                                if let Ok(comp_models) = self.assets.load_level_models(comp) {
+                                    for m in &comp_models {
+                                        let sub = CollisionMesh::from_igb(m);
+                                        combined_mesh = CollisionMesh::from_triangles(
+                                            combined_mesh
+                                                .triangles
+                                                .into_iter()
+                                                .chain(sub.triangles)
+                                                .collect(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     if !combined_mesh.triangles.is_empty() {
                         self.world.environment.mesh = combined_mesh;
@@ -337,6 +361,9 @@ impl AppRuntime {
         }
 
         let candidates = [
+            format!("{}.png.igb.tex.igz", key),
+            format!("{}.cmpr", key),
+            format!("{}.png", key),
             format!("textures/{}.png", key),
             format!("textures/{}.cmpr", key),
             format!("textures/characters/{}.png", key),
@@ -470,10 +497,12 @@ impl AppRuntime {
             path.to_string(),
             format!("{}.igb", path),
             format!("{}.bld", path),
+            "Level_Hub_2014_01.bld".to_string(),
+            "level_hub_2014_01.bld".to_string(),
+            "Arena_Mesh_300.bld".to_string(),
             "wii_courtyard.bld".to_string(),
             "levels/hub.igb".to_string(),
             "maps/courtyard.igb".to_string(),
-            "level_hub_2014_01.bld".to_string(),
         ];
 
         let mut resolved_models = Vec::new();
@@ -536,6 +565,45 @@ impl AppRuntime {
                             .as_deref()
                             .and_then(|mat_name| self.resolve_material_texture(mat_name));
                         submesh_defs.push((mesh, tex, vec![InstanceRaw::default()]));
+                    }
+                }
+            }
+
+            if submesh_defs.is_empty() {
+                for comp_cand in [
+                    "Arena_Mesh_300.bld",
+                    "challengeMesh_outdoor.bld",
+                    "challengeMesh_Ruins.bld",
+                ] {
+                    if self.assets.has_file(comp_cand) {
+                        if let Ok(comp_models) = self.assets.load_level_models(comp_cand) {
+                            for comp_igb in &comp_models {
+                                let sub_col = CollisionMesh::from_igb(comp_igb);
+                                combined_collision = CollisionMesh::from_triangles(
+                                    combined_collision
+                                        .triangles
+                                        .into_iter()
+                                        .chain(sub_col.triangles)
+                                        .collect(),
+                                );
+                                for geo in &comp_igb.geometries {
+                                    if let Some(mesh) = Mesh::from_geometry(geo) {
+                                        let tex =
+                                            mesh.material_name.as_deref().and_then(|mat_name| {
+                                                self.resolve_material_texture(mat_name)
+                                            });
+                                        submesh_defs.push((
+                                            mesh,
+                                            tex,
+                                            vec![InstanceRaw::default()],
+                                        ));
+                                    }
+                                }
+                            }
+                            if !submesh_defs.is_empty() {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1149,9 +1217,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_mock_portal()
     };
 
-    let engine = GameEngine::new(portal, assets.clone());
+    let mut engine = GameEngine::new(portal, assets.clone());
 
     if args.headless {
+        engine.load_environment_collision("Level_Hub_2014_01.bld");
+        info!(
+            "Loaded environment collision: {} triangles, {} zone triggers, {} actors",
+            engine.world.environment.mesh.triangles.len(),
+            engine.world.triggers.len(),
+            engine.world.actors.len(),
+        );
         info!("Running in headless mode for {} ticks...", args.ticks);
         let mut headless_engine = engine;
         for _ in 0..args.ticks {
@@ -1348,6 +1423,44 @@ mod tests {
                 }
             }
             assert_eq!(to_render.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_load_real_environment_arena_mesh() {
+        use std::path::Path;
+        let p1 = Path::new("assets/files/level/Arena_Mesh_300.bld");
+        let p2 = Path::new("../../assets/files/level/Arena_Mesh_300.bld");
+        let path = if p1.exists() { p1 } else { p2 };
+        if path.exists() {
+            let mut loader = AssetLoader::default();
+            loader.mount(path).expect("mount Arena_Mesh_300");
+            let assets = Arc::new(loader);
+            let portal = create_mock_portal();
+            let engine = GameEngine::new(portal, assets.clone());
+            let mut runtime = AppRuntime::new(engine, assets);
+
+            if let Ok(renderer) = Renderer::new_headless(640, 480) {
+                runtime.renderer = Some(renderer);
+                let env = runtime
+                    .load_environment("Arena_Mesh_300.bld")
+                    .expect("Loads real Arena_Mesh_300 environment");
+                assert_eq!(env.name, "Arena_Mesh_300.bld");
+                assert!(!env.submeshes.is_empty());
+                assert!(!runtime.engine.world.environment.mesh.triangles.is_empty());
+
+                let mut to_render = Vec::new();
+                if let Some(env) = &runtime.environment {
+                    for submesh in &env.submeshes {
+                        to_render.push((
+                            &submesh.mesh,
+                            submesh.texture.as_ref(),
+                            submesh.instances.as_slice(),
+                        ));
+                    }
+                }
+                assert!(!to_render.is_empty());
+            }
         }
     }
 

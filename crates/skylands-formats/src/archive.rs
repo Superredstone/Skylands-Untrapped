@@ -87,6 +87,7 @@ pub struct ArchiveReader<R: Read + Seek> {
     pub small_file_blocks: Vec<u8>,
     pub file_names: HashMap<u32, String>,
     pub name_to_hash: HashMap<String, u32>,
+    pub source_name: String,
 }
 
 pub fn hash_path(path: &str) -> u32 {
@@ -284,6 +285,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             small_file_blocks,
             file_names,
             name_to_hash,
+            source_name: String::new(),
         })
     }
 
@@ -472,8 +474,12 @@ impl ArchiveMount {
     }
 
     pub fn mount<P: AsRef<Path>>(&mut self, path: P) -> Result<(), ArchiveError> {
-        let file = File::open(path)?;
-        let archive = ArchiveReader::new(file)?;
+        let p = path.as_ref();
+        let file = File::open(p)?;
+        let mut archive = ArchiveReader::new(file)?;
+        if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
+            archive.source_name = fname.to_string();
+        }
         self.archives.push(archive);
         Ok(())
     }
@@ -516,6 +522,46 @@ impl ArchiveMount {
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, ArchiveError> {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
+
+        // 1. Direct match on archive name (e.g. "Level_Hub_2014_01.bld" -> inner "level.bld")
+        for archive in &self.archives {
+            let arch_name = archive.source_name.to_ascii_lowercase();
+            if !arch_name.is_empty() {
+                let stem = arch_name
+                    .strip_suffix(".bld")
+                    .or_else(|| arch_name.strip_suffix(".arc"))
+                    .unwrap_or(&arch_name);
+                let cand_stem = lower
+                    .strip_suffix(".bld")
+                    .or_else(|| lower.strip_suffix(".arc"))
+                    .or_else(|| lower.strip_suffix(".igb"))
+                    .unwrap_or(&lower);
+                let target_stem = cand_stem.rsplit('/').next().unwrap_or(cand_stem);
+
+                if (arch_name == lower || target_stem == stem) && archive.contains_path("level.bld")
+                {
+                    return archive.read_file("level.bld");
+                }
+            }
+        }
+
+        // 2. Archive-scoped path: "Archive_Name/inner_file.ext"
+        if let Some((arch_part, inner_part)) = lower.split_once('/') {
+            for archive in &self.archives {
+                let arch_lower = archive.source_name.to_ascii_lowercase();
+                let arch_stem = arch_lower
+                    .strip_suffix(".bld")
+                    .or_else(|| arch_lower.strip_suffix(".arc"))
+                    .unwrap_or(&arch_lower);
+                if (arch_lower == arch_part || arch_stem == arch_part)
+                    && archive.contains_path(inner_part)
+                {
+                    return archive.read_file(inner_part);
+                }
+            }
+        }
+
+        // 3. Regular file lookup by name/hash
         for archive in &self.archives {
             if let Some(&hash) = archive.name_to_hash.get(&normalized) {
                 return archive.read_file_by_hash(hash);
@@ -535,6 +581,43 @@ impl ArchiveMount {
     pub fn contains_path(&self, path: &str) -> bool {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
+
+        for archive in &self.archives {
+            let arch_name = archive.source_name.to_ascii_lowercase();
+            if !arch_name.is_empty() {
+                let stem = arch_name
+                    .strip_suffix(".bld")
+                    .or_else(|| arch_name.strip_suffix(".arc"))
+                    .unwrap_or(&arch_name);
+                let cand_stem = lower
+                    .strip_suffix(".bld")
+                    .or_else(|| lower.strip_suffix(".arc"))
+                    .or_else(|| lower.strip_suffix(".igb"))
+                    .unwrap_or(&lower);
+                let target_stem = cand_stem.rsplit('/').next().unwrap_or(cand_stem);
+
+                if (arch_name == lower || target_stem == stem) && archive.contains_path("level.bld")
+                {
+                    return true;
+                }
+            }
+        }
+
+        if let Some((arch_part, inner_part)) = lower.split_once('/') {
+            for archive in &self.archives {
+                let arch_lower = archive.source_name.to_ascii_lowercase();
+                let arch_stem = arch_lower
+                    .strip_suffix(".bld")
+                    .or_else(|| arch_lower.strip_suffix(".arc"))
+                    .unwrap_or(&arch_lower);
+                if (arch_lower == arch_part || arch_stem == arch_part)
+                    && archive.contains_path(inner_part)
+                {
+                    return true;
+                }
+            }
+        }
+
         let hash = hash_path(&normalized);
         let hash_lower = hash_path(&lower);
         for archive in &self.archives {
@@ -563,6 +646,11 @@ impl ArchiveMount {
             return results;
         }
 
+        if data.len() >= 4 && &data[0..4] == b"IGZ\x01" {
+            results.push(data);
+            return results;
+        }
+
         let mut offset = 0;
         while offset + 4 <= data.len() {
             if &data[offset..offset + 4] == b"IGBF" {
@@ -583,6 +671,9 @@ impl ArchiveMount {
                         results.push(sub);
                     }
                 }
+                offset += 4;
+            } else if &data[offset..offset + 4] == b"IGZ\x01" {
+                results.push(&data[offset..]);
                 offset += 4;
             } else {
                 offset += 1;

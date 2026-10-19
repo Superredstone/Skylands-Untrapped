@@ -137,7 +137,17 @@ impl AssetLoader {
         height: u32,
     ) -> Result<Vec<u8>, AssetError> {
         let raw = self.load_raw(path)?;
-        let rgba = decode_cmpr(&raw, width, height)?;
+        let bytes: &[u8] = if raw.len() >= 64 && &raw[0..4] == b"IGZ\x01" {
+            let soff = u32::from_be_bytes([raw[56], raw[57], raw[58], raw[59]]) as usize;
+            if soff < raw.len() {
+                &raw[soff..]
+            } else {
+                &raw[..]
+            }
+        } else {
+            &raw[..]
+        };
+        let rgba = decode_cmpr(bytes, width, height)?;
         Ok(rgba)
     }
 
@@ -365,5 +375,22 @@ mod tests {
         assert_eq!(models.len(), 1);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_load_real_level_bld_archive() {
+        let p1 = Path::new("assets/files/level/Arena_Mesh_300.bld");
+        let p2 = Path::new("../../assets/files/level/Arena_Mesh_300.bld");
+        let path = if p1.exists() { p1 } else { p2 };
+        if path.exists() {
+            let mut loader = AssetLoader::default();
+            loader.mount(path).expect("mount Arena_Mesh_300");
+            assert!(loader.has_file("Arena_Mesh_300.bld"));
+            let models = loader
+                .load_level_models("Arena_Mesh_300.bld")
+                .expect("load level models");
+            assert!(!models.is_empty());
+            assert!(!models[0].meshes.is_empty());
+        }
     }
 }
