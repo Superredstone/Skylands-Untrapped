@@ -242,6 +242,96 @@ impl Camera {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreeCam {
+    pub enabled: bool,
+    pub eye: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub speed: f32,
+    pub sensitivity: f32,
+}
+
+impl Default for FreeCam {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            eye: [0.0, 4.0, 7.0],
+            yaw: -std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+            speed: 10.0,
+            sensitivity: 0.003,
+        }
+    }
+}
+
+impl FreeCam {
+    pub fn from_camera(eye: [f32; 3], target: [f32; 3]) -> Self {
+        let f = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
+        let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+        let (yaw, pitch) = if len > 0.00001 {
+            let norm = [f[0] / len, f[1] / len, f[2] / len];
+            let pitch = norm[1].clamp(-1.0, 1.0).asin().clamp(-1.5, 1.5);
+            let yaw = norm[2].atan2(norm[0]);
+            (yaw, pitch)
+        } else {
+            (-std::f32::consts::FRAC_PI_2, 0.0)
+        };
+
+        Self {
+            enabled: true,
+            eye,
+            yaw,
+            pitch,
+            speed: 10.0,
+            sensitivity: 0.003,
+        }
+    }
+
+    pub fn forward_vector(&self) -> [f32; 3] {
+        let cos_p = self.pitch.cos();
+        [
+            cos_p * self.yaw.cos(),
+            self.pitch.sin(),
+            cos_p * self.yaw.sin(),
+        ]
+    }
+
+    pub fn right_vector(&self) -> [f32; 3] {
+        // forward x up(0, 1, 0)
+        // [f1*u2 - f2*u1, f2*u0 - f0*u2, f0*u1 - f1*u0] = [-sin(yaw), 0, cos(yaw)]
+        [-self.yaw.sin(), 0.0, self.yaw.cos()]
+    }
+
+    pub fn up_vector(&self) -> [f32; 3] {
+        [0.0, 1.0, 0.0]
+    }
+
+    pub fn apply_to_camera(&self, camera: &mut Camera) {
+        let f = self.forward_vector();
+        camera.eye = self.eye;
+        camera.target = [self.eye[0] + f[0], self.eye[1] + f[1], self.eye[2] + f[2]];
+        camera.target_eye = camera.eye;
+        camera.target_target = camera.target;
+    }
+
+    pub fn rotate(&mut self, yaw_delta: f32, pitch_delta: f32) {
+        self.yaw += yaw_delta;
+        self.pitch = (self.pitch + pitch_delta).clamp(-1.5, 1.5);
+    }
+
+    pub fn translate(&mut self, move_vec: [f32; 3], dt: f32) {
+        let f = self.forward_vector();
+        let r = self.right_vector();
+        let u = self.up_vector();
+
+        let dist = self.speed * dt;
+        for i in 0..3 {
+            self.eye[i] += (f[i] * move_vec[2] + r[i] * move_vec[0] + u[i] * move_vec[1]) * dist;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +382,45 @@ mod tests {
         }
         assert!((cam.eye[0] - 10.0).abs() < 0.1);
         assert!((cam.target[0] - 10.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_free_cam_vectors_pitch_clamping_and_translation() {
+        let mut free_cam = FreeCam::from_camera([0.0, 5.0, 10.0], [0.0, 5.0, 0.0]);
+        assert!(free_cam.enabled);
+        assert!((free_cam.pitch - 0.0).abs() < 1e-4);
+        assert!((free_cam.yaw - (-std::f32::consts::FRAC_PI_2)).abs() < 1e-4);
+
+        let f = free_cam.forward_vector();
+        assert!((f[0] - 0.0).abs() < 1e-4);
+        assert!((f[1] - 0.0).abs() < 1e-4);
+        assert!((f[2] - (-1.0)).abs() < 1e-4);
+
+        let r = free_cam.right_vector();
+        assert!((r[0] - 1.0).abs() < 1e-4);
+        assert!((r[1] - 0.0).abs() < 1e-4);
+        assert!((r[2] - 0.0).abs() < 1e-4);
+
+        // Pitch clamping test: [-1.5, 1.5]
+        free_cam.rotate(0.0, 3.0);
+        assert_eq!(free_cam.pitch, 1.5);
+        free_cam.rotate(0.0, -5.0);
+        assert_eq!(free_cam.pitch, -1.5);
+        free_cam.pitch = 0.0;
+
+        // Translation test: move forward 1 unit (move_vec = [0.0, 0.0, 1.0])
+        let initial_eye = free_cam.eye;
+        free_cam.translate([0.0, 0.0, 1.0], 0.1); // speed is 10.0, dist = 1.0 forward (Z - 1.0)
+        assert!((free_cam.eye[0] - initial_eye[0]).abs() < 1e-4);
+        assert!((free_cam.eye[1] - initial_eye[1]).abs() < 1e-4);
+        assert!((free_cam.eye[2] - (initial_eye[2] - 1.0)).abs() < 1e-4);
+
+        // Apply to camera test
+        let mut cam = Camera::new(16.0 / 9.0);
+        free_cam.apply_to_camera(&mut cam);
+        assert_eq!(cam.eye, free_cam.eye);
+        assert!((cam.target[0] - free_cam.eye[0]).abs() < 1e-4);
+        assert!((cam.target[1] - free_cam.eye[1]).abs() < 1e-4);
+        assert!((cam.target[2] - (free_cam.eye[2] - 1.0)).abs() < 1e-4);
     }
 }

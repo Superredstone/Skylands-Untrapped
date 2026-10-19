@@ -6,7 +6,7 @@ pub mod texture;
 pub mod ui;
 pub mod window;
 
-pub use camera::{mat4, Camera, CameraVolume, CameraVolumeMode};
+pub use camera::{mat4, Camera, CameraVolume, CameraVolumeMode, FreeCam};
 pub use mesh::{
     EnvironmentScene, EnvironmentSubmesh, GpuMesh, InstanceRaw, Mesh, ModelInstance, Vertex,
 };

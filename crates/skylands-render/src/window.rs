@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -27,6 +27,7 @@ pub trait RenderAppHandler {
     fn on_update(&mut self);
     fn on_render(&mut self);
     fn on_key(&mut self, key_code: KeyCode, state: bool);
+    fn on_mouse_motion(&mut self, _delta_x: f32, _delta_y: f32) {}
 }
 
 pub struct WindowApp<H: RenderAppHandler> {
@@ -89,6 +90,17 @@ impl<H: RenderAppHandler> ApplicationHandler for WindowApp<H> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.handler.on_mouse_motion(delta.0 as f32, delta.1 as f32);
         }
     }
 

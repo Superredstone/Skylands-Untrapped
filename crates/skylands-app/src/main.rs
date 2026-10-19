@@ -9,11 +9,11 @@ use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    mat4, Camera, CameraVolume, CameraVolumeMode, EnvironmentScene, EnvironmentSubmesh, GpuMesh,
-    GpuTexture, InstanceRaw, LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer,
-    UiBatch, WindowApp, WindowConfig,
+    mat4, Camera, CameraVolume, CameraVolumeMode, EnvironmentScene, EnvironmentSubmesh, FreeCam,
+    GpuMesh, GpuTexture, InstanceRaw, LightUniform, Mesh, ModelInstance, RenderAppHandler,
+    Renderer, UiBatch, WindowApp, WindowConfig,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -305,6 +305,8 @@ pub struct AppRuntime {
     pub last_active_hero_id: Option<u32>,
     pub anim_time: f32,
     pub ui_batch: UiBatch,
+    pub free_cam: FreeCam,
+    pub free_cam_keys: HashSet<KeyCode>,
 }
 
 impl AppRuntime {
@@ -351,6 +353,8 @@ impl AppRuntime {
             last_active_hero_id: None,
             anim_time: 0.0,
             ui_batch: UiBatch::new(),
+            free_cam: FreeCam::default(),
+            free_cam_keys: HashSet::new(),
         }
     }
 
@@ -888,6 +892,48 @@ impl AppRuntime {
             }
         }
     }
+
+    pub fn render_hud(
+        engine: &GameEngine,
+        camera: &Camera,
+        free_cam_enabled: bool,
+        width: f32,
+        height: f32,
+        ui_batch: &mut UiBatch,
+    ) {
+        Self::build_hud_overlay(engine, camera, width, height, ui_batch);
+
+        if free_cam_enabled {
+            let banner_text = "[FREE CAM - F12 TO EXIT]";
+            let char_size = 14.0;
+            let banner_w = banner_text.len() as f32 * char_size + 32.0;
+            let banner_h = 28.0;
+            let banner_x = (width - banner_w) * 0.5;
+            let banner_y = 12.0;
+
+            ui_batch.draw_rect(
+                [banner_x, banner_y, banner_w, banner_h],
+                [0.1, 0.1, 0.1, 0.85],
+            );
+            ui_batch.draw_rect(
+                [
+                    banner_x + 2.0,
+                    banner_y + 2.0,
+                    banner_w - 4.0,
+                    banner_h - 4.0,
+                ],
+                [0.8, 0.2, 0.2, 0.9],
+            );
+            ui_batch.draw_text(
+                1,
+                banner_text,
+                banner_x + 16.0,
+                banner_y + 7.0,
+                char_size,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+    }
 }
 
 impl RenderAppHandler for AppRuntime {
@@ -968,7 +1014,53 @@ impl RenderAppHandler for AppRuntime {
     }
 
     fn on_key(&mut self, key_code: KeyCode, state: bool) {
+        if key_code == KeyCode::F12 && state {
+            self.free_cam.enabled = !self.free_cam.enabled;
+            if self.free_cam.enabled {
+                self.free_cam = FreeCam::from_camera(self.camera.eye, self.camera.target);
+                self.free_cam.enabled = true;
+                self.engine.input.state.reset();
+                self.free_cam_keys.clear();
+            } else {
+                self.free_cam_keys.clear();
+            }
+            return;
+        }
+
+        if self.free_cam.enabled {
+            match key_code {
+                KeyCode::KeyW
+                | KeyCode::KeyS
+                | KeyCode::KeyA
+                | KeyCode::KeyD
+                | KeyCode::KeyQ
+                | KeyCode::KeyE
+                | KeyCode::Space
+                | KeyCode::ShiftLeft
+                | KeyCode::ShiftRight
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight => {
+                    if state {
+                        self.free_cam_keys.insert(key_code);
+                    } else {
+                        self.free_cam_keys.remove(&key_code);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         self.engine.input.handle_key_code(key_code, state);
+    }
+
+    fn on_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
+        if self.free_cam.enabled {
+            let sens = self.free_cam.sensitivity;
+            self.free_cam.rotate(delta_x * sens, -delta_y * sens);
+        }
     }
 
     fn on_update(&mut self) {
@@ -1017,15 +1109,53 @@ impl RenderAppHandler for AppRuntime {
         }
 
         if let Some(r) = &mut self.renderer {
-            if let Some(hero_id) = self.engine.world.active_hero_id {
-                if let Some(hero) = self.engine.world.actors.iter().find(|a| a.id == hero_id) {
-                    self.camera.update_target_for_hero(hero.position);
+            if self.free_cam.enabled {
+                let mut move_vec = [0.0f32; 3];
+                if self.free_cam_keys.contains(&KeyCode::KeyW)
+                    || self.free_cam_keys.contains(&KeyCode::ArrowUp)
+                {
+                    move_vec[2] += 1.0;
                 }
+                if self.free_cam_keys.contains(&KeyCode::KeyS)
+                    || self.free_cam_keys.contains(&KeyCode::ArrowDown)
+                {
+                    move_vec[2] -= 1.0;
+                }
+                if self.free_cam_keys.contains(&KeyCode::KeyD)
+                    || self.free_cam_keys.contains(&KeyCode::ArrowRight)
+                {
+                    move_vec[0] += 1.0;
+                }
+                if self.free_cam_keys.contains(&KeyCode::KeyA)
+                    || self.free_cam_keys.contains(&KeyCode::ArrowLeft)
+                {
+                    move_vec[0] -= 1.0;
+                }
+                if self.free_cam_keys.contains(&KeyCode::KeyE)
+                    || self.free_cam_keys.contains(&KeyCode::Space)
+                {
+                    move_vec[1] += 1.0;
+                }
+                if self.free_cam_keys.contains(&KeyCode::KeyQ)
+                    || self.free_cam_keys.contains(&KeyCode::ShiftLeft)
+                    || self.free_cam_keys.contains(&KeyCode::ShiftRight)
+                {
+                    move_vec[1] -= 1.0;
+                }
+
+                self.free_cam.translate(move_vec, dt);
+                self.free_cam.apply_to_camera(&mut self.camera);
             } else {
-                self.camera.target_target = [0.0, 0.0, 0.0];
-                self.camera.target_eye = [0.0, 4.5, 7.5];
+                if let Some(hero_id) = self.engine.world.active_hero_id {
+                    if let Some(hero) = self.engine.world.actors.iter().find(|a| a.id == hero_id) {
+                        self.camera.update_target_for_hero(hero.position);
+                    }
+                } else {
+                    self.camera.target_target = [0.0, 0.0, 0.0];
+                    self.camera.target_eye = [0.0, 4.5, 7.5];
+                }
+                self.camera.update_interpolation(dt);
             }
-            self.camera.update_interpolation(dt);
 
             let view_proj = self.camera.build_view_projection_matrix();
             r.update_camera(view_proj);
@@ -1132,7 +1262,14 @@ impl RenderAppHandler for AppRuntime {
 
             let (screen_w, screen_h) = (r.config.width as f32, r.config.height as f32);
             let mut ui = std::mem::take(&mut self.ui_batch);
-            Self::build_hud_overlay(&self.engine, &self.camera, screen_w, screen_h, &mut ui);
+            Self::render_hud(
+                &self.engine,
+                &self.camera,
+                self.free_cam.enabled,
+                screen_w,
+                screen_h,
+                &mut ui,
+            );
 
             if let Err(e) = r.render_scene_with_ui(
                 self.skybox_mesh.as_ref(),
@@ -1795,5 +1932,83 @@ mod tests {
 
         // Verify camera smoothly repositioned towards hero
         assert!(runtime.camera.target[2] > 0.0);
+    }
+
+    #[test]
+    fn test_free_cam_toggle_and_hero_input_freeze() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        let hero_id =
+            runtime
+                .engine
+                .world
+                .spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+        assert_eq!(runtime.engine.world.active_hero_id, Some(hero_id));
+
+        // Initial free_cam state is disabled
+        assert!(!runtime.free_cam.enabled);
+
+        // Press W normally: hero receives stick input
+        runtime.on_key(KeyCode::KeyW, true);
+        assert_eq!(runtime.engine.input.state.stick, [0.0, 1.0]);
+
+        // Press F12 to enable free cam mode
+        runtime.on_key(KeyCode::F12, true);
+        assert!(runtime.free_cam.enabled);
+        // Engine input state must be reset on enable
+        assert_eq!(runtime.engine.input.state.stick, [0.0, 0.0]);
+        assert_eq!(runtime.engine.input.state.buttons, 0);
+
+        // While in free cam, WASD/Arrow/Space keys route to free_cam_keys and freeze hero input
+        runtime.on_key(KeyCode::KeyW, true);
+        runtime.on_key(KeyCode::Space, true);
+        assert!(runtime.free_cam_keys.contains(&KeyCode::KeyW));
+        assert!(runtime.free_cam_keys.contains(&KeyCode::Space));
+        // Hero input remains zero / frozen
+        assert_eq!(runtime.engine.input.state.stick, [0.0, 0.0]);
+        assert_eq!(runtime.engine.input.state.buttons, 0);
+
+        // Mouse motion rotates free_cam
+        let initial_yaw = runtime.free_cam.yaw;
+        let initial_pitch = runtime.free_cam.pitch;
+        runtime.on_mouse_motion(100.0, 50.0);
+        assert_ne!(runtime.free_cam.yaw, initial_yaw);
+        assert_ne!(runtime.free_cam.pitch, initial_pitch);
+
+        // Camera movement simulation in free cam mode
+        let prev_cam_eye = runtime.free_cam.eye;
+        let dt = 0.1;
+        let mut move_vec = [0.0f32; 3];
+        if runtime.free_cam_keys.contains(&KeyCode::KeyW) {
+            move_vec[2] += 1.0;
+        }
+        runtime.free_cam.translate(move_vec, dt);
+        runtime.free_cam.apply_to_camera(&mut runtime.camera);
+        assert_ne!(runtime.free_cam.eye, prev_cam_eye);
+        assert_eq!(runtime.camera.eye, runtime.free_cam.eye);
+
+        // HUD banner rendering check
+        let mut ui_batch = UiBatch::new();
+        AppRuntime::render_hud(
+            &runtime.engine,
+            &runtime.camera,
+            runtime.free_cam.enabled,
+            800.0,
+            600.0,
+            &mut ui_batch,
+        );
+        assert!(!ui_batch.is_empty());
+
+        // Press F12 again to disable free cam mode
+        runtime.on_key(KeyCode::F12, true);
+        assert!(!runtime.free_cam.enabled);
+        assert!(runtime.free_cam_keys.is_empty());
+
+        // Key presses now route back to hero input
+        runtime.on_key(KeyCode::KeyW, true);
+        assert_eq!(runtime.engine.input.state.stick, [0.0, 1.0]);
     }
 }
