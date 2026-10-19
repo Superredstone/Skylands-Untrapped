@@ -240,6 +240,245 @@ impl Mesh {
         Self::new("portal_pedestal", vertices, indices)
     }
 
+    pub fn prop_cube(size: f32) -> Self {
+        let half = size * 0.5;
+        let mut vertices = Vec::with_capacity(24);
+        let mut indices = Vec::with_capacity(36);
+        let color = [0.65, 0.45, 0.25, 1.0];
+
+        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            (
+                [0.0, 0.0, 1.0],
+                [
+                    [-half, -half, half],
+                    [half, -half, half],
+                    [half, half, half],
+                    [-half, half, half],
+                ],
+            ),
+            (
+                [0.0, 0.0, -1.0],
+                [
+                    [half, -half, -half],
+                    [-half, -half, -half],
+                    [-half, half, -half],
+                    [half, half, -half],
+                ],
+            ),
+            (
+                [-1.0, 0.0, 0.0],
+                [
+                    [-half, -half, -half],
+                    [-half, -half, half],
+                    [-half, half, half],
+                    [-half, half, -half],
+                ],
+            ),
+            (
+                [1.0, 0.0, 0.0],
+                [
+                    [half, -half, half],
+                    [half, -half, -half],
+                    [half, half, -half],
+                    [half, half, half],
+                ],
+            ),
+            (
+                [0.0, 1.0, 0.0],
+                [
+                    [-half, half, half],
+                    [half, half, half],
+                    [half, half, -half],
+                    [-half, half, -half],
+                ],
+            ),
+            (
+                [0.0, -1.0, 0.0],
+                [
+                    [-half, -half, -half],
+                    [half, -half, -half],
+                    [half, -half, half],
+                    [-half, -half, half],
+                ],
+            ),
+        ];
+
+        for (normal, quad) in faces {
+            let start = vertices.len() as u32;
+            let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+            for (p, uv) in quad.into_iter().zip(uvs) {
+                vertices.push(Vertex {
+                    position: p,
+                    normal,
+                    uv,
+                    color,
+                });
+            }
+            indices.push(start);
+            indices.push(start + 1);
+            indices.push(start + 2);
+            indices.push(start);
+            indices.push(start + 2);
+            indices.push(start + 3);
+        }
+
+        Self::new("prop_cube", vertices, indices)
+    }
+
+    pub fn collectible_coin(radius: f32, thickness: f32, segments: u32) -> Self {
+        let half_h = thickness * 0.5;
+        let segs = segments.max(8);
+        let gold_color = [1.0, 0.84, 0.0, 1.0];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let top_center = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: [0.0, half_h, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            color: gold_color,
+        });
+        for i in 0..segs {
+            let angle = (i as f32 / segs as f32) * std::f32::consts::TAU;
+            vertices.push(Vertex {
+                position: [angle.cos() * radius, half_h, angle.sin() * radius],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+                color: gold_color,
+            });
+        }
+        for i in 1..=segs {
+            let next = if i == segs { 1 } else { i + 1 };
+            indices.push(top_center);
+            indices.push(i);
+            indices.push(next);
+        }
+
+        let bot_center = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: [0.0, -half_h, 0.0],
+            normal: [0.0, -1.0, 0.0],
+            uv: [0.5, 0.5],
+            color: gold_color,
+        });
+        for i in 0..segs {
+            let angle = (i as f32 / segs as f32) * std::f32::consts::TAU;
+            vertices.push(Vertex {
+                position: [angle.cos() * radius, -half_h, angle.sin() * radius],
+                normal: [0.0, -1.0, 0.0],
+                uv: [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+                color: gold_color,
+            });
+        }
+        for i in 1..=segs {
+            let curr = bot_center + i;
+            let next = if i == segs {
+                bot_center + 1
+            } else {
+                bot_center + i + 1
+            };
+            indices.push(bot_center);
+            indices.push(next);
+            indices.push(curr);
+        }
+
+        for i in 0..segs {
+            let a0 = (i as f32 / segs as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+            let n0 = [a0.cos(), 0.0, a0.sin()];
+            let n1 = [a1.cos(), 0.0, a1.sin()];
+
+            let base = vertices.len() as u32;
+            vertices.push(Vertex {
+                position: [a0.cos() * radius, half_h, a0.sin() * radius],
+                normal: n0,
+                uv: [0.0, 0.0],
+                color: gold_color,
+            });
+            vertices.push(Vertex {
+                position: [a0.cos() * radius, -half_h, a0.sin() * radius],
+                normal: n0,
+                uv: [0.0, 1.0],
+                color: gold_color,
+            });
+            vertices.push(Vertex {
+                position: [a1.cos() * radius, -half_h, a1.sin() * radius],
+                normal: n1,
+                uv: [1.0, 1.0],
+                color: gold_color,
+            });
+            vertices.push(Vertex {
+                position: [a1.cos() * radius, half_h, a1.sin() * radius],
+                normal: n1,
+                uv: [1.0, 0.0],
+                color: gold_color,
+            });
+
+            indices.push(base);
+            indices.push(base + 1);
+            indices.push(base + 2);
+            indices.push(base);
+            indices.push(base + 2);
+            indices.push(base + 3);
+        }
+
+        Self::new("collectible_coin", vertices, indices)
+    }
+
+    pub fn collectible_gem(radius: f32, height: f32) -> Self {
+        let half_h = height * 0.5;
+        let segs = 6;
+        let gem_color = [0.1, 0.9, 0.8, 1.0];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let top_idx = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: [0.0, half_h, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            color: [0.3, 1.0, 0.9, 1.0],
+        });
+
+        let bot_idx = vertices.len() as u32;
+        vertices.push(Vertex {
+            position: [0.0, -half_h, 0.0],
+            normal: [0.0, -1.0, 0.0],
+            uv: [0.5, 0.5],
+            color: [0.1, 0.7, 0.6, 1.0],
+        });
+
+        let ring_start = vertices.len() as u32;
+        for i in 0..segs {
+            let angle = (i as f32 / segs as f32) * std::f32::consts::TAU;
+            vertices.push(Vertex {
+                position: [angle.cos() * radius, 0.0, angle.sin() * radius],
+                normal: [angle.cos(), 0.0, angle.sin()],
+                uv: [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+                color: gem_color,
+            });
+        }
+
+        for i in 0..segs {
+            let curr = ring_start + i;
+            let next = ring_start + ((i + 1) % segs);
+            indices.push(top_idx);
+            indices.push(curr);
+            indices.push(next);
+        }
+
+        for i in 0..segs {
+            let curr = ring_start + i;
+            let next = ring_start + ((i + 1) % segs);
+            indices.push(bot_idx);
+            indices.push(next);
+            indices.push(curr);
+        }
+
+        Self::new("collectible_gem", vertices, indices)
+    }
+
     pub fn skybox_cube(size: f32) -> Self {
         let half = size * 0.5;
         // 8 cube vertices, inward facing normals, gradient sky color

@@ -225,6 +225,43 @@ pub struct IgbMesh {
     pub material_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKind {
+    Spawn,
+    Prop,
+    Collectible,
+    Other,
+}
+
+impl MarkerKind {
+    pub fn from_node_name(name: &str) -> Option<Self> {
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("sp_") || lower.starts_with("spawn_") {
+            Some(MarkerKind::Spawn)
+        } else if lower.starts_with("prop_") {
+            Some(MarkerKind::Prop)
+        } else if lower.starts_with("pickup_")
+            || lower.starts_with("coin_")
+            || lower.starts_with("trap_")
+        {
+            Some(MarkerKind::Collectible)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelMarker {
+    pub name: String,
+    pub kind: MarkerKind,
+    pub position: [f32; 3],
+    pub world_transform: [f32; 16],
+    pub node_index: usize,
+    pub geometry_index: Option<usize>,
+    pub mesh: Option<IgbMesh>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneInstance {
     pub node_index: usize,
@@ -1080,6 +1117,91 @@ impl IgbModel {
 
         visited[node_idx] = false;
     }
+
+    pub fn extract_level_markers(&self) -> Vec<LevelMarker> {
+        if self.nodes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut child_set = std::collections::HashSet::new();
+        for node in &self.nodes {
+            for &child_idx in &node.children {
+                child_set.insert(child_idx);
+            }
+        }
+
+        let root_indices: Vec<usize> = (0..self.nodes.len())
+            .filter(|idx| !child_set.contains(idx))
+            .collect();
+
+        let mut markers = Vec::new();
+        let mut visited = vec![false; self.nodes.len()];
+
+        for root_idx in root_indices {
+            self.traverse_marker_node(root_idx, &mat4_identity(), &mut visited, &mut markers);
+        }
+
+        markers
+    }
+
+    fn traverse_marker_node(
+        &self,
+        node_idx: usize,
+        parent_transform: &[f32; 16],
+        visited: &mut [bool],
+        markers: &mut Vec<LevelMarker>,
+    ) {
+        if node_idx >= self.nodes.len() || visited[node_idx] {
+            return;
+        }
+        visited[node_idx] = true;
+
+        let node = &self.nodes[node_idx];
+        let world_transform = mat4_mul(parent_transform, &node.transform);
+
+        if let Some(kind) = MarkerKind::from_node_name(&node.name) {
+            let position = [
+                world_transform[12],
+                world_transform[13],
+                world_transform[14],
+            ];
+            let (geometry_index, mesh) = if let Some(geo_idx) = node.geometry_index {
+                let m = self.geometries.get(geo_idx).and_then(|g| g.mesh.clone());
+                (Some(geo_idx), m)
+            } else {
+                let child_geo = node.children.iter().find_map(|&c_idx| {
+                    self.nodes.get(c_idx).and_then(|c_node| {
+                        c_node.geometry_index.map(|g_idx| {
+                            (
+                                g_idx,
+                                self.geometries.get(g_idx).and_then(|g| g.mesh.clone()),
+                            )
+                        })
+                    })
+                });
+                match child_geo {
+                    Some((g_idx, m)) => (Some(g_idx), m),
+                    None => (None, None),
+                }
+            };
+
+            markers.push(LevelMarker {
+                name: node.name.clone(),
+                kind,
+                position,
+                world_transform,
+                node_index: node_idx,
+                geometry_index,
+                mesh,
+            });
+        }
+
+        for &child_idx in &node.children {
+            self.traverse_marker_node(child_idx, &world_transform, visited, markers);
+        }
+
+        visited[node_idx] = false;
+    }
 }
 
 #[cfg(test)]
@@ -1533,5 +1655,120 @@ mod tests {
         assert_eq!(instances[0].world_transform[12], 11.0);
         assert_eq!(instances[0].world_transform[13], 22.0);
         assert_eq!(instances[0].world_transform[14], 33.0);
+    }
+
+    #[test]
+    fn test_extract_level_markers() {
+        let mut root_trans = mat4_identity();
+        root_trans[12] = 10.0;
+        root_trans[13] = 0.0;
+        root_trans[14] = 5.0;
+
+        let mut spawn_trans = mat4_identity();
+        spawn_trans[12] = 2.0;
+        spawn_trans[13] = 1.0;
+        spawn_trans[14] = -1.0;
+
+        let mut prop_trans = mat4_identity();
+        prop_trans[12] = -4.0;
+        prop_trans[13] = 0.5;
+        prop_trans[14] = 2.0;
+
+        let mut pickup_trans = mat4_identity();
+        pickup_trans[12] = 0.0;
+        pickup_trans[13] = 0.2;
+        pickup_trans[14] = 3.0;
+
+        let root_node = IgbSceneNode {
+            name: "world_root".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![1, 2, 3],
+            geometry_index: None,
+            transform: root_trans,
+        };
+
+        let spawn_node = IgbSceneNode {
+            name: "sp_hero_start".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![],
+            geometry_index: None,
+            transform: spawn_trans,
+        };
+
+        let prop_node = IgbSceneNode {
+            name: "prop_wooden_barrel".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![],
+            geometry_index: Some(0),
+            transform: prop_trans,
+        };
+
+        let pickup_node = IgbSceneNode {
+            name: "pickup_gold_coin".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![],
+            geometry_index: None,
+            transform: pickup_trans,
+        };
+
+        let test_mesh = IgbMesh {
+            name: "barrel_mesh".to_string(),
+            vertices: vec![],
+            indices: vec![],
+            material_name: None,
+        };
+
+        let geo = IgbGeometryNode {
+            name: "geo_barrel".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: Some(test_mesh.clone()),
+        };
+
+        let model = IgbModel {
+            header: IgbHeader {
+                magic: *IGB_MAGIC,
+                version: 8,
+                object_count: 4,
+                string_table_offset: 0,
+                endian: IgbEndian::Little,
+            },
+            directory: vec![],
+            nodes: vec![root_node, spawn_node, prop_node, pickup_node],
+            geometries: vec![geo],
+            attr_lists: vec![],
+            vertex_buffers: vec![],
+            index_buffers: vec![],
+            materials: vec![],
+            textures: vec![],
+            meshes: vec![test_mesh],
+        };
+
+        let markers = model.extract_level_markers();
+        assert_eq!(markers.len(), 3);
+
+        let hero_marker = markers.iter().find(|m| m.name == "sp_hero_start").unwrap();
+        assert_eq!(hero_marker.kind, MarkerKind::Spawn);
+        assert_eq!(hero_marker.position, [12.0, 1.0, 4.0]);
+        assert!(hero_marker.mesh.is_none());
+
+        let prop_marker = markers
+            .iter()
+            .find(|m| m.name == "prop_wooden_barrel")
+            .unwrap();
+        assert_eq!(prop_marker.kind, MarkerKind::Prop);
+        assert_eq!(prop_marker.position, [6.0, 0.5, 7.0]);
+        assert_eq!(prop_marker.geometry_index, Some(0));
+        assert!(prop_marker.mesh.is_some());
+        assert_eq!(prop_marker.mesh.as_ref().unwrap().name, "barrel_mesh");
+
+        let coin_marker = markers
+            .iter()
+            .find(|m| m.name == "pickup_gold_coin")
+            .unwrap();
+        assert_eq!(coin_marker.kind, MarkerKind::Collectible);
+        assert_eq!(coin_marker.position, [10.0, 0.2, 8.0]);
     }
 }

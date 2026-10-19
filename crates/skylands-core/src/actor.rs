@@ -1,5 +1,19 @@
 use crate::collision::{CharacterCollider, Environment};
 use crate::input::{WiiButton, WiiInputState};
+use skylands_formats::{LevelMarker, MarkerKind};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActorKind {
+    Hero,
+    Villain,
+    Prop { destructible: bool },
+    Collectible { value: u32, collected: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldAudioCue {
+    PickupCollected,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Actor {
@@ -7,6 +21,7 @@ pub struct Actor {
     pub name: String,
     pub character_id: u16,
     pub variant: u16,
+    pub kind: ActorKind,
     pub position: [f32; 3],
     pub velocity: [f32; 3],
     pub rotation: f32,
@@ -22,6 +37,7 @@ pub struct World {
     pub actors: Vec<Actor>,
     pub active_hero_id: Option<u32>,
     pub environment: Environment,
+    pub pending_audio_cues: Vec<WorldAudioCue>,
 }
 
 impl World {
@@ -31,6 +47,7 @@ impl World {
             actors: Vec::new(),
             active_hero_id: None,
             environment: Environment::default(),
+            pending_audio_cues: Vec::new(),
         }
     }
 
@@ -48,11 +65,18 @@ impl World {
         let id = self.next_id;
         self.next_id += 1;
 
+        let kind = if is_villain {
+            ActorKind::Villain
+        } else {
+            ActorKind::Hero
+        };
+
         let actor = Actor {
             id,
             name: name.into(),
             character_id,
             variant,
+            kind,
             position,
             velocity: [0.0, 0.0, 0.0],
             rotation: 0.0,
@@ -69,6 +93,124 @@ impl World {
 
         self.actors.push(actor);
         id
+    }
+
+    pub fn spawn_prop(
+        &mut self,
+        name: impl Into<String>,
+        position: [f32; 3],
+        destructible: bool,
+        model_path: Option<String>,
+        texture_path: Option<String>,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let actor = Actor {
+            id,
+            name: name.into(),
+            character_id: 0,
+            variant: 0,
+            kind: ActorKind::Prop { destructible },
+            position,
+            velocity: [0.0, 0.0, 0.0],
+            rotation: 0.0,
+            is_villain: false,
+            active: true,
+            model_path,
+            texture_path,
+            collider: CharacterCollider {
+                radius: 0.5,
+                height: 1.0,
+                step_height: 0.0,
+                grounded: true,
+            },
+        };
+
+        self.actors.push(actor);
+        id
+    }
+
+    pub fn spawn_collectible(
+        &mut self,
+        name: impl Into<String>,
+        position: [f32; 3],
+        value: u32,
+        model_path: Option<String>,
+        texture_path: Option<String>,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let actor = Actor {
+            id,
+            name: name.into(),
+            character_id: 0,
+            variant: 0,
+            kind: ActorKind::Collectible {
+                value,
+                collected: false,
+            },
+            position,
+            velocity: [0.0, 0.0, 0.0],
+            rotation: 0.0,
+            is_villain: false,
+            active: true,
+            model_path,
+            texture_path,
+            collider: CharacterCollider {
+                radius: 0.75,
+                height: 1.0,
+                step_height: 0.0,
+                grounded: true,
+            },
+        };
+
+        self.actors.push(actor);
+        id
+    }
+
+    pub fn drain_audio_cues(&mut self) -> Vec<WorldAudioCue> {
+        std::mem::take(&mut self.pending_audio_cues)
+    }
+
+    pub fn load_level_entities(&mut self, markers: &[LevelMarker]) {
+        for marker in markers {
+            let lower = marker.name.to_ascii_lowercase();
+            if lower.starts_with("sp_hero")
+                || lower.starts_with("spawn_start")
+                || lower.starts_with("sp_start")
+            {
+                self.environment.spawn_point = marker.position;
+                if let Some(hero_id) = self.active_hero_id {
+                    if let Some(hero) = self.actors.iter_mut().find(|a| a.id == hero_id) {
+                        hero.position = marker.position;
+                    }
+                }
+            } else {
+                match marker.kind {
+                    MarkerKind::Spawn => {}
+                    MarkerKind::Prop => {
+                        let destructible = lower.contains("barrel")
+                            || lower.contains("crate")
+                            || lower.contains("destruct")
+                            || lower.contains("pot");
+                        self.spawn_prop(&marker.name, marker.position, destructible, None, None);
+                    }
+                    MarkerKind::Collectible => {
+                        let value = if lower.contains("gem") {
+                            5
+                        } else if lower.contains("trap") {
+                            10
+                        } else {
+                            1
+                        };
+                        self.spawn_collectible(&marker.name, marker.position, value, None, None);
+                    }
+                    MarkerKind::Other => {}
+                }
+            }
+        }
     }
 
     pub fn despawn(&mut self, id: u32) -> bool {
@@ -186,6 +328,34 @@ impl World {
                 }
             }
         }
+
+        // Proximity collection for active collectibles
+        let hero_pos = self
+            .active_hero_id
+            .and_then(|id| self.actors.iter().find(|a| a.id == id))
+            .map(|h| h.position);
+
+        if let Some(h_pos) = hero_pos {
+            for actor in &mut self.actors {
+                if let ActorKind::Collectible {
+                    ref mut collected, ..
+                } = actor.kind
+                {
+                    if !*collected && actor.active {
+                        let dx = actor.position[0] - h_pos[0];
+                        let dy = actor.position[1] - h_pos[1];
+                        let dz = actor.position[2] - h_pos[2];
+                        let dist_sq = dx * dx + dy * dy + dz * dz;
+                        let pickup_radius = actor.collider.radius + 0.5;
+                        if dist_sq <= pickup_radius * pickup_radius {
+                            *collected = true;
+                            actor.active = false;
+                            self.pending_audio_cues.push(WorldAudioCue::PickupCollected);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -198,6 +368,103 @@ impl Default for World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_marker_spawning_and_collectible_pickup() {
+        use skylands_formats::mat4_identity;
+
+        let mut world = World::new();
+
+        let markers = vec![
+            LevelMarker {
+                name: "sp_hero".to_string(),
+                kind: MarkerKind::Spawn,
+                position: [1.0, 0.0, 2.0],
+                world_transform: mat4_identity(),
+                node_index: 0,
+                geometry_index: None,
+                mesh: None,
+            },
+            LevelMarker {
+                name: "prop_crate_destructible".to_string(),
+                kind: MarkerKind::Prop,
+                position: [5.0, 0.0, 5.0],
+                world_transform: mat4_identity(),
+                node_index: 1,
+                geometry_index: None,
+                mesh: None,
+            },
+            LevelMarker {
+                name: "pickup_gem_rare".to_string(),
+                kind: MarkerKind::Collectible,
+                position: [2.0, 0.0, 2.0],
+                world_transform: mat4_identity(),
+                node_index: 2,
+                geometry_index: None,
+                mesh: None,
+            },
+        ];
+
+        // 1. Load entities from markers
+        world.load_level_entities(&markers);
+        assert_eq!(world.environment.spawn_point, [1.0, 0.0, 2.0]);
+        assert_eq!(world.actors.len(), 2);
+
+        let prop = world
+            .actors
+            .iter()
+            .find(|a| a.name == "prop_crate_destructible")
+            .unwrap();
+        assert_eq!(prop.kind, ActorKind::Prop { destructible: true });
+        assert_eq!(prop.position, [5.0, 0.0, 5.0]);
+
+        let gem = world
+            .actors
+            .iter()
+            .find(|a| a.name == "pickup_gem_rare")
+            .unwrap();
+        assert_eq!(
+            gem.kind,
+            ActorKind::Collectible {
+                value: 5,
+                collected: false
+            }
+        );
+        assert!(gem.active);
+
+        // 2. Spawn hero at spawn point
+        let hero_id = world.spawn(
+            400,
+            0,
+            "Snap Shot",
+            world.environment.spawn_point,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(world.active_hero_id, Some(hero_id));
+
+        // 3. Update world: hero at [1, 0, 2], gem at [2, 0, 2] (distance 1.0 < pickup radius 1.25)
+        let input = WiiInputState::new();
+        world.update(0.016, &input);
+
+        let cues = world.drain_audio_cues();
+        assert_eq!(cues, vec![WorldAudioCue::PickupCollected]);
+
+        let gem_after = world
+            .actors
+            .iter()
+            .find(|a| a.name == "pickup_gem_rare")
+            .unwrap();
+        assert_eq!(
+            gem_after.kind,
+            ActorKind::Collectible {
+                value: 5,
+                collected: true
+            }
+        );
+        assert!(!gem_after.active);
+    }
 
     #[test]
     fn test_actor_spawn_move() {

@@ -6,7 +6,7 @@ pub mod portal_gameplay;
 pub mod state;
 pub mod tick;
 
-pub use actor::{Actor, World};
+pub use actor::{Actor, ActorKind, World, WorldAudioCue};
 pub use audio::{AudioEngine, PortalSpeakerSink, SystemAudioSink};
 pub use collision::{Aabb, CharacterCollider, CollisionMesh, Environment, Triangle};
 pub use input::{InputMapper, WiiButton, WiiInputState};

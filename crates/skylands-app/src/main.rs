@@ -1,8 +1,8 @@
 use clap::Parser;
 use log::{info, warn};
 use skylands_core::{
-    get_character_voice_path, AudioEngine, CollisionMesh, FixedTimestep, GameState,
-    GameStateMachine, InputMapper, PortalGameplay, World,
+    get_character_voice_path, ActorKind, AudioEngine, CollisionMesh, FixedTimestep, GameState,
+    GameStateMachine, InputMapper, PortalGameplay, World, WorldAudioCue,
 };
 use skylands_extractor::Extractor;
 use skylands_formats::{decode_cmpr, AssetLoader};
@@ -160,6 +160,11 @@ impl GameEngine {
 
         // 3. Update world actors with 60Hz input
         self.world.update(self.timestep.dt(), self.input.state());
+        for cue in self.world.drain_audio_cues() {
+            match cue {
+                WorldAudioCue::PickupCollected => self.audio.on_pickup_collected(),
+            }
+        }
 
         // 4. Update state machine
         self.state.tick(self.timestep.dt());
@@ -196,8 +201,9 @@ impl GameEngine {
             if self.assets.has_file(cand) {
                 if let Ok(models) = self.assets.load_level_models(cand) {
                     let mut combined_mesh = CollisionMesh::from_triangles(Vec::new());
-                    for model in models {
-                        let sub = CollisionMesh::from_igb(&model);
+                    let mut markers = Vec::new();
+                    for model in &models {
+                        let sub = CollisionMesh::from_igb(model);
                         combined_mesh = CollisionMesh::from_triangles(
                             combined_mesh
                                 .triangles
@@ -205,6 +211,10 @@ impl GameEngine {
                                 .chain(sub.triangles)
                                 .collect(),
                         );
+                        markers.extend(model.extract_level_markers());
+                    }
+                    if !markers.is_empty() {
+                        self.world.load_level_entities(&markers);
                     }
                     if !combined_mesh.triangles.is_empty() {
                         self.world.environment.mesh = combined_mesh;
@@ -225,12 +235,16 @@ pub struct AppRuntime {
     pub pedestal_mesh: Option<GpuMesh>,
     pub actor_mesh: Option<GpuMesh>,
     pub skybox_mesh: Option<GpuMesh>,
+    pub prop_mesh: Option<GpuMesh>,
+    pub coin_mesh: Option<GpuMesh>,
+    pub gem_mesh: Option<GpuMesh>,
     pub actor_texture: Option<GpuTexture>,
     pub dynamic_textures: HashMap<String, GpuTexture>,
     pub dynamic_meshes: HashMap<String, GpuMesh>,
     pub dynamic_models: HashMap<String, ModelInstance>,
     pub environment: Option<EnvironmentScene>,
     pub last_active_hero_id: Option<u32>,
+    pub anim_time: f32,
 }
 
 impl AppRuntime {
@@ -243,12 +257,16 @@ impl AppRuntime {
             pedestal_mesh: None,
             actor_mesh: None,
             skybox_mesh: None,
+            prop_mesh: None,
+            coin_mesh: None,
+            gem_mesh: None,
             actor_texture: None,
             dynamic_textures: HashMap::new(),
             dynamic_meshes: HashMap::new(),
             dynamic_models: HashMap::new(),
             environment: None,
             last_active_hero_id: None,
+            anim_time: 0.0,
         }
     }
 
@@ -413,6 +431,7 @@ impl AppRuntime {
         if !resolved_models.is_empty() {
             let mut combined_collision = CollisionMesh::from_triangles(Vec::new());
             let mut submesh_defs = Vec::new();
+            let mut markers = Vec::new();
 
             for igb in &resolved_models {
                 let sub_col = CollisionMesh::from_igb(igb);
@@ -423,6 +442,7 @@ impl AppRuntime {
                         .chain(sub_col.triangles)
                         .collect(),
                 );
+                markers.extend(igb.extract_level_markers());
 
                 let instances = igb.evaluate_scene_graph();
                 for (geo_idx, geo) in igb.geometries.iter().enumerate() {
@@ -457,6 +477,42 @@ impl AppRuntime {
                             .and_then(|mat_name| self.resolve_material_texture(mat_name));
                         submesh_defs.push((mesh, tex, vec![InstanceRaw::default()]));
                     }
+                }
+            }
+
+            if !markers.is_empty() {
+                self.engine.world.load_level_entities(&markers);
+
+                if let Some(renderer) = &self.renderer {
+                    for m in &markers {
+                        if let Some(ref igb_mesh) = m.mesh {
+                            let key = m.name.to_ascii_lowercase();
+                            if !self.dynamic_meshes.contains_key(&key) {
+                                let render_mesh = Mesh::from_igb(igb_mesh);
+                                let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &render_mesh);
+                                self.dynamic_meshes.insert(key.clone(), gpu_mesh);
+                            }
+                            for actor in &mut self.engine.world.actors {
+                                if actor.name == m.name && actor.model_path.is_none() {
+                                    actor.model_path = Some(key.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(spawn) = markers.iter().find(|m| {
+                    let l = m.name.to_ascii_lowercase();
+                    l.starts_with("sp_hero")
+                        || l.starts_with("spawn_start")
+                        || l.starts_with("sp_start")
+                }) {
+                    self.camera.target = spawn.position;
+                    self.camera.eye = [
+                        spawn.position[0],
+                        spawn.position[1] + 4.5,
+                        spawn.position[2] + 7.5,
+                    ];
                 }
             }
 
@@ -496,10 +552,16 @@ impl RenderAppHandler for AppRuntime {
                 let pedestal = Mesh::portal_pedestal(1.5, 0.2, 32);
                 let hero_quad = Mesh::unit_quad();
                 let skybox = Mesh::skybox_cube(80.0);
+                let prop_cube = Mesh::prop_cube(0.8);
+                let coin = Mesh::collectible_coin(0.35, 0.08, 16);
+                let gem = Mesh::collectible_gem(0.3, 0.6);
 
                 let gpu_pedestal = GpuMesh::from_mesh(&renderer.device, &pedestal);
                 let gpu_hero = GpuMesh::from_mesh(&renderer.device, &hero_quad);
                 let gpu_skybox = GpuMesh::from_mesh(&renderer.device, &skybox);
+                let gpu_prop = GpuMesh::from_mesh(&renderer.device, &prop_cube);
+                let gpu_coin = GpuMesh::from_mesh(&renderer.device, &coin);
+                let gpu_gem = GpuMesh::from_mesh(&renderer.device, &gem);
 
                 // Decode 8x8 CMPR demo texture (cyan / orange blocks)
                 let mut cmpr_data = vec![0u8; 32];
@@ -531,6 +593,9 @@ impl RenderAppHandler for AppRuntime {
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
                 self.skybox_mesh = Some(gpu_skybox);
+                self.prop_mesh = Some(gpu_prop);
+                self.coin_mesh = Some(gpu_coin);
+                self.gem_mesh = Some(gpu_gem);
                 self.renderer = Some(renderer);
 
                 self.load_environment("levels/hub.igb");
@@ -565,6 +630,8 @@ impl RenderAppHandler for AppRuntime {
     }
 
     fn on_render(&mut self) {
+        self.anim_time += 1.0 / 60.0;
+
         if self.engine.world.active_hero_id != self.last_active_hero_id {
             self.last_active_hero_id = self.engine.world.active_hero_id;
             let active_keys: std::collections::HashSet<String> = self
@@ -586,13 +653,11 @@ impl RenderAppHandler for AppRuntime {
             .world
             .actors
             .iter()
-            .map(|a| {
-                (
-                    a.model_path
-                        .clone()
-                        .unwrap_or_else(|| "models/hero.igb".into()),
-                    a.texture_path.clone(),
-                )
+            .filter(|a| a.active)
+            .filter_map(|a| {
+                a.model_path
+                    .as_ref()
+                    .map(|p| (p.clone(), a.texture_path.clone()))
             })
             .collect();
 
@@ -654,13 +719,25 @@ impl RenderAppHandler for AppRuntime {
                 .actors
                 .iter()
                 .map(|a| {
+                    let (pos, rot) = match a.kind {
+                        ActorKind::Collectible { .. } => {
+                            let bob_y = (self.anim_time * 4.0).sin() * 0.08;
+                            let p = [a.position[0], a.position[1] + bob_y, a.position[2]];
+                            let r = self.anim_time * 3.0;
+                            (p, r)
+                        }
+                        _ => (a.position, a.rotation),
+                    };
                     [InstanceRaw {
-                        model: mat4::transform(a.position, a.rotation, [1.0, 1.0, 1.0]),
+                        model: mat4::transform(pos, rot, [1.0, 1.0, 1.0]),
                     }]
                 })
                 .collect();
 
             for (idx, actor) in self.engine.world.actors.iter().enumerate() {
+                if !actor.active {
+                    continue;
+                }
                 let inst_slice = actor_instances[idx].as_slice();
                 let model_path = actor.model_path.as_deref().unwrap_or("models/hero.igb");
                 let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
@@ -681,9 +758,21 @@ impl RenderAppHandler for AppRuntime {
                     continue;
                 }
 
-                // Fallback to single mesh
+                // Fallback to mesh
                 let dynamic_mesh = self.dynamic_meshes.get(&model_key);
-                let actor_mesh = dynamic_mesh.or(self.actor_mesh.as_ref());
+                let fallback_mesh = match actor.kind {
+                    ActorKind::Prop { .. } => self.prop_mesh.as_ref().or(self.actor_mesh.as_ref()),
+                    ActorKind::Collectible { .. } => {
+                        let lower = actor.name.to_ascii_lowercase();
+                        if lower.contains("gem") {
+                            self.gem_mesh.as_ref().or(self.coin_mesh.as_ref())
+                        } else {
+                            self.coin_mesh.as_ref().or(self.gem_mesh.as_ref())
+                        }
+                    }
+                    _ => self.actor_mesh.as_ref(),
+                };
+                let actor_mesh = dynamic_mesh.or(fallback_mesh);
                 let tex = actor
                     .texture_path
                     .as_ref()
@@ -1020,5 +1109,116 @@ mod tests {
             "Hero cannot penetrate north wall boundary: z={}",
             hero.position[2]
         );
+    }
+
+    #[test]
+    fn test_headless_entity_counts_and_pickup_interactions() {
+        use skylands_formats::{mat4_identity, LevelMarker, MarkerKind};
+
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let mut engine = GameEngine::new(portal, assets);
+
+        let markers = vec![
+            LevelMarker {
+                name: "sp_hero".to_string(),
+                kind: MarkerKind::Spawn,
+                position: [0.0, 0.0, 0.0],
+                world_transform: mat4_identity(),
+                node_index: 0,
+                geometry_index: None,
+                mesh: None,
+            },
+            LevelMarker {
+                name: "prop_wooden_barrel".to_string(),
+                kind: MarkerKind::Prop,
+                position: [5.0, 0.0, 0.0],
+                world_transform: mat4_identity(),
+                node_index: 1,
+                geometry_index: None,
+                mesh: None,
+            },
+            LevelMarker {
+                name: "pickup_coin_gold".to_string(),
+                kind: MarkerKind::Collectible,
+                position: [0.0, 0.0, -2.0],
+                world_transform: mat4_identity(),
+                node_index: 2,
+                geometry_index: None,
+                mesh: None,
+            },
+            LevelMarker {
+                name: "pickup_gem_emerald".to_string(),
+                kind: MarkerKind::Collectible,
+                position: [0.0, 0.0, -10.0],
+                world_transform: mat4_identity(),
+                node_index: 3,
+                geometry_index: None,
+                mesh: None,
+            },
+        ];
+
+        // 1. Populate world with level entities
+        engine.world.load_level_entities(&markers);
+        assert_eq!(engine.world.environment.spawn_point, [0.0, 0.0, 0.0]);
+        assert_eq!(engine.world.actors.len(), 3);
+
+        // 2. Spawn hero
+        let hero_id = engine.world.spawn(
+            400,
+            0,
+            "Snap Shot",
+            engine.world.environment.spawn_point,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(engine.world.actors.len(), 4);
+        assert_eq!(engine.world.active_hero_id, Some(hero_id));
+
+        // 3. Move hero north towards coin at z = -2.0
+        engine.input.state.set_stick(0.0, 1.0); // -Z movement, speed 5.0
+        for _ in 0..30 {
+            engine.tick();
+        }
+
+        // 4. Verify coin was collected and gem is still active
+        let coin = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.name == "pickup_coin_gold")
+            .unwrap();
+        assert_eq!(
+            coin.kind,
+            ActorKind::Collectible {
+                value: 1,
+                collected: true
+            }
+        );
+        assert!(!coin.active);
+
+        let gem = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.name == "pickup_gem_emerald")
+            .unwrap();
+        assert_eq!(
+            gem.kind,
+            ActorKind::Collectible {
+                value: 5,
+                collected: false
+            }
+        );
+        assert!(gem.active);
+
+        let prop = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.name == "prop_wooden_barrel")
+            .unwrap();
+        assert!(prop.active);
     }
 }

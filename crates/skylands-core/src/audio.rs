@@ -203,6 +203,10 @@ impl AudioEngine {
     pub fn on_hero_summoned(&mut self) {
         self.system.play_sfx_tone(880.0, 0.2);
     }
+
+    pub fn on_pickup_collected(&mut self) {
+        self.system.play_sfx_tone(1320.0, 0.12);
+    }
 }
 
 impl Default for AudioEngine {
