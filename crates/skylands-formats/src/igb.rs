@@ -225,6 +225,32 @@ pub struct IgbMesh {
     pub material_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneInstance {
+    pub node_index: usize,
+    pub geometry_index: usize,
+    pub world_transform: [f32; 16],
+}
+
+pub fn mat4_identity() -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = a[row] * b[col * 4]
+                + a[4 + row] * b[col * 4 + 1]
+                + a[8 + row] * b[col * 4 + 2]
+                + a[12 + row] * b[col * 4 + 3];
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct IgbModel {
     pub header: IgbHeader,
@@ -989,6 +1015,71 @@ impl IgbModel {
             material_name: None,
         })
     }
+
+    pub fn evaluate_scene_graph(&self) -> Vec<SceneInstance> {
+        if self.nodes.is_empty() {
+            return self
+                .geometries
+                .iter()
+                .enumerate()
+                .map(|(geo_idx, _)| SceneInstance {
+                    node_index: 0,
+                    geometry_index: geo_idx,
+                    world_transform: mat4_identity(),
+                })
+                .collect();
+        }
+
+        let mut child_set = std::collections::HashSet::new();
+        for node in &self.nodes {
+            for &child_idx in &node.children {
+                child_set.insert(child_idx);
+            }
+        }
+
+        let root_indices: Vec<usize> = (0..self.nodes.len())
+            .filter(|idx| !child_set.contains(idx))
+            .collect();
+
+        let mut instances = Vec::new();
+        let mut visited = vec![false; self.nodes.len()];
+
+        for root_idx in root_indices {
+            self.traverse_scene_node(root_idx, &mat4_identity(), &mut visited, &mut instances);
+        }
+
+        instances
+    }
+
+    fn traverse_scene_node(
+        &self,
+        node_idx: usize,
+        parent_transform: &[f32; 16],
+        visited: &mut [bool],
+        instances: &mut Vec<SceneInstance>,
+    ) {
+        if node_idx >= self.nodes.len() || visited[node_idx] {
+            return;
+        }
+        visited[node_idx] = true;
+
+        let node = &self.nodes[node_idx];
+        let world_transform = mat4_mul(parent_transform, &node.transform);
+
+        if let Some(geo_idx) = node.geometry_index {
+            instances.push(SceneInstance {
+                node_index: node_idx,
+                geometry_index: geo_idx,
+                world_transform,
+            });
+        }
+
+        for &child_idx in &node.children {
+            self.traverse_scene_node(child_idx, &world_transform, visited, instances);
+        }
+
+        visited[node_idx] = false;
+    }
 }
 
 #[cfg(test)]
@@ -1375,5 +1466,72 @@ mod tests {
             model.materials[1].texture_name,
             Some("textures/weapon.png".into())
         );
+    }
+
+    #[test]
+    fn test_evaluate_scene_graph_hierarchy() {
+        let mut parent_trans = mat4_identity();
+        parent_trans[12] = 10.0;
+        parent_trans[13] = 20.0;
+        parent_trans[14] = 30.0;
+
+        let mut child_trans = mat4_identity();
+        child_trans[12] = 1.0;
+        child_trans[13] = 2.0;
+        child_trans[14] = 3.0;
+
+        let parent_node = IgbSceneNode {
+            name: "parent".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![1],
+            geometry_index: None,
+            transform: parent_trans,
+        };
+
+        let child_node = IgbSceneNode {
+            name: "child".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![],
+            geometry_index: Some(0),
+            transform: child_trans,
+        };
+
+        let geo = IgbGeometryNode {
+            name: "geo_child".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: None,
+        };
+
+        let model = IgbModel {
+            header: IgbHeader {
+                magic: *IGB_MAGIC,
+                version: 8,
+                object_count: 2,
+                string_table_offset: 0,
+                endian: IgbEndian::Little,
+            },
+            directory: vec![],
+            nodes: vec![parent_node, child_node],
+            geometries: vec![geo],
+            attr_lists: vec![],
+            vertex_buffers: vec![],
+            index_buffers: vec![],
+            materials: vec![],
+            textures: vec![],
+            meshes: vec![],
+        };
+
+        let instances = model.evaluate_scene_graph();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].node_index, 1);
+        assert_eq!(instances[0].geometry_index, 0);
+
+        // child world translation = parent_trans + child_trans
+        assert_eq!(instances[0].world_transform[12], 11.0);
+        assert_eq!(instances[0].world_transform[13], 22.0);
+        assert_eq!(instances[0].world_transform[14], 33.0);
     }
 }

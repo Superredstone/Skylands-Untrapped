@@ -8,8 +8,8 @@ use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    mat4, Camera, GpuMesh, GpuTexture, InstanceRaw, Mesh, ModelInstance, RenderAppHandler,
-    Renderer, WindowApp, WindowConfig,
+    mat4, Camera, EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuTexture, InstanceRaw, Mesh,
+    ModelInstance, RenderAppHandler, Renderer, WindowApp, WindowConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -173,6 +173,7 @@ pub struct AppRuntime {
     pub dynamic_textures: HashMap<String, GpuTexture>,
     pub dynamic_meshes: HashMap<String, GpuMesh>,
     pub dynamic_models: HashMap<String, ModelInstance>,
+    pub environment: Option<EnvironmentScene>,
     pub last_active_hero_id: Option<u32>,
 }
 
@@ -189,6 +190,7 @@ impl AppRuntime {
             dynamic_textures: HashMap::new(),
             dynamic_meshes: HashMap::new(),
             dynamic_models: HashMap::new(),
+            environment: None,
             last_active_hero_id: None,
         }
     }
@@ -326,6 +328,75 @@ impl AppRuntime {
         }
         self.dynamic_textures.get(&key)
     }
+
+    pub fn load_environment(&mut self, path: &str) -> Option<&EnvironmentScene> {
+        self.renderer.as_ref()?;
+        let candidates = [
+            path.to_string(),
+            format!("{}.igb", path),
+            "levels/hub.igb".to_string(),
+            "maps/courtyard.igb".to_string(),
+            "level_hub_2014_01.bld".to_string(),
+        ];
+
+        let mut resolved_igb = None;
+        let mut loaded_name = path.to_string();
+        for cand in &candidates {
+            if self.assets.has_file(cand) {
+                if let Ok(igb) = self.assets.load_igb(cand) {
+                    resolved_igb = Some(igb);
+                    loaded_name = cand.clone();
+                    break;
+                }
+            }
+        }
+
+        if let Some(igb) = resolved_igb {
+            let instances = igb.evaluate_scene_graph();
+            let mut submesh_defs = Vec::new();
+
+            for (geo_idx, geo) in igb.geometries.iter().enumerate() {
+                if let Some(mesh) = Mesh::from_geometry(geo) {
+                    let tex = mesh
+                        .material_name
+                        .as_deref()
+                        .and_then(|mat_name| self.resolve_material_texture(mat_name));
+
+                    let matching_instances: Vec<InstanceRaw> = instances
+                        .iter()
+                        .filter(|inst| inst.geometry_index == geo_idx)
+                        .map(|inst| InstanceRaw::from_flat_slice(&inst.world_transform))
+                        .collect();
+
+                    let inst_list = if matching_instances.is_empty() {
+                        vec![InstanceRaw::default()]
+                    } else {
+                        matching_instances
+                    };
+
+                    submesh_defs.push((mesh, tex, inst_list));
+                }
+            }
+
+            let renderer = self.renderer.as_ref()?;
+            let mut submeshes = Vec::with_capacity(submesh_defs.len());
+            for (mesh, tex, inst_list) in submesh_defs {
+                let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
+                submeshes.push(EnvironmentSubmesh {
+                    mesh: gpu_mesh,
+                    texture: tex,
+                    instances: inst_list,
+                });
+            }
+
+            self.environment = Some(EnvironmentScene::new(loaded_name, submeshes));
+        } else {
+            let renderer = self.renderer.as_ref()?;
+            self.environment = Some(EnvironmentScene::synthetic_courtyard(&renderer.device));
+        }
+
+        self.environment.as_ref()
+    }
 }
 
 impl RenderAppHandler for AppRuntime {
@@ -369,6 +440,8 @@ impl RenderAppHandler for AppRuntime {
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
                 self.renderer = Some(renderer);
+
+                self.load_environment("levels/hub.igb");
 
                 // Dynamically resolve meshes from VFS if available
                 if self.assets.has_file("models/hero.igb") {
@@ -466,6 +539,17 @@ impl RenderAppHandler for AppRuntime {
             };
 
             let mut to_render = Vec::new();
+
+            if let Some(env) = &self.environment {
+                for submesh in &env.submeshes {
+                    to_render.push((
+                        &submesh.mesh,
+                        submesh.texture.as_ref(),
+                        submesh.instances.as_slice(),
+                    ));
+                }
+            }
+
             let pedestal_instances = [InstanceRaw::default()];
             if let Some(pedestal) = &self.pedestal_mesh {
                 to_render.push((pedestal, None, pedestal_instances.as_slice()));
@@ -757,5 +841,37 @@ mod tests {
         assert_eq!(engine.world.actors.len(), 1);
         assert!(engine.world.find_by_character_id(400).is_none());
         assert!(engine.world.find_by_character_id(1010).is_some());
+    }
+
+    #[test]
+    fn test_load_environment_fallback_and_render_population() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        // Without renderer, load_environment returns None
+        assert!(runtime.load_environment("levels/hub.igb").is_none());
+
+        if let Ok(renderer) = Renderer::new_headless(640, 480) {
+            runtime.renderer = Some(renderer);
+            let env = runtime
+                .load_environment("levels/hub.igb")
+                .expect("Loads fallback synthetic courtyard");
+            assert_eq!(env.name, "synthetic_courtyard");
+            assert_eq!(env.submeshes.len(), 2);
+
+            let mut to_render = Vec::new();
+            if let Some(env) = &runtime.environment {
+                for submesh in &env.submeshes {
+                    to_render.push((
+                        &submesh.mesh,
+                        submesh.texture.as_ref(),
+                        submesh.instances.as_slice(),
+                    ));
+                }
+            }
+            assert_eq!(to_render.len(), 2);
+        }
     }
 }

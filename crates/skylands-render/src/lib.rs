@@ -6,7 +6,9 @@ pub mod texture;
 pub mod window;
 
 pub use camera::{mat4, Camera};
-pub use mesh::{GpuMesh, InstanceRaw, Mesh, ModelInstance, Vertex};
+pub use mesh::{
+    EnvironmentScene, EnvironmentSubmesh, GpuMesh, InstanceRaw, Mesh, ModelInstance, Vertex,
+};
 pub use pipeline::{create_render_pipeline, CameraUniform};
 pub use renderer::Renderer;
 pub use texture::{GpuTexture, TextureRenderError};

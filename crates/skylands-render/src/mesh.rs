@@ -23,6 +23,17 @@ impl Default for InstanceRaw {
 }
 
 impl InstanceRaw {
+    pub fn from_flat_slice(m: &[f32; 16]) -> Self {
+        Self {
+            model: [
+                [m[0], m[1], m[2], m[3]],
+                [m[4], m[5], m[6], m[7]],
+                [m[8], m[9], m[10], m[11]],
+                [m[12], m[13], m[14], m[15]],
+            ],
+        }
+    }
+
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
@@ -278,6 +289,141 @@ impl ModelInstance {
     }
 }
 
+pub struct EnvironmentSubmesh {
+    pub mesh: GpuMesh,
+    pub texture: Option<GpuTexture>,
+    pub instances: Vec<InstanceRaw>,
+}
+
+pub struct EnvironmentScene {
+    pub name: String,
+    pub submeshes: Vec<EnvironmentSubmesh>,
+}
+
+impl EnvironmentScene {
+    pub fn new(name: impl Into<String>, submeshes: Vec<EnvironmentSubmesh>) -> Self {
+        Self {
+            name: name.into(),
+            submeshes,
+        }
+    }
+
+    pub fn synthetic_courtyard_meshes() -> (Mesh, Mesh) {
+        // Ground plane: 40x40 cobblestone courtyard quad at y = 0.0
+        let ground = Mesh::new(
+            "courtyard_ground",
+            vec![
+                Vertex {
+                    position: [-20.0, 0.0, -20.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                    color: [0.45, 0.45, 0.45, 1.0],
+                },
+                Vertex {
+                    position: [20.0, 0.0, -20.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [8.0, 0.0],
+                    color: [0.5, 0.5, 0.5, 1.0],
+                },
+                Vertex {
+                    position: [20.0, 0.0, 20.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [8.0, 8.0],
+                    color: [0.4, 0.4, 0.4, 1.0],
+                },
+                Vertex {
+                    position: [-20.0, 0.0, 20.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 8.0],
+                    color: [0.42, 0.42, 0.42, 1.0],
+                },
+            ],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+        .with_material("mat_courtyard_stone");
+
+        // Boundary walls: 4 surrounding stone wall segments
+        let mut wall_verts = Vec::new();
+        let mut wall_indices = Vec::new();
+        let wall_height = 3.0;
+
+        let wall_segments = [
+            // North wall
+            ([-20.0, 0.0, -20.0], [20.0, 0.0, -20.0], [0.0, 0.0, 1.0]),
+            // South wall
+            ([20.0, 0.0, 20.0], [-20.0, 0.0, 20.0], [0.0, 0.0, -1.0]),
+            // East wall
+            ([20.0, 0.0, -20.0], [20.0, 0.0, 20.0], [-1.0, 0.0, 0.0]),
+            // West wall
+            ([-20.0, 0.0, 20.0], [-20.0, 0.0, -20.0], [1.0, 0.0, 0.0]),
+        ];
+
+        for (p0, p1, normal) in wall_segments {
+            let base_idx = wall_verts.len() as u32;
+            wall_verts.push(Vertex {
+                position: p0,
+                normal,
+                uv: [0.0, 0.0],
+                color: [0.35, 0.35, 0.38, 1.0],
+            });
+            wall_verts.push(Vertex {
+                position: p1,
+                normal,
+                uv: [4.0, 0.0],
+                color: [0.35, 0.35, 0.38, 1.0],
+            });
+            wall_verts.push(Vertex {
+                position: [p1[0], wall_height, p1[2]],
+                normal,
+                uv: [4.0, 1.0],
+                color: [0.3, 0.3, 0.32, 1.0],
+            });
+            wall_verts.push(Vertex {
+                position: [p0[0], wall_height, p0[2]],
+                normal,
+                uv: [0.0, 1.0],
+                color: [0.3, 0.3, 0.32, 1.0],
+            });
+
+            wall_indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 3,
+            ]);
+        }
+
+        let walls = Mesh::new("courtyard_walls", wall_verts, wall_indices)
+            .with_material("mat_courtyard_walls");
+
+        (ground, walls)
+    }
+
+    pub fn synthetic_courtyard(device: &wgpu::Device) -> Self {
+        let (ground_mesh, walls_mesh) = Self::synthetic_courtyard_meshes();
+        let gpu_ground = GpuMesh::from_mesh(device, &ground_mesh);
+        let gpu_walls = GpuMesh::from_mesh(device, &walls_mesh);
+
+        Self {
+            name: "synthetic_courtyard".to_string(),
+            submeshes: vec![
+                EnvironmentSubmesh {
+                    mesh: gpu_ground,
+                    texture: None,
+                    instances: vec![InstanceRaw::default()],
+                },
+                EnvironmentSubmesh {
+                    mesh: gpu_walls,
+                    texture: None,
+                    instances: vec![InstanceRaw::default()],
+                },
+            ],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +478,25 @@ mod tests {
         let pedestal = Mesh::portal_pedestal(1.0, 0.2, 16);
         assert!(!pedestal.vertices.is_empty());
         assert!(!pedestal.indices.is_empty());
+    }
+
+    #[test]
+    fn test_synthetic_courtyard_mesh_generation() {
+        let (ground, walls) = EnvironmentScene::synthetic_courtyard_meshes();
+        assert_eq!(ground.vertices.len(), 4);
+        assert_eq!(ground.indices.len(), 6);
+        assert_eq!(
+            ground.material_name,
+            Some("mat_courtyard_stone".to_string())
+        );
+
+        assert_eq!(walls.vertices.len(), 16); // 4 walls * 4 verts
+        assert_eq!(walls.indices.len(), 24); // 4 walls * 6 indices
+        assert_eq!(walls.material_name, Some("mat_courtyard_walls".to_string()));
+
+        let inst = InstanceRaw::from_flat_slice(&[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 6.0, 7.0, 1.0,
+        ]);
+        assert_eq!(inst.model[3], [5.0, 6.0, 7.0, 1.0]);
     }
 }

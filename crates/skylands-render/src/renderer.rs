@@ -151,6 +151,117 @@ impl Renderer {
         })
     }
 
+    pub fn new_headless(width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok_or("Failed to find suitable GPU adapter")?;
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("Skylands Headless Render Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+            },
+            None,
+        ))?;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        let camera_uniform = CameraUniform::default();
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Camera Bind Group Layout"),
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("Camera Bind Group"),
+        });
+
+        let default_instance = InstanceRaw::default();
+        let default_instance_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Default Identity Instance Buffer"),
+                contents: bytemuck::cast_slice(&[default_instance]),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let texture_bind_group_layout = GpuTexture::bind_group_layout(&device);
+        let fallback_texture = GpuTexture::create_fallback(&device, &queue);
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Skylands Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let render_pipeline = create_render_pipeline(
+            &device,
+            &pipeline_layout,
+            config.format,
+            Some(Self::DEPTH_FORMAT),
+        );
+
+        let (depth_texture, depth_view) = Self::create_depth_texture(&device, width, height);
+
+        Ok(Self {
+            surface: None,
+            device,
+            queue,
+            config,
+            size: (width, height),
+            render_pipeline,
+            camera_buffer,
+            camera_bind_group,
+            default_instance_buffer,
+            texture_bind_group_layout,
+            fallback_texture,
+            depth_texture,
+            depth_view,
+        })
+    }
+
     pub fn create_depth_texture(
         device: &wgpu::Device,
         width: u32,
