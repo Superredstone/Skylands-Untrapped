@@ -14,8 +14,8 @@ pub use audio::{AudioEngine, PortalSpeakerSink, SystemAudioSink};
 pub use collision::{Aabb, CharacterCollider, CollisionMesh, Environment, Triangle};
 pub use input::{InputMapper, WiiButton, WiiInputState};
 pub use portal_gameplay::{
-    get_character_asset_paths, get_character_info, get_character_voice_path, Element,
-    PortalGameplay,
+    get_character_asset_paths, get_character_info, get_character_voice_path,
+    resolve_character_model_archive, Element, PortalGameplay,
 };
 pub use state::{GameState, GameStateMachine};
 pub use tick::{FixedTimestep, TICK_DURATION, TICK_RATE_HZ};

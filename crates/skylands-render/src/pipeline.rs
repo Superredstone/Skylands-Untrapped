@@ -1,4 +1,4 @@
-use crate::mesh::{InstanceRaw, Vertex};
+use crate::mesh::{InstanceRaw, SkinnedVertex, Vertex};
 use bytemuck::{Pod, Zeroable};
 
 pub const SHADER_SRC: &str = r#"
@@ -184,11 +184,36 @@ fn vs_skinned(model: SkinnedVertexInput, instance: InstanceInput) -> VertexOutpu
     return out;
 }
 
+@group(2) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(2) @binding(1)
+var s_diffuse: sampler;
+
 @fragment
 fn fs_skinned(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
+    return in.color * tex_color;
 }
 "#;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct BoneUniform {
+    pub matrices: [[[f32; 4]; 4]; 64],
+}
+
+impl Default for BoneUniform {
+    fn default() -> Self {
+        Self {
+            matrices: [[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]; 64],
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -349,6 +374,72 @@ pub fn create_skybox_pipeline(
     })
 }
 
+pub fn create_skinned_render_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    bone_layout: &wgpu::BindGroupLayout,
+    texture_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Skinned Render Pipeline Layout"),
+        bind_group_layouts: &[camera_layout, bone_layout, texture_layout],
+        push_constant_ranges: &[],
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Skinned Mesh Shader"),
+        source: wgpu::ShaderSource::Wgsl(SKINNING_SHADER_SRC.into()),
+    });
+
+    let depth_stencil = depth_format.map(|df| wgpu::DepthStencilState {
+        format: df,
+        depth_write_enabled: true,
+        depth_compare: wgpu::CompareFunction::Less,
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Skinned Render Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_skinned"),
+            buffers: &[SkinnedVertex::desc(), InstanceRaw::desc_skinned()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_skinned"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +451,15 @@ mod tests {
         let light = LightUniform::default();
         assert_eq!(light.intensity, 1.0);
         assert_eq!(light.ambient_intensity, 0.6);
+    }
+
+    #[test]
+    fn test_bone_uniform_size_and_alignment() {
+        assert_eq!(std::mem::size_of::<BoneUniform>(), 4096);
+        assert_eq!(std::mem::align_of::<BoneUniform>(), 4);
+        let bones = BoneUniform::default();
+        assert_eq!(bones.matrices[0][0][0], 1.0);
+        assert_eq!(bones.matrices[63][3][3], 1.0);
     }
 
     #[test]

@@ -116,6 +116,31 @@ pub struct Triangle {
 }
 
 impl Triangle {
+    pub fn is_valid(&self) -> bool {
+        self.v0[0].is_finite()
+            && self.v0[1].is_finite()
+            && self.v0[2].is_finite()
+            && self.v1[0].is_finite()
+            && self.v1[1].is_finite()
+            && self.v1[2].is_finite()
+            && self.v2[0].is_finite()
+            && self.v2[1].is_finite()
+            && self.v2[2].is_finite()
+            && (self.normal[0] != 0.0 || self.normal[1] != 0.0 || self.normal[2] != 0.0)
+            && self.normal[0].is_finite()
+            && self.normal[1].is_finite()
+            && self.normal[2].is_finite()
+            && self.v0[0].abs() < 10000.0
+            && self.v0[1].abs() < 10000.0
+            && self.v0[2].abs() < 10000.0
+            && self.v1[0].abs() < 10000.0
+            && self.v1[1].abs() < 10000.0
+            && self.v1[2].abs() < 10000.0
+            && self.v2[0].abs() < 10000.0
+            && self.v2[1].abs() < 10000.0
+            && self.v2[2].abs() < 10000.0
+    }
+
     pub fn new(v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) -> Self {
         let edge1 = vec3_sub(v1, v0);
         let edge2 = vec3_sub(v2, v0);
@@ -306,7 +331,10 @@ impl CollisionMesh {
                 } else {
                     (vertices[i0], vertices[i1], vertices[i2])
                 };
-                triangles.push(Triangle::new(v0, v1, v2));
+                let tri = Triangle::new(v0, v1, v2);
+                if tri.is_valid() {
+                    triangles.push(tri);
+                }
             }
         }
         Self::from_triangles(triangles)

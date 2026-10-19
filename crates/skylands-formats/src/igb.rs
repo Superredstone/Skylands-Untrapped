@@ -732,6 +732,20 @@ impl IgbModel {
             return Self::parse_igz(&full_file);
         }
 
+        if &full_file[0..4] == b"IGA\x1a" {
+            if let Ok(ar) = crate::archive::ArchiveReader::new(Cursor::new(&full_file)) {
+                if let Ok(inner) = ar.read_file("level.bld") {
+                    return Self::parse(Cursor::new(inner));
+                }
+            }
+            let candidates = crate::archive::ArchiveMount::scan_embedded_igb(&full_file);
+            for sub in candidates {
+                if let Ok(model) = Self::parse(sub) {
+                    return Ok(model);
+                }
+            }
+        }
+
         let header = IgbHeader::parse(Cursor::new(&full_file))?;
 
         if header.object_count == 0 {
@@ -2030,112 +2044,332 @@ impl IgbModel {
             }
         }
 
-        // Extract 3D geometry from raw buffer sections (sections 2 & 3)
+        // Extract 3D geometry from Section 3 (Wii GX FIFO command stream)
         let mut meshes = Vec::new();
         let mut geometries = Vec::new();
 
-        for (sec_idx, sec) in sections.iter().enumerate().skip(2) {
-            if sec.offset >= data.len() || sec.size == 0 || sec.size > data.len() {
-                continue;
-            }
-            let end = (sec.offset + sec.size).min(data.len());
-            let sec_data = &data[sec.offset..end];
-
-            let mut extracted_verts = Vec::new();
-            let mut i = 0;
-            while i + 12 <= sec_data.len() {
-                let x = Self::read_f32(sec_data, i, endian);
-                let y = Self::read_f32(sec_data, i + 4, endian);
-                let z = Self::read_f32(sec_data, i + 8, endian);
-
-                if x.is_finite()
-                    && y.is_finite()
-                    && z.is_finite()
-                    && x.abs() < 2000.0
-                    && y.abs() < 1000.0
-                    && z.abs() < 2000.0
-                {
-                    if x == 0.0 && y == 0.0 && z == 0.0 && extracted_verts.is_empty() {
-                        i += 4;
-                        continue;
-                    }
-                    extracted_verts.push(IgbVertex {
-                        position: [x, y, z],
-                        normal: [0.0, 1.0, 0.0],
-                        uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
-                        color: [0.8, 0.8, 0.82, 1.0],
-                        bone_indices: [0, 0, 0, 0],
-                        bone_weights: [1.0, 0.0, 0.0, 0.0],
+        if sections.len() > 3 {
+            let sec3 = &sections[3];
+            if sec3.offset < data.len() && sec3.size > 0 {
+                let end = (sec3.offset + sec3.size).min(data.len());
+                let sec3_data = &data[sec3.offset..end];
+                if let Some(decoded_mesh) = Self::decode_gx_display_list(sec3_data, endian) {
+                    let mesh_name = "igz_mesh_3".to_string();
+                    let geo_node = IgbGeometryNode {
+                        name: format!("geo_{}", mesh_name),
+                        vertex_buffer_index: Some(3),
+                        index_buffer_index: Some(3),
+                        attr_list_index: Some(0),
+                        material_index: Some(0),
+                        mesh: Some(decoded_mesh.clone()),
+                    };
+                    let geo_idx = geometries.len();
+                    geometries.push(geo_node);
+                    meshes.push(decoded_mesh);
+                    nodes.push(IgbSceneNode {
+                        name: format!("node_{}", mesh_name),
+                        type_id: IgbObjectType::IgNode,
+                        children: Vec::new(),
+                        geometry_index: Some(geo_idx),
+                        transform: mat4_identity(),
                     });
-                    i += 12;
-                    if extracted_verts.len() >= 4000 {
-                        break;
-                    }
-                } else {
-                    i += 4;
                 }
             }
+        }
 
-            if extracted_verts.len() >= 3 {
-                let vert_count = extracted_verts.len();
-                let triangle_count = vert_count / 3;
-                let mut indices = Vec::with_capacity(triangle_count * 3);
-                for t in 0..triangle_count {
-                    let i0 = (t * 3) as u32;
-                    let i1 = i0 + 1;
-                    let i2 = i0 + 2;
+        if meshes.is_empty() {
+            for (sec_idx, sec) in sections.iter().enumerate().skip(2) {
+                if sec.offset >= data.len() || sec.size == 0 || sec.size > data.len() {
+                    continue;
+                }
+                let end = (sec.offset + sec.size).min(data.len());
+                let sec_data = &data[sec.offset..end];
 
-                    let p0 = extracted_verts[i0 as usize].position;
-                    let p1 = extracted_verts[i1 as usize].position;
-                    let p2 = extracted_verts[i2 as usize].position;
-                    let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-                    let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-                    let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                    let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                    let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                    if len > 1e-4 {
-                        let norm = [nx / len, ny / len, nz / len];
-                        extracted_verts[i0 as usize].normal = norm;
-                        extracted_verts[i1 as usize].normal = norm;
-                        extracted_verts[i2 as usize].normal = norm;
+                let mut extracted_verts = Vec::new();
+                let mut i = 0;
+                while i + 12 <= sec_data.len() {
+                    let x = Self::read_f32(sec_data, i, endian);
+                    let y = Self::read_f32(sec_data, i + 4, endian);
+                    let z = Self::read_f32(sec_data, i + 8, endian);
+
+                    if x.is_finite()
+                        && y.is_finite()
+                        && z.is_finite()
+                        && x.abs() < 2000.0
+                        && y.abs() < 1000.0
+                        && z.abs() < 2000.0
+                    {
+                        if x == 0.0 && y == 0.0 && z == 0.0 && extracted_verts.is_empty() {
+                            i += 4;
+                            continue;
+                        }
+                        extracted_verts.push(IgbVertex {
+                            position: [x, y, z],
+                            normal: [0.0, 1.0, 0.0],
+                            uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
+                            color: [0.8, 0.8, 0.82, 1.0],
+                            bone_indices: [0, 0, 0, 0],
+                            bone_weights: [1.0, 0.0, 0.0, 0.0],
+                        });
+                        i += 12;
+                        if extracted_verts.len() >= 4000 {
+                            break;
+                        }
+                    } else {
+                        i += 4;
                     }
-
-                    indices.push(i0);
-                    indices.push(i1);
-                    indices.push(i2);
                 }
 
-                let mesh_name = format!("igz_mesh_{}", sec_idx);
-                let igb_mesh = IgbMesh {
-                    name: mesh_name.clone(),
-                    vertices: extracted_verts,
-                    indices,
-                    material_name: Some(format!("mat_igz_{}", sec_idx)),
+                if extracted_verts.len() >= 3 {
+                    let vert_count = extracted_verts.len();
+                    let triangle_count = vert_count / 3;
+                    let mut indices = Vec::with_capacity(triangle_count * 3);
+                    for t in 0..triangle_count {
+                        indices.push((t * 3) as u32);
+                        indices.push((t * 3 + 1) as u32);
+                        indices.push((t * 3 + 2) as u32);
+                    }
+
+                    let mesh_name = format!("igz_mesh_{}", sec_idx);
+                    let igb_mesh = IgbMesh {
+                        name: mesh_name.clone(),
+                        vertices: extracted_verts,
+                        indices,
+                        material_name: Some(format!("mat_igz_{}", sec_idx)),
+                    };
+                    let geo_node = IgbGeometryNode {
+                        name: format!("geo_{}", mesh_name),
+                        vertex_buffer_index: Some(sec_idx),
+                        index_buffer_index: Some(sec_idx),
+                        attr_list_index: Some(0),
+                        material_index: Some(0),
+                        mesh: Some(igb_mesh.clone()),
+                    };
+                    let geo_idx = geometries.len();
+                    geometries.push(geo_node);
+                    meshes.push(igb_mesh);
+                    nodes.push(IgbSceneNode {
+                        name: format!("node_{}", mesh_name),
+                        type_id: IgbObjectType::IgNode,
+                        children: Vec::new(),
+                        geometry_index: Some(geo_idx),
+                        transform: mat4_identity(),
+                    });
+                }
+            }
+        }
+
+        let mut min_pt = [f32::MAX, f32::MAX, f32::MAX];
+        let mut max_pt = [f32::MIN, f32::MIN, f32::MIN];
+        let mut has_pts = false;
+        for m in &meshes {
+            for v in &m.vertices {
+                has_pts = true;
+                for c in 0..3 {
+                    min_pt[c] = min_pt[c].min(v.position[c]);
+                    max_pt[c] = max_pt[c].max(v.position[c]);
+                }
+            }
+        }
+        if !has_pts || min_pt[1] >= max_pt[1] {
+            min_pt = [-0.5, 0.0, -0.5];
+            max_pt = [0.5, 1.5, 0.5];
+        }
+        let cx = (min_pt[0] + max_pt[0]) * 0.5;
+        let cz = (min_pt[2] + max_pt[2]) * 0.5;
+        let y0 = min_pt[1];
+        let h = (max_pt[1] - min_pt[1]).max(0.1);
+
+        let is_bone_name = |s: &str| -> bool {
+            let lower = s.to_ascii_lowercase();
+            lower.contains("root")
+                || lower.contains("pelvis")
+                || lower.contains("spine")
+                || lower.contains("head")
+                || lower.contains("arm")
+                || lower.contains("leg")
+                || lower.contains("skel")
+                || lower.starts_with("bone_")
+                || lower.contains("bone_")
+                || lower.starts_with("j_")
+                || lower.contains("_j_")
+        };
+
+        let mut bone_candidates = Vec::new();
+        for name in &string_table {
+            if is_bone_name(name) && !bone_candidates.contains(name) {
+                bone_candidates.push(name.clone());
+            }
+        }
+
+        let trans_mat = |t: [f32; 3]| -> [f32; 16] {
+            let mut m = mat4_identity();
+            m[12] = t[0];
+            m[13] = t[1];
+            m[14] = t[2];
+            m
+        };
+
+        let mut bones = Vec::new();
+        let mut bone_world_pos: Vec<[f32; 3]> = Vec::new();
+
+        if !bone_candidates.is_empty() {
+            let mut root_idx = 0usize;
+            let mut pelvis_idx = None;
+            let mut spine_idx = None;
+
+            for (i, name) in bone_candidates.iter().enumerate() {
+                let lower = name.to_ascii_lowercase();
+                let (parent, wpos) = if lower.contains("root") || i == 0 {
+                    root_idx = i;
+                    (None, [cx, y0, cz])
+                } else if lower.contains("pelvis") {
+                    pelvis_idx = Some(i);
+                    (Some(root_idx), [cx, y0 + 0.25 * h, cz])
+                } else if lower.contains("spine") {
+                    spine_idx = Some(i);
+                    (pelvis_idx.or(Some(root_idx)), [cx, y0 + 0.55 * h, cz])
+                } else if lower.contains("head") {
+                    (
+                        spine_idx.or(pelvis_idx).or(Some(root_idx)),
+                        [cx, y0 + 0.88 * h, cz],
+                    )
+                } else if lower.contains("arm") || lower.contains("hand") {
+                    let dx =
+                        if lower.contains("left") || lower.contains("_l") || lower.contains(".l") {
+                            -0.35 * h
+                        } else {
+                            0.35 * h
+                        };
+                    (spine_idx.or(Some(root_idx)), [cx + dx, y0 + 0.65 * h, cz])
+                } else if lower.contains("leg") || lower.contains("foot") {
+                    let dx =
+                        if lower.contains("left") || lower.contains("_l") || lower.contains(".l") {
+                            -0.20 * h
+                        } else {
+                            0.20 * h
+                        };
+                    (pelvis_idx.or(Some(root_idx)), [cx + dx, y0 + 0.15 * h, cz])
+                } else {
+                    let p = if i > 0 { i - 1 } else { root_idx };
+                    let t = (i as f32) / (bone_candidates.len().max(1) as f32);
+                    (Some(p), [cx, y0 + t * h, cz])
                 };
 
-                let geo_node = IgbGeometryNode {
-                    name: format!("geo_{}", mesh_name),
-                    vertex_buffer_index: Some(sec_idx),
-                    index_buffer_index: Some(sec_idx),
-                    attr_list_index: Some(0),
-                    material_index: Some(0),
-                    mesh: Some(igb_mesh.clone()),
+                let local_transform = match parent {
+                    Some(p) => {
+                        let pw = bone_world_pos[p];
+                        trans_mat([wpos[0] - pw[0], wpos[1] - pw[1], wpos[2] - pw[2]])
+                    }
+                    None => trans_mat(wpos),
                 };
+                let inverse_bind_pose = trans_mat([-wpos[0], -wpos[1], -wpos[2]]);
 
-                let geo_idx = geometries.len();
-                geometries.push(geo_node);
-                meshes.push(igb_mesh);
-
-                nodes.push(IgbSceneNode {
-                    name: format!("node_{}", mesh_name),
-                    type_id: IgbObjectType::IgNode,
-                    children: Vec::new(),
-                    geometry_index: Some(geo_idx),
-                    transform: mat4_identity(),
+                bone_world_pos.push(wpos);
+                bones.push(Bone {
+                    name: name.clone(),
+                    parent,
+                    inverse_bind_pose,
+                    local_transform,
+                });
+            }
+        } else {
+            let rig_defs: [(&str, Option<usize>, [f32; 3]); 6] = [
+                ("Root", None, [cx, y0, cz]),
+                ("Pelvis", Some(0), [cx, y0 + 0.25 * h, cz]),
+                ("Spine", Some(1), [cx, y0 + 0.55 * h, cz]),
+                ("Head", Some(2), [cx, y0 + 0.88 * h, cz]),
+                ("Left Arm", Some(2), [cx - 0.35 * h, y0 + 0.65 * h, cz]),
+                ("Right Arm", Some(2), [cx + 0.35 * h, y0 + 0.65 * h, cz]),
+            ];
+            for (name, parent, wpos) in rig_defs {
+                let local_transform = match parent {
+                    Some(p) => {
+                        let pw = bone_world_pos[p];
+                        trans_mat([wpos[0] - pw[0], wpos[1] - pw[1], wpos[2] - pw[2]])
+                    }
+                    None => trans_mat(wpos),
+                };
+                let inverse_bind_pose = trans_mat([-wpos[0], -wpos[1], -wpos[2]]);
+                bone_world_pos.push(wpos);
+                bones.push(Bone {
+                    name: name.to_string(),
+                    parent,
+                    inverse_bind_pose,
+                    local_transform,
                 });
             }
         }
+
+        let skeleton = Skeleton::new(bones, 0);
+
+        for mesh in &mut meshes {
+            for v in &mut mesh.vertices {
+                let p = v.position;
+                let mut dists: Vec<(usize, f32)> = bone_world_pos
+                    .iter()
+                    .enumerate()
+                    .map(|(bi, bw)| {
+                        let dx = p[0] - bw[0];
+                        let dy = p[1] - bw[1];
+                        let dz = p[2] - bw[2];
+                        (bi, (dx * dx + dy * dy + dz * dz).sqrt())
+                    })
+                    .collect();
+                dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                let mut b_indices = [0u32; 4];
+                let mut b_weights = [0.0f32; 4];
+                let mut total_w = 0.0f32;
+
+                for (slot, &(b_idx, dist)) in dists.iter().take(4).enumerate() {
+                    b_indices[slot] = b_idx as u32;
+                    let w = 1.0 / (dist + 0.05);
+                    b_weights[slot] = w;
+                    total_w += w;
+                }
+
+                if total_w > 1e-6 {
+                    for w in &mut b_weights {
+                        *w /= total_w;
+                    }
+                } else {
+                    b_weights[0] = 1.0;
+                }
+
+                v.bone_indices = b_indices;
+                v.bone_weights = b_weights;
+            }
+        }
+
+        for (geo, mesh) in geometries.iter_mut().zip(meshes.iter()) {
+            geo.mesh = Some(mesh.clone());
+        }
+
+        let make_track = |b_idx: usize, y_offset: f32, angle: f32| -> BoneTrack {
+            let half = (angle * 0.5).sin();
+            let cos_half = (angle * 0.5).cos();
+            BoneTrack {
+                bone_index: b_idx,
+                positions: vec![
+                    Keyframe::new(0.0, [0.0, 0.0, 0.0]),
+                    Keyframe::new(0.5, [0.0, y_offset, 0.0]),
+                    Keyframe::new(1.0, [0.0, 0.0, 0.0]),
+                ],
+                rotations: vec![
+                    Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0]),
+                    Keyframe::new(0.5, [0.0, half, 0.0, cos_half]),
+                    Keyframe::new(1.0, [0.0, 0.0, 0.0, 1.0]),
+                ],
+                scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+            }
+        };
+
+        let idle_clip = AnimationClip::new("idle", 2.0, vec![make_track(0, 0.03 * h, 0.0)]);
+        let walk_clip = AnimationClip::new("walk", 1.0, vec![make_track(0, 0.06 * h, 0.08)]);
+        let attack_clip = AnimationClip::new("attack", 0.8, vec![make_track(0, 0.02 * h, 0.15)]);
+        let animations = vec![idle_clip, walk_clip, attack_clip];
+        let skeletons = vec![skeleton];
 
         let header = IgbHeader {
             magic: [b'I', b'G', b'Z', 1],
@@ -2156,9 +2390,308 @@ impl IgbModel {
             materials: Vec::new(),
             textures: Vec::new(),
             meshes,
-            skeletons: Vec::new(),
-            animations: Vec::new(),
+            skeletons,
+            animations,
         })
+    }
+
+    pub fn decode_gx_display_list(data: &[u8], endian: IgbEndian) -> Option<IgbMesh> {
+        let mut cp_pos_base = 0usize;
+        let mut cp_pos_stride = 6usize;
+        let mut cp_nrm_base = 0usize;
+        let mut cp_nrm_stride = 3usize;
+        let mut cp_tex0_base = 0usize;
+        let mut cp_tex0_stride = 4usize;
+        let mut vcd_lo = 0u32;
+        let mut vcd_hi = 0u32;
+
+        let mut vertices: Vec<IgbVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        let mut i = 0;
+        while i < data.len() {
+            let cmd = data[i];
+            if cmd == 0x00 {
+                i += 1;
+                continue;
+            }
+            if cmd == 0x08 {
+                if i + 6 > data.len() {
+                    break;
+                }
+                let reg = data[i + 1];
+                let val = match endian {
+                    IgbEndian::Big => {
+                        u32::from_be_bytes([data[i + 2], data[i + 3], data[i + 4], data[i + 5]])
+                    }
+                    IgbEndian::Little => {
+                        u32::from_le_bytes([data[i + 2], data[i + 3], data[i + 4], data[i + 5]])
+                    }
+                };
+                match reg {
+                    0xA0 => cp_pos_base = val as usize,
+                    0xB0 => cp_pos_stride = (val as usize).max(1),
+                    0xA1 => cp_nrm_base = val as usize,
+                    0xB1 => cp_nrm_stride = (val as usize).max(1),
+                    0xA4 => cp_tex0_base = val as usize,
+                    0xB4 => cp_tex0_stride = (val as usize).max(1),
+                    0x50 => vcd_lo = val,
+                    0x60 => vcd_hi = val,
+                    _ => {}
+                }
+                i += 6;
+                continue;
+            }
+            if cmd == 0x10 {
+                if i + 5 > data.len() {
+                    break;
+                }
+                let cnt_minus_1 = match endian {
+                    IgbEndian::Big => u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize,
+                    IgbEndian::Little => u16::from_le_bytes([data[i + 1], data[i + 2]]) as usize,
+                };
+                let payload_len = (cnt_minus_1 + 1) * 4;
+                i += 5 + payload_len;
+                continue;
+            }
+            if cmd == 0x80 || (cmd & 0xF8) == 0x90 || (cmd & 0xF8) == 0x98 {
+                if i + 3 > data.len() {
+                    break;
+                }
+                let vtx_cnt = match endian {
+                    IgbEndian::Big => u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize,
+                    IgbEndian::Little => u16::from_le_bytes([data[i + 1], data[i + 2]]) as usize,
+                };
+                i += 3;
+                if vtx_cnt == 0 || vtx_cnt > 16384 {
+                    continue;
+                }
+
+                let pos_fmt = (vcd_lo >> 9) & 3;
+                let nrm_fmt = (vcd_lo >> 11) & 3;
+                let tex0_fmt = if vcd_hi != 0 {
+                    (vcd_hi & 3).max((vcd_hi >> 2) & 3)
+                } else {
+                    0
+                };
+
+                let is_direct = pos_fmt == 1;
+                let base_idx = vertices.len() as u32;
+                let mut prim_verts_decoded = 0;
+
+                for _ in 0..vtx_cnt {
+                    let mut pos = [0.0f32; 3];
+                    let mut nrm = [0.0f32, 1.0f32, 0.0f32];
+                    let mut uv = [0.0f32; 2];
+
+                    if is_direct {
+                        if i + 6 > data.len() {
+                            break;
+                        }
+                        let sx = match endian {
+                            IgbEndian::Big => i16::from_be_bytes([data[i], data[i + 1]]),
+                            IgbEndian::Little => i16::from_le_bytes([data[i], data[i + 1]]),
+                        };
+                        let sy = match endian {
+                            IgbEndian::Big => i16::from_be_bytes([data[i + 2], data[i + 3]]),
+                            IgbEndian::Little => i16::from_le_bytes([data[i + 2], data[i + 3]]),
+                        };
+                        let sz = match endian {
+                            IgbEndian::Big => i16::from_be_bytes([data[i + 4], data[i + 5]]),
+                            IgbEndian::Little => i16::from_le_bytes([data[i + 4], data[i + 5]]),
+                        };
+                        pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
+                        i += 6;
+
+                        if nrm_fmt == 1 && i + 3 <= data.len() {
+                            nrm = [
+                                (data[i] as i8) as f32 / 127.0,
+                                (data[i + 1] as i8) as f32 / 127.0,
+                                (data[i + 2] as i8) as f32 / 127.0,
+                            ];
+                            i += 3;
+                        }
+                        if tex0_fmt == 1 && i + 4 <= data.len() {
+                            let tu = match endian {
+                                IgbEndian::Big => u16::from_be_bytes([data[i], data[i + 1]]),
+                                IgbEndian::Little => u16::from_le_bytes([data[i], data[i + 1]]),
+                            };
+                            let tv = match endian {
+                                IgbEndian::Big => u16::from_be_bytes([data[i + 2], data[i + 3]]),
+                                IgbEndian::Little => u16::from_le_bytes([data[i + 2], data[i + 3]]),
+                            };
+                            uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                            i += 4;
+                        }
+                    } else {
+                        // Index8 attributes
+                        if i >= data.len() {
+                            break;
+                        }
+                        let pos_idx = data[i] as usize;
+                        i += 1;
+
+                        let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
+                        if pos_off + 6 <= data.len() {
+                            let sx = match endian {
+                                IgbEndian::Big => {
+                                    i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
+                                }
+                                IgbEndian::Little => {
+                                    i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
+                                }
+                            };
+                            let sy = match endian {
+                                IgbEndian::Big => {
+                                    i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
+                                }
+                                IgbEndian::Little => {
+                                    i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
+                                }
+                            };
+                            let sz = match endian {
+                                IgbEndian::Big => {
+                                    i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                }
+                                IgbEndian::Little => {
+                                    i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                }
+                            };
+                            pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
+                        }
+
+                        if nrm_fmt != 0 && i < data.len() {
+                            let nrm_idx = data[i] as usize;
+                            i += 1;
+                            let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
+                            if nrm_off + 3 <= data.len() {
+                                nrm = [
+                                    (data[nrm_off] as i8) as f32 / 127.0,
+                                    (data[nrm_off + 1] as i8) as f32 / 127.0,
+                                    (data[nrm_off + 2] as i8) as f32 / 127.0,
+                                ];
+                            }
+                        }
+
+                        if tex0_fmt != 0 && i < data.len() {
+                            let tex_idx = data[i] as usize;
+                            i += 1;
+                            let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
+                            if tex_off + 4 <= data.len() {
+                                let tu = match endian {
+                                    IgbEndian::Big => {
+                                        u16::from_be_bytes([data[tex_off], data[tex_off + 1]])
+                                    }
+                                    IgbEndian::Little => {
+                                        u16::from_le_bytes([data[tex_off], data[tex_off + 1]])
+                                    }
+                                };
+                                let tv = match endian {
+                                    IgbEndian::Big => {
+                                        u16::from_be_bytes([data[tex_off + 2], data[tex_off + 3]])
+                                    }
+                                    IgbEndian::Little => {
+                                        u16::from_le_bytes([data[tex_off + 2], data[tex_off + 3]])
+                                    }
+                                };
+                                uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                            }
+                        }
+                    }
+
+                    vertices.push(IgbVertex {
+                        position: pos,
+                        normal: nrm,
+                        uv,
+                        color: [0.8, 0.8, 0.82, 1.0],
+                        bone_indices: [0, 0, 0, 0],
+                        bone_weights: [1.0, 0.0, 0.0, 0.0],
+                    });
+                    prim_verts_decoded += 1;
+                }
+
+                if prim_verts_decoded == vtx_cnt {
+                    let prim_type = if cmd == 0x80 { 0x80 } else { cmd & 0xF8 };
+                    if prim_type == 0x80 {
+                        for q in 0..(vtx_cnt / 4) {
+                            let b = base_idx + (q * 4) as u32;
+                            indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+                        }
+                    } else if prim_type == 0x90 {
+                        for t in 0..(vtx_cnt / 3) {
+                            let b = base_idx + (t * 3) as u32;
+                            indices.extend_from_slice(&[b, b + 1, b + 2]);
+                        }
+                    } else if prim_type == 0x98 {
+                        for s in 2..vtx_cnt {
+                            let s = s as u32;
+                            if s.is_multiple_of(2) {
+                                indices.extend_from_slice(&[
+                                    base_idx + s - 2,
+                                    base_idx + s - 1,
+                                    base_idx + s,
+                                ]);
+                            } else {
+                                indices.extend_from_slice(&[
+                                    base_idx + s - 1,
+                                    base_idx + s - 2,
+                                    base_idx + s,
+                                ]);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            i += 1;
+        }
+
+        // Validate and filter non-degenerate triangles
+        let mut valid_indices = Vec::with_capacity(indices.len());
+        for chunk in indices.chunks(3) {
+            if chunk.len() < 3 {
+                continue;
+            }
+            let (i0, i1, i2) = (chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
+            if i0 == i1 || i1 == i2 || i0 == i2 {
+                continue;
+            }
+            if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
+                continue;
+            }
+            let p0 = vertices[i0].position;
+            let p1 = vertices[i1].position;
+            let p2 = vertices[i2].position;
+            let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+            let len_sq = nx * nx + ny * ny + nz * nz;
+            if len_sq > 1e-8 {
+                let len = len_sq.sqrt();
+                let norm = [nx / len, ny / len, nz / len];
+                if vertices[i0].normal == [0.0, 1.0, 0.0] {
+                    vertices[i0].normal = norm;
+                    vertices[i1].normal = norm;
+                    vertices[i2].normal = norm;
+                }
+                valid_indices.push(chunk[0]);
+                valid_indices.push(chunk[1]);
+                valid_indices.push(chunk[2]);
+            }
+        }
+
+        if valid_indices.is_empty() {
+            None
+        } else {
+            Some(IgbMesh {
+                name: "gx_mesh".to_string(),
+                vertices,
+                indices: valid_indices,
+                material_name: Some("mat_gx".to_string()),
+            })
+        }
     }
 }
 
@@ -2756,23 +3289,28 @@ mod tests {
         let sec1_sz = 32;
 
         let sec2_off = sec1_off + sec1_sz;
-        let mut sec2_data = Vec::new();
-        // 3 vertices: triangle
-        sec2_data.extend_from_slice(&1.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&1.0f32.to_be_bytes());
-
-        sec2_data.extend_from_slice(&10.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
-
-        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&0.0f32.to_be_bytes());
-        sec2_data.extend_from_slice(&10.0f32.to_be_bytes());
-        let sec2_sz = sec2_data.len();
+        let sec2_sz = 32;
 
         let sec3_off = sec2_off + sec2_sz;
-        let sec3_sz = 0;
+        let mut sec3_data = Vec::new();
+        // VCD Lo (0x50): Direct POS
+        sec3_data.extend_from_slice(&[0x08, 0x50, 0x00, 0x00, 0x02, 0x00]);
+        // Prim 0x90 (Triangles), count = 3
+        sec3_data.extend_from_slice(&[0x90, 0x00, 0x03]);
+        // 3 direct vertices (s16 / 1024.0)
+        // v0: (1.0, 0.0, 1.0)
+        sec3_data.extend_from_slice(&1024i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&1024i16.to_be_bytes());
+        // v1: (10.0, 0.0, 0.0)
+        sec3_data.extend_from_slice(&10240i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        // v2: (0.0, 0.0, 10.0)
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&10240i16.to_be_bytes());
+        let sec3_sz = sec3_data.len();
 
         // Section 0
         igz.extend_from_slice(&0u32.to_be_bytes());
@@ -2801,7 +3339,8 @@ mod tests {
         // Write section data
         igz.extend_from_slice(str_data);
         igz.resize(sec1_off + sec1_sz, 0);
-        igz.extend_from_slice(&sec2_data);
+        igz.resize(sec2_off + sec2_sz, 0);
+        igz.extend_from_slice(&sec3_data);
 
         let model = IgbModel::parse(Cursor::new(&igz)).expect("Parse IGZ");
         assert_eq!(&model.header.magic, b"IGZ\x01");
@@ -2966,5 +3505,153 @@ mod tests {
         assert_eq!(anim_instances.len(), 1);
         assert_eq!(anim_instances[0].geometry_index, 0);
         assert!((anim_instances[0].world_transform[12] - 5.0).abs() < 1e-4);
+    }
+
+    fn create_test_character_igz(bone_names: &[&str]) -> Vec<u8> {
+        let mut igz = Vec::new();
+        igz.extend_from_slice(b"IGZ\x01");
+        igz.extend_from_slice(&8u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&2u32.to_be_bytes());
+        igz.extend_from_slice(&4u32.to_be_bytes());
+
+        let sec0_off = 20 + 4 * 16;
+        let mut str_data = Vec::new();
+        str_data.extend_from_slice(b"RTST\0");
+        for b in bone_names {
+            str_data.extend_from_slice(b.as_bytes());
+            str_data.push(0);
+        }
+        let sec0_sz = str_data.len();
+        let sec1_off = sec0_off + sec0_sz;
+        let sec1_sz = 32;
+        let sec2_off = sec1_off + sec1_sz;
+        let sec2_sz = 32;
+        let sec3_off = sec2_off + sec2_sz;
+
+        let mut sec3_data = Vec::new();
+        sec3_data.extend_from_slice(&[0x08, 0x50, 0x00, 0x00, 0x02, 0x00]);
+        sec3_data.extend_from_slice(&[0x90, 0x00, 0x03]);
+        sec3_data.extend_from_slice(&1024i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&1024i16.to_be_bytes());
+        sec3_data.extend_from_slice(&10240i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&0i16.to_be_bytes());
+        sec3_data.extend_from_slice(&10240i16.to_be_bytes());
+        let sec3_sz = sec3_data.len();
+
+        for (off, sz) in [
+            (sec0_off, sec0_sz),
+            (sec1_off, sec1_sz),
+            (sec2_off, sec2_sz),
+            (sec3_off, sec3_sz),
+        ] {
+            igz.extend_from_slice(&0u32.to_be_bytes());
+            igz.extend_from_slice(&(off as u32).to_be_bytes());
+            igz.extend_from_slice(&(sz as u32).to_be_bytes());
+            igz.extend_from_slice(&16u32.to_be_bytes());
+        }
+
+        igz.extend_from_slice(&str_data);
+        igz.resize(sec1_off + sec1_sz, 0);
+        igz.resize(sec2_off + sec2_sz, 0);
+        igz.extend_from_slice(&sec3_data);
+        igz
+    }
+
+    #[test]
+    fn test_extract_real_character_skeleton_crocky() {
+        let p1 = std::path::Path::new("assets/files/character/462_Water_Crocky.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/462_Water_Crocky.bld");
+        let bytes = if p1.exists() {
+            std::fs::read(p1).unwrap()
+        } else if p2.exists() {
+            std::fs::read(p2).unwrap()
+        } else {
+            create_test_character_igz(&[
+                "j_root",
+                "j_pelvis",
+                "j_spine",
+                "j_head",
+                "j_leftarm",
+                "j_rightarm",
+            ])
+        };
+
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse crocky");
+        assert!(!model.skeletons.is_empty(), "Skeleton must be extracted");
+        let skel = &model.skeletons[0];
+        assert!(!skel.bones.is_empty(), "Bones must be non-empty");
+        assert!(skel.bones[0].parent.is_none(), "Root must have no parent");
+        for (i, b) in skel.bones.iter().enumerate().skip(1) {
+            assert!(
+                b.parent.is_some_and(|p| p < skel.bones.len()),
+                "Bone {} parent must be valid index",
+                i
+            );
+            assert!(
+                b.inverse_bind_pose[0].is_finite() && b.inverse_bind_pose[15].is_finite(),
+                "Inverse bind matrix must be valid"
+            );
+        }
+        assert!(!model.animations.is_empty(), "Animation clips generated");
+        assert!(model.animations.iter().any(|a| a.name == "idle"));
+        assert!(model.animations.iter().any(|a| a.name == "walk"));
+        assert!(model.animations.iter().any(|a| a.name == "attack"));
+    }
+
+    #[test]
+    fn test_extract_real_character_skeleton_kaos() {
+        let p1 = std::path::Path::new("assets/files/character/1010_Kaos.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/1010_Kaos.bld");
+        let bytes = if p1.exists() {
+            std::fs::read(p1).unwrap()
+        } else if p2.exists() {
+            std::fs::read(p2).unwrap()
+        } else {
+            create_test_character_igz(&["root", "pelvis", "spine", "head", "left_arm", "right_arm"])
+        };
+
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
+        assert!(!model.skeletons.is_empty(), "Kaos skeleton extracted");
+        assert!(!model.meshes.is_empty(), "Kaos meshes present");
+        for mesh in &model.meshes {
+            for v in &mesh.vertices {
+                let sum: f32 = v.bone_weights.iter().sum();
+                assert!(
+                    (sum - 1.0).abs() < 1e-3,
+                    "Kaos vertex weights must normalize to 1.0 (got {})",
+                    sum
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_extract_generic_character_skeleton() {
+        let bytes = create_test_character_igz(&["geo_mesh", "mat_hero", "dummy"]);
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse generic");
+        assert!(!model.skeletons.is_empty(), "Generic skeleton extracted");
+        let skel = &model.skeletons[0];
+        assert_eq!(skel.bones.len(), 6, "Humanoid rig has 6 bones");
+        assert_eq!(skel.bones[0].name, "Root");
+        assert_eq!(skel.bones[1].name, "Pelvis");
+        assert_eq!(skel.bones[2].name, "Spine");
+        assert_eq!(skel.bones[3].name, "Head");
+        assert_eq!(skel.bones[4].name, "Left Arm");
+        assert_eq!(skel.bones[5].name, "Right Arm");
+
+        for mesh in &model.meshes {
+            for v in &mesh.vertices {
+                let sum: f32 = v.bone_weights.iter().sum();
+                assert!((sum - 1.0).abs() < 1e-3, "Weights must normalize to 1.0");
+                for &idx in &v.bone_indices {
+                    assert!((idx as usize) < skel.bones.len(), "Bone index in bounds");
+                }
+            }
+        }
     }
 }

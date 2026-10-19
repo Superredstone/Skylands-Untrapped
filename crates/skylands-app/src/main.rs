@@ -10,8 +10,8 @@ use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone,
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
     mat4, Camera, CameraVolume, CameraVolumeMode, EnvironmentScene, EnvironmentSubmesh, FreeCam,
-    GpuMesh, GpuTexture, InstanceRaw, LightUniform, Mesh, ModelInstance, RenderAppHandler,
-    Renderer, UiBatch, WindowApp, WindowConfig,
+    GpuMesh, GpuSkinnedMesh, GpuTexture, InstanceRaw, LightUniform, Mesh, ModelInstance,
+    RenderAppHandler, Renderer, UiBatch, WindowApp, WindowConfig,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -409,7 +409,9 @@ impl AppRuntime {
         if !self.dynamic_models.contains_key(&key) {
             self.renderer.as_ref()?;
             let igb = self.assets.load_igb(path).ok()?;
+            let has_skeleton = !igb.skeletons.is_empty();
             let mut submesh_defs = Vec::new();
+            let mut raw_igb_meshes = Vec::new();
 
             for geo in &igb.geometries {
                 if let Some(mesh) = Mesh::from_geometry(geo) {
@@ -417,7 +419,10 @@ impl AppRuntime {
                         .material_name
                         .as_deref()
                         .and_then(|mat| self.resolve_material_texture(mat));
-                    submesh_defs.push((mesh, tex));
+                    submesh_defs.push((mesh, tex.clone()));
+                    if let Some(ref im) = geo.mesh {
+                        raw_igb_meshes.push((im.clone(), tex));
+                    }
                 }
             }
             if submesh_defs.is_empty() {
@@ -427,19 +432,32 @@ impl AppRuntime {
                         .material_name
                         .as_deref()
                         .and_then(|mat| self.resolve_material_texture(mat));
-                    submesh_defs.push((mesh, tex));
+                    submesh_defs.push((mesh, tex.clone()));
+                    raw_igb_meshes.push((igb_mesh.clone(), tex));
                 }
             }
 
             if !submesh_defs.is_empty() {
                 let renderer = self.renderer.as_ref()?;
-                let mut submeshes = Vec::with_capacity(submesh_defs.len());
+                let mut static_submeshes = Vec::with_capacity(submesh_defs.len());
+                let mut skinned_submeshes = Vec::new();
+
                 for (mesh, tex) in submesh_defs {
                     let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
-                    submeshes.push((gpu_mesh, tex));
+                    static_submeshes.push((gpu_mesh, tex));
                 }
-                self.dynamic_models
-                    .insert(key.clone(), ModelInstance::new(submeshes));
+
+                if has_skeleton {
+                    for (igb_mesh, tex) in raw_igb_meshes {
+                        let gpu_skinned = GpuSkinnedMesh::from_igb(&renderer.device, &igb_mesh);
+                        skinned_submeshes.push((gpu_skinned, tex));
+                    }
+                }
+
+                self.dynamic_models.insert(
+                    key.clone(),
+                    ModelInstance::with_skinned(static_submeshes, skinned_submeshes),
+                );
                 self.dynamic_igb_models.insert(key.clone(), (*igb).clone());
             }
         }
@@ -1291,6 +1309,8 @@ impl RenderAppHandler for AppRuntime {
                 })
                 .collect();
 
+            let mut skinned_actors_to_render = Vec::new();
+
             for (idx, actor) in self.engine.world.actors.iter().enumerate() {
                 if !actor.active {
                     continue;
@@ -1299,6 +1319,11 @@ impl RenderAppHandler for AppRuntime {
                 let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
 
                 if let Some(model) = self.dynamic_models.get(&model_key) {
+                    if !model.skinned_submeshes.is_empty() {
+                        skinned_actors_to_render.push((idx, actor, model, model_key.clone()));
+                        continue;
+                    }
+
                     for (sub_idx, (gpu_mesh, submesh_tex)) in model.submeshes.iter().enumerate() {
                         let tex = submesh_tex
                             .as_ref()
@@ -1359,13 +1384,61 @@ impl RenderAppHandler for AppRuntime {
                 &mut ui,
             );
 
-            if let Err(e) = r.render_scene_with_ui(
-                self.skybox_mesh.as_ref(),
-                &to_render,
-                Some(&mut ui),
-                clear_color,
-            ) {
-                warn!("Render pass error: {:?}", e);
+            if let Err(e) = r.begin_frame() {
+                warn!("Render frame begin error: {:?}", e);
+            } else {
+                if let Err(e) =
+                    r.render_scene_items(self.skybox_mesh.as_ref(), &to_render, clear_color)
+                {
+                    warn!("Unskinned scene render pass error: {:?}", e);
+                }
+
+                for (idx, actor, model, model_key) in skinned_actors_to_render {
+                    if let Some(igb) = self.dynamic_igb_models.get(&model_key) {
+                        if let Some(skeleton) = igb.skeletons.first() {
+                            let clip = actor.current_anim.as_ref().and_then(|anim_name| {
+                                igb.animations
+                                    .iter()
+                                    .find(|c| c.name.eq_ignore_ascii_case(anim_name))
+                            });
+
+                            let skin_matrices = if let Some(clip) = clip {
+                                clip.sample_pose(actor.animation_time, skeleton)
+                            } else if let Some(first_clip) = igb.animations.first() {
+                                first_clip.sample_pose(actor.animation_time, skeleton)
+                            } else {
+                                vec![skylands_formats::mat4_identity(); skeleton.bones.len()]
+                            };
+
+                            r.update_bones(&skin_matrices);
+
+                            let inst_slice = actor_instances[idx].as_slice();
+                            for (skinned_submesh, submesh_tex) in &model.skinned_submeshes {
+                                let tex = submesh_tex
+                                    .as_ref()
+                                    .or_else(|| {
+                                        actor.texture_path.as_ref().and_then(|tp| {
+                                            self.dynamic_textures
+                                                .get(&tp.replace('\\', "/").to_ascii_lowercase())
+                                        })
+                                    })
+                                    .or(self.actor_texture.as_ref());
+
+                                if let Err(e) =
+                                    r.render_skinned(&[(skinned_submesh, tex, inst_slice)], None)
+                                {
+                                    warn!("Skinned character render pass error: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Err(e) = r.render_ui(&mut ui) {
+                    warn!("UI render pass error: {:?}", e);
+                }
+
+                r.finish_frame();
             }
             self.ui_batch = ui;
         }

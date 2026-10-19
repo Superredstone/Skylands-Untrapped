@@ -8,12 +8,12 @@ pub mod window;
 
 pub use camera::{mat4, Camera, CameraVolume, CameraVolumeMode, FreeCam};
 pub use mesh::{
-    EnvironmentScene, EnvironmentSubmesh, GpuMesh, InstanceRaw, Mesh, ModelInstance, SkinnedVertex,
-    Vertex,
+    EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuSkinnedMesh, InstanceRaw, Mesh,
+    ModelInstance, SkinnedVertex, Vertex,
 };
 pub use pipeline::{
-    create_render_pipeline, create_skybox_pipeline, CameraUniform, LightUniform,
-    SKINNING_SHADER_SRC,
+    create_render_pipeline, create_skinned_render_pipeline, create_skybox_pipeline, BoneUniform,
+    CameraUniform, LightUniform, SKINNING_SHADER_SRC,
 };
 pub use renderer::Renderer;
 pub use texture::{GpuTexture, TextureRenderError};

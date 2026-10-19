@@ -1,6 +1,7 @@
-use crate::mesh::{GpuMesh, InstanceRaw};
+use crate::mesh::{GpuMesh, GpuSkinnedMesh, InstanceRaw};
 use crate::pipeline::{
-    create_render_pipeline, create_skybox_pipeline, CameraUniform, LightUniform,
+    create_render_pipeline, create_skinned_render_pipeline, create_skybox_pipeline, BoneUniform,
+    CameraUniform, LightUniform,
 };
 use crate::texture::GpuTexture;
 use crate::ui::{UiBatch, UiPipeline};
@@ -16,16 +17,25 @@ pub struct Renderer {
     pub size: (u32, u32),
     pub render_pipeline: wgpu::RenderPipeline,
     pub skybox_pipeline: wgpu::RenderPipeline,
+    pub skinned_pipeline: wgpu::RenderPipeline,
     pub ui_pipeline: UiPipeline,
     pub camera_buffer: wgpu::Buffer,
     pub light_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub skybox_bind_group: wgpu::BindGroup,
+    pub skinned_camera_bind_group_layout: wgpu::BindGroupLayout,
+    pub skinned_camera_bind_group: wgpu::BindGroup,
+    pub bone_buffer: wgpu::Buffer,
+    pub bone_bind_group_layout: wgpu::BindGroupLayout,
+    pub bone_bind_group: wgpu::BindGroup,
     pub default_instance_buffer: wgpu::Buffer,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     pub fallback_texture: GpuTexture,
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
+    pub headless_target: Option<(wgpu::Texture, wgpu::TextureView)>,
+    pub frame_view: Option<wgpu::TextureView>,
+    pub frame_output: Option<wgpu::SurfaceTexture>,
 }
 
 impl Renderer {
@@ -202,6 +212,70 @@ impl Renderer {
             Some(Self::DEPTH_FORMAT),
         );
 
+        let bone_uniform = BoneUniform::default();
+        let bone_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Skylands Bone Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[bone_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bone_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Bone Bind Group Layout"),
+            });
+
+        let bone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bone_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bone_buffer.as_entire_binding(),
+            }],
+            label: Some("Bone Bind Group"),
+        });
+
+        let skinned_camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Skinned Camera Bind Group Layout"),
+            });
+
+        let skinned_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &skinned_camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("Skinned Camera Bind Group"),
+        });
+
+        let skinned_pipeline = create_skinned_render_pipeline(
+            &device,
+            &skinned_camera_bind_group_layout,
+            &bone_bind_group_layout,
+            &texture_bind_group_layout,
+            config.format,
+            Some(Self::DEPTH_FORMAT),
+        );
+
         let ui_pipeline = UiPipeline::new(&device, &queue, config.format, width, height);
 
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, width, height);
@@ -214,16 +288,25 @@ impl Renderer {
             size: (width, height),
             render_pipeline,
             skybox_pipeline,
+            skinned_pipeline,
             ui_pipeline,
             camera_buffer,
             light_buffer,
             camera_bind_group,
             skybox_bind_group,
+            skinned_camera_bind_group_layout,
+            skinned_camera_bind_group,
+            bone_buffer,
+            bone_bind_group_layout,
+            bone_bind_group,
             default_instance_buffer,
             texture_bind_group_layout,
             fallback_texture,
             depth_texture,
             depth_view,
+            headless_target: None,
+            frame_view: None,
+            frame_output: None,
         })
     }
 
@@ -382,9 +465,91 @@ impl Renderer {
             Some(Self::DEPTH_FORMAT),
         );
 
+        let bone_uniform = BoneUniform::default();
+        let bone_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Skylands Bone Uniform Buffer (Headless)"),
+            contents: bytemuck::cast_slice(&[bone_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bone_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Bone Bind Group Layout"),
+            });
+
+        let bone_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bone_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bone_buffer.as_entire_binding(),
+            }],
+            label: Some("Bone Bind Group"),
+        });
+
+        let skinned_camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Skinned Camera Bind Group Layout"),
+            });
+
+        let skinned_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &skinned_camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("Skinned Camera Bind Group"),
+        });
+
+        let skinned_pipeline = create_skinned_render_pipeline(
+            &device,
+            &skinned_camera_bind_group_layout,
+            &bone_bind_group_layout,
+            &texture_bind_group_layout,
+            config.format,
+            Some(Self::DEPTH_FORMAT),
+        );
+
         let ui_pipeline = UiPipeline::new(&device, &queue, config.format, width, height);
 
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, width, height);
+
+        let headless_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Color Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let headless_view = headless_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         Ok(Self {
             surface: None,
@@ -394,16 +559,25 @@ impl Renderer {
             size: (width, height),
             render_pipeline,
             skybox_pipeline,
+            skinned_pipeline,
             ui_pipeline,
             camera_buffer,
             light_buffer,
             camera_bind_group,
             skybox_bind_group,
+            skinned_camera_bind_group_layout,
+            skinned_camera_bind_group,
+            bone_buffer,
+            bone_bind_group_layout,
+            bone_bind_group,
             default_instance_buffer,
             texture_bind_group_layout,
             fallback_texture,
             depth_texture,
             depth_view,
+            headless_target: Some((headless_texture, headless_view)),
+            frame_view: None,
+            frame_output: None,
         })
     }
 
@@ -459,6 +633,44 @@ impl Renderer {
             .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light]));
     }
 
+    pub fn update_bones(&self, matrices: &[[f32; 16]]) {
+        let mut uniform = BoneUniform::default();
+        for (i, m) in matrices.iter().take(64).enumerate() {
+            uniform.matrices[i] = [
+                [m[0], m[1], m[2], m[3]],
+                [m[4], m[5], m[6], m[7]],
+                [m[8], m[9], m[10], m[11]],
+                [m[12], m[13], m[14], m[15]],
+            ];
+        }
+        self.queue
+            .write_buffer(&self.bone_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
+
+    pub fn begin_frame(&mut self) -> Result<(), wgpu::SurfaceError> {
+        if self.frame_view.is_some() {
+            return Ok(());
+        }
+        if let Some(surface) = &self.surface {
+            let output = surface.get_current_texture()?;
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            self.frame_output = Some(output);
+            self.frame_view = Some(view);
+        } else if let Some((_, view)) = &self.headless_target {
+            self.frame_view = Some(view.clone());
+        }
+        Ok(())
+    }
+
+    pub fn finish_frame(&mut self) {
+        self.frame_view = None;
+        if let Some(output) = self.frame_output.take() {
+            output.present();
+        }
+    }
+
     pub fn render(
         &mut self,
         meshes: &[&GpuMesh],
@@ -499,34 +711,31 @@ impl Renderer {
         self.render_scene_with_ui(skybox, items, None, clear_color)
     }
 
-    pub fn render_scene_with_ui(
+    pub fn render_scene_items(
         &mut self,
         skybox: Option<&GpuMesh>,
         items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
-        ui_batch: Option<&mut UiBatch>,
         clear_color: [f64; 4],
     ) -> Result<(), wgpu::SurfaceError> {
-        let surface = match &self.surface {
-            Some(s) => s,
+        if self.frame_view.is_none() {
+            self.begin_frame()?;
+        }
+        let view = match &self.frame_view {
+            Some(v) => v,
             None => return Ok(()),
         };
-
-        let output = surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Skylands Render Encoder"),
+                label: Some("Skylands Scene Render Encoder"),
             });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Skylands Render Pass"),
+                label: Some("Skylands Scene Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -550,7 +759,6 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // 1. Draw skybox if present
             if let Some(sb) = skybox {
                 render_pass.set_pipeline(&self.skybox_pipeline);
                 render_pass.set_bind_group(0, &self.skybox_bind_group, &[]);
@@ -559,7 +767,6 @@ impl Renderer {
                 render_pass.draw_indexed(0..sb.num_elements, 0, 0..1);
             }
 
-            // 2. Draw scene items
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
@@ -596,68 +803,276 @@ impl Renderer {
             }
         }
 
-        // 3. UI Pass if batch provided and not empty
-        if let Some(batch) = ui_batch {
-            batch.finish_draw_calls();
-            if !batch.is_empty() {
-                let v_buf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("UI Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&batch.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let i_buf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("UI Index Buffer"),
-                        contents: bytemuck::cast_slice(&batch.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+        self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
 
-                let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Skylands UI Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
+    pub fn render_skinned(
+        &mut self,
+        items: &[(&GpuSkinnedMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        clear_color: Option<[f64; 4]>,
+    ) -> Result<(), wgpu::SurfaceError> {
+        if self.frame_view.is_none() {
+            self.begin_frame()?;
+        }
+        let view = match &self.frame_view {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let (color_ops, depth_ops) = match clear_color {
+            Some(c) => (
+                wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                        a: c[3],
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+                    store: wgpu::StoreOp::Store,
+                },
+                wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                },
+            ),
+            None => (
+                wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            ),
+        };
 
-                ui_pass.set_pipeline(&self.ui_pipeline.pipeline);
-                ui_pass.set_bind_group(0, &self.ui_pipeline.uniform_bind_group, &[]);
-                ui_pass.set_vertex_buffer(0, v_buf.slice(..));
-                ui_pass.set_index_buffer(i_buf.slice(..), wgpu::IndexFormat::Uint32);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Skylands Skinned Render Encoder"),
+            });
 
-                for call in &batch.draw_calls {
-                    let tex_bind_group = if call.texture_id == 1 {
-                        &self.ui_pipeline.font_atlas.texture.bind_group
-                    } else {
-                        &self.ui_pipeline.white_texture.bind_group
-                    };
-                    ui_pass.set_bind_group(1, tex_bind_group, &[]);
-                    let end_idx = call.index_offset + call.index_count;
-                    ui_pass.draw_indexed(call.index_offset..end_idx, 0, 0..1);
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Skylands Skinned Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: color_ops,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(depth_ops),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.skinned_pipeline);
+            render_pass.set_bind_group(0, &self.skinned_camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.bone_bind_group, &[]);
+
+            for (mesh, maybe_tex, instances) in items {
+                if instances.is_empty() {
+                    continue;
                 }
+                let bind_group = match maybe_tex {
+                    Some(tex) => &tex.bind_group,
+                    None => &self.fallback_texture.bind_group,
+                };
+                render_pass.set_bind_group(2, bind_group, &[]);
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+
+                let inst_buf;
+                let (buf_slice, count) =
+                    if instances.len() == 1 && instances[0] == InstanceRaw::default() {
+                        (self.default_instance_buffer.slice(..), 1u32)
+                    } else {
+                        inst_buf =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("Skylands Dynamic Skinned Instance Buffer"),
+                                    contents: bytemuck::cast_slice(instances),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+                        (inst_buf.slice(..), instances.len() as u32)
+                    };
+
+                render_pass.set_vertex_buffer(1, buf_slice);
+                render_pass
+                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..mesh.num_elements, 0, 0..count);
             }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
         Ok(())
+    }
+
+    pub fn render_ui(&mut self, ui_batch: &mut UiBatch) -> Result<(), wgpu::SurfaceError> {
+        if self.frame_view.is_none() {
+            self.begin_frame()?;
+        }
+        let view = match &self.frame_view {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        ui_batch.finish_draw_calls();
+        if ui_batch.is_empty() {
+            return Ok(());
+        }
+
+        let v_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("UI Vertex Buffer"),
+                contents: bytemuck::cast_slice(&ui_batch.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let i_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("UI Index Buffer"),
+                contents: bytemuck::cast_slice(&ui_batch.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Skylands UI Render Encoder"),
+            });
+
+        {
+            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Skylands UI Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            ui_pass.set_pipeline(&self.ui_pipeline.pipeline);
+            ui_pass.set_bind_group(0, &self.ui_pipeline.uniform_bind_group, &[]);
+            ui_pass.set_vertex_buffer(0, v_buf.slice(..));
+            ui_pass.set_index_buffer(i_buf.slice(..), wgpu::IndexFormat::Uint32);
+
+            for call in &ui_batch.draw_calls {
+                let tex_bind_group = if call.texture_id == 1 {
+                    &self.ui_pipeline.font_atlas.texture.bind_group
+                } else {
+                    &self.ui_pipeline.white_texture.bind_group
+                };
+                ui_pass.set_bind_group(1, tex_bind_group, &[]);
+                let end_idx = call.index_offset + call.index_count;
+                ui_pass.draw_indexed(call.index_offset..end_idx, 0, 0..1);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn render_scene_with_ui(
+        &mut self,
+        skybox: Option<&GpuMesh>,
+        items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        ui_batch: Option<&mut UiBatch>,
+        clear_color: [f64; 4],
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene_items(skybox, items, clear_color)?;
+        if let Some(batch) = ui_batch {
+            self.render_ui(batch)?;
+        }
+        self.finish_frame();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_headless_skinned_mesh_rendering_with_bone_matrices() {
+        let mut renderer = match Renderer::new_headless(128, 128) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let vert1 = crate::mesh::SkinnedVertex {
+            position: [0.0, 1.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            color: [1.0, 1.0, 1.0, 1.0],
+            bone_indices: [0, 1, 0, 0],
+            bone_weights: [0.5, 0.5, 0.0, 0.0],
+        };
+        let vert2 = crate::mesh::SkinnedVertex {
+            position: [1.0, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [1.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        let vert3 = crate::mesh::SkinnedVertex {
+            position: [-1.0, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            bone_indices: [1, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
+        };
+
+        let skinned_mesh = crate::mesh::GpuSkinnedMesh::from_vertices(
+            &renderer.device,
+            "test_skinned",
+            &[vert1, vert2, vert3],
+            &[0, 1, 2],
+            None,
+        );
+
+        let mut bone0 = [0.0f32; 16];
+        bone0[0] = 1.0;
+        bone0[5] = 1.0;
+        bone0[10] = 1.0;
+        bone0[15] = 1.0;
+        bone0[13] = 2.5;
+
+        let mut bone1 = [0.0f32; 16];
+        bone1[0] = 1.0;
+        bone1[5] = 1.0;
+        bone1[10] = 1.0;
+        bone1[15] = 1.0;
+        bone1[12] = -1.2;
+
+        renderer.update_bones(&[bone0, bone1]);
+
+        let default_instance = [InstanceRaw::default()];
+        let items = [(&skinned_mesh, None, default_instance.as_slice())];
+
+        renderer.begin_frame().expect("begin_frame");
+        let res = renderer.render_skinned(&items, Some([0.1, 0.2, 0.3, 1.0]));
+        assert!(res.is_ok(), "render_skinned must succeed");
+        renderer.finish_frame();
     }
 }

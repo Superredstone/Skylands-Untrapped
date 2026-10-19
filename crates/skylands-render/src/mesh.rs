@@ -62,6 +62,35 @@ impl InstanceRaw {
             ],
         }
     }
+
+    pub fn desc_skinned() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
 }
 
 #[repr(C)]
@@ -629,21 +658,94 @@ impl GpuMesh {
     }
 }
 
+pub struct GpuSkinnedMesh {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub num_elements: u32,
+    pub material_name: Option<String>,
+}
+
+impl GpuSkinnedMesh {
+    pub fn from_igb(device: &wgpu::Device, igb_mesh: &IgbMesh) -> Self {
+        let vertices: Vec<SkinnedVertex> =
+            igb_mesh.vertices.iter().map(SkinnedVertex::from).collect();
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{} Skinned Vertex Buffer", igb_mesh.name)),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{} Skinned Index Buffer", igb_mesh.name)),
+            contents: bytemuck::cast_slice(&igb_mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            num_elements: igb_mesh.indices.len() as u32,
+            material_name: igb_mesh.material_name.clone(),
+        }
+    }
+
+    pub fn from_vertices(
+        device: &wgpu::Device,
+        name: &str,
+        vertices: &[SkinnedVertex],
+        indices: &[u32],
+        material_name: Option<String>,
+    ) -> Self {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{} Skinned Vertex Buffer", name)),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{} Skinned Index Buffer", name)),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            num_elements: indices.len() as u32,
+            material_name,
+        }
+    }
+}
+
 pub struct ModelInstance {
     pub submeshes: Vec<(GpuMesh, Option<GpuTexture>)>,
+    pub skinned_submeshes: Vec<(GpuSkinnedMesh, Option<GpuTexture>)>,
 }
 
 impl ModelInstance {
     pub fn new(submeshes: Vec<(GpuMesh, Option<GpuTexture>)>) -> Self {
-        Self { submeshes }
+        Self {
+            submeshes,
+            skinned_submeshes: Vec::new(),
+        }
+    }
+
+    pub fn with_skinned(
+        submeshes: Vec<(GpuMesh, Option<GpuTexture>)>,
+        skinned_submeshes: Vec<(GpuSkinnedMesh, Option<GpuTexture>)>,
+    ) -> Self {
+        Self {
+            submeshes,
+            skinned_submeshes,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.submeshes.is_empty()
+        self.submeshes.is_empty() && self.skinned_submeshes.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.submeshes.len()
+        self.submeshes.len() + self.skinned_submeshes.len()
     }
 }
 

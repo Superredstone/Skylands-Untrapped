@@ -76,6 +76,35 @@ pub fn get_character_voice_path(character_id: u16) -> Option<&'static str> {
     }
 }
 
+pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
+    match character_id {
+        400 | 462 => return Some("462_Water_Crocky.bld".to_string()),
+        1010 => return Some("1010_Kaos.bld".to_string()),
+        1001 => return Some("1001_ChompyMage.bld".to_string()),
+        _ => {}
+    }
+
+    let search_dirs = [
+        std::path::Path::new("assets/files/character"),
+        std::path::Path::new("../../assets/files/character"),
+        std::path::Path::new("../assets/files/character"),
+    ];
+
+    let prefix = format!("{}_", character_id);
+    for dir in &search_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix) && name.ends_with(".bld") {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
+    Some(format!("{}_Character.bld", character_id))
+}
+
 pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'static str>) {
     match character_id {
         400 | 462 => (
@@ -83,6 +112,10 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
             Some("textures/characters/snapshot.png"),
         ),
         1010 => ("1010_Kaos.bld", Some("textures/characters/kaos.png")),
+        1001 => (
+            "1001_ChompyMage.bld",
+            Some("textures/characters/chompymage.png"),
+        ),
         401 => (
             "models/characters/foodfight.igb",
             Some("textures/characters/foodfight.png"),
@@ -110,10 +143,6 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
         407 => (
             "models/characters/gusto.igb",
             Some("textures/characters/gusto.png"),
-        ),
-        1001 => (
-            "models/characters/thegulper.igb",
-            Some("textures/characters/thegulper.png"),
         ),
         1002 => (
             "models/characters/wolfgang.igb",
@@ -413,6 +442,13 @@ mod tests {
             ("1010_Kaos.bld", Some("textures/characters/kaos.png"))
         );
         assert_eq!(
+            get_character_asset_paths(1001),
+            (
+                "1001_ChompyMage.bld",
+                Some("textures/characters/chompymage.png")
+            )
+        );
+        assert_eq!(
             get_character_asset_paths(401),
             (
                 "models/characters/foodfight.igb",
@@ -420,5 +456,19 @@ mod tests {
             )
         );
         assert_eq!(get_character_asset_paths(9999), ("models/hero.igb", None));
+
+        assert_eq!(
+            resolve_character_model_archive(400),
+            Some("462_Water_Crocky.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(1010),
+            Some("1010_Kaos.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(1001),
+            Some("1001_ChompyMage.bld".to_string())
+        );
+        assert!(resolve_character_model_archive(500).is_some());
     }
 }
