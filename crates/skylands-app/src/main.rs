@@ -1,8 +1,8 @@
 use clap::Parser;
 use log::{info, warn};
 use skylands_core::{
-    AudioEngine, CollisionMesh, FixedTimestep, GameState, GameStateMachine, InputMapper,
-    PortalGameplay, World,
+    get_character_voice_path, AudioEngine, CollisionMesh, FixedTimestep, GameState,
+    GameStateMachine, InputMapper, PortalGameplay, World,
 };
 use skylands_extractor::Extractor;
 use skylands_formats::{decode_cmpr, AssetLoader};
@@ -121,6 +121,7 @@ impl GameEngine {
         self.input.poll_gamepads();
 
         // 1. Poll portal hardware / mock events
+        let prev_state = self.state.current().clone();
         let events = self.portal.poll_events();
         for ev in events {
             let outgoing =
@@ -128,6 +129,25 @@ impl GameEngine {
                     .handle_event(ev, &mut self.world, &mut self.state, &mut self.audio);
             for pkt in outgoing {
                 self.portal.send_packet(&pkt);
+            }
+        }
+
+        // If villain capture just triggered, attempt to load and stream real dialogue
+        if let GameState::VillainCapture { villain_id, .. } = self.state.current() {
+            let just_entered = match prev_state {
+                GameState::VillainCapture {
+                    villain_id: prev_id,
+                    ..
+                } => prev_id != *villain_id,
+                _ => true,
+            };
+            if just_entered {
+                if let Some(voice_path) = get_character_voice_path(*villain_id) {
+                    if let Ok(clip) = self.assets.load_audio(voice_path) {
+                        self.audio.portal.clear();
+                        self.audio.play_villain_clip(&clip);
+                    }
+                }
             }
         }
 

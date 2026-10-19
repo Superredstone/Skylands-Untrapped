@@ -1,9 +1,13 @@
 pub mod archive;
+pub mod dsp;
+pub mod fsb;
 pub mod igb;
 pub mod loader;
 pub mod texture;
 
 pub use archive::{ArchiveMount, ArchiveReader, FileEntry};
+pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
+pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use igb::{
     mat4_identity, mat4_mul, AttrFormat, AttrSemantic, IgbAttrDesc, IgbAttrList, IgbDirectoryEntry,
     IgbEndian, IgbError, IgbGeometryNode, IgbHeader, IgbIndexBuffer, IgbMaterial, IgbMesh,

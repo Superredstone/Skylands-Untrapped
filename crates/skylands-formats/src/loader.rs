@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use crate::archive::{ArchiveError, ArchiveMount};
+use crate::fsb::{parse_fsb5, AudioClip, FsbError};
 use crate::igb::{IgbError, IgbModel};
 use crate::texture::{decode_cmpr, decode_dxt1, TextureError};
 
@@ -15,6 +16,8 @@ pub enum AssetError {
     Igb(#[from] IgbError),
     #[error("Texture error: {0}")]
     Texture(#[from] TextureError),
+    #[error("FSB audio error: {0}")]
+    Fsb(#[from] FsbError),
     #[error("Asset not found: {0}")]
     NotFound(String),
 }
@@ -110,6 +113,12 @@ impl AssetLoader {
         let raw = self.load_raw(path)?;
         let rgba = decode_dxt1(&raw, width, height)?;
         Ok(rgba)
+    }
+
+    pub fn load_audio(&self, path: &str) -> Result<AudioClip, AssetError> {
+        let raw = self.load_raw(path)?;
+        let clip = parse_fsb5(&raw)?;
+        Ok(clip)
     }
 
     pub fn clear_cache(&self) {

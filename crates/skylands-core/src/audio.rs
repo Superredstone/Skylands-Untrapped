@@ -1,6 +1,39 @@
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use skylands_formats::AudioClip;
 use skylands_portal::protocol::{encode_audio_packet, REPORT_SIZE};
 use std::collections::VecDeque;
+
+pub fn resample_to_8khz_u8(clip: &AudioClip) -> Vec<u8> {
+    if clip.samples.is_empty() {
+        return Vec::new();
+    }
+    let channels = clip.channels.max(1) as usize;
+    let frames = clip.samples.len() / channels;
+    if frames == 0 {
+        return Vec::new();
+    }
+
+    let src_rate = clip.sample_rate.max(1) as f64;
+    let dst_rate = 8000.0f64;
+    let out_len = ((frames as f64) * (dst_rate / src_rate)).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+
+    for i in 0..out_len {
+        let src_idx = (i as f64 * src_rate / dst_rate).round() as usize;
+        let frame_idx = src_idx.min(frames - 1);
+        let s = if channels == 1 {
+            clip.samples[frame_idx] as i32
+        } else {
+            (clip.samples[frame_idx * channels] as i32
+                + clip.samples[frame_idx * channels + 1] as i32)
+                / 2
+        };
+        let u = (((s + 32768) >> 8).clamp(0, 255)) as u8;
+        out.push(u);
+    }
+
+    out
+}
 
 pub struct PortalSpeakerSink {
     seq: u8,
@@ -24,6 +57,11 @@ impl PortalSpeakerSink {
             self.seq = self.seq.wrapping_add(1);
             self.queue.push_back(pkt);
         }
+    }
+
+    pub fn queue_clip(&mut self, clip: &AudioClip) {
+        let pcm = resample_to_8khz_u8(clip);
+        self.queue_pcm_samples(&pcm);
     }
 
     pub fn queue_villain_speech(&mut self, villain_id: u16, duration_secs: f32) {
@@ -106,6 +144,18 @@ impl SystemAudioSink {
         }
     }
 
+    pub fn play_clip(&self, clip: &AudioClip) {
+        if let Some(sink) = &self.sfx_sink {
+            let source = rodio::buffer::SamplesBuffer::new(
+                clip.channels,
+                clip.sample_rate,
+                clip.samples.clone(),
+            )
+            .amplify(self.sfx_volume);
+            sink.append(source);
+        }
+    }
+
     pub fn set_bgm_volume(&mut self, vol: f32) {
         self.bgm_volume = vol.clamp(0.0, 1.0);
         if let Some(sink) = &self.bgm_sink {
@@ -145,6 +195,11 @@ impl AudioEngine {
         self.portal.queue_villain_speech(villain_id, 1.0);
     }
 
+    pub fn play_villain_clip(&mut self, clip: &AudioClip) {
+        self.portal.queue_clip(clip);
+        self.system.play_clip(clip);
+    }
+
     pub fn on_hero_summoned(&mut self) {
         self.system.play_sfx_tone(880.0, 0.2);
     }
@@ -182,5 +237,19 @@ mod tests {
     fn test_system_audio_creation() {
         let audio = AudioEngine::new();
         assert_eq!(audio.portal.pending_packets(), 0);
+    }
+
+    #[test]
+    fn test_resample_and_queue_clip() {
+        let clip = AudioClip {
+            channels: 1,
+            sample_rate: 16000,
+            samples: vec![0, 32767, -32768, 0],
+        };
+        let pcm = resample_to_8khz_u8(&clip);
+        assert_eq!(pcm.len(), 2);
+        let mut speaker = PortalSpeakerSink::new();
+        speaker.queue_clip(&clip);
+        assert!(speaker.is_streaming());
     }
 }

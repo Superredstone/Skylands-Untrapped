@@ -61,6 +61,21 @@ pub fn get_character_info(character_id: u16) -> (&'static str, Element) {
     }
 }
 
+pub fn get_character_voice_path(character_id: u16) -> Option<&'static str> {
+    match character_id {
+        1010 => Some("audio/dialogue/vo_kaos_trapped.wav"),
+        1001 => Some("audio/dialogue/vo_thegulper_trapped.wav"),
+        1002 => Some("audio/dialogue/vo_wolfgang_trapped.wav"),
+        1003 => Some("audio/dialogue/vo_chompymage_trapped.wav"),
+        1004 => Some("audio/dialogue/vo_goldenqueen_trapped.wav"),
+        1005 => Some("audio/dialogue/vo_chefpepperjack_trapped.wav"),
+        1006 => Some("audio/dialogue/vo_drkrankcase_trapped.wav"),
+        1007 => Some("audio/dialogue/vo_dreamcatcher_trapped.wav"),
+        1008 => Some("audio/dialogue/vo_painyatta_trapped.wav"),
+        _ => None,
+    }
+}
+
 pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'static str>) {
     match character_id {
         400 => (
