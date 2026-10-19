@@ -1,4 +1,4 @@
-use crate::mesh::GpuMesh;
+use crate::mesh::{GpuMesh, InstanceRaw};
 use crate::pipeline::{create_render_pipeline, CameraUniform};
 use crate::texture::GpuTexture;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ pub struct Renderer {
     pub render_pipeline: wgpu::RenderPipeline,
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
+    pub default_instance_buffer: wgpu::Buffer,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     pub fallback_texture: GpuTexture,
     pub depth_texture: wgpu::Texture,
@@ -107,6 +108,14 @@ impl Renderer {
             label: Some("Camera Bind Group"),
         });
 
+        let default_instance = InstanceRaw::default();
+        let default_instance_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Default Identity Instance Buffer"),
+                contents: bytemuck::cast_slice(&[default_instance]),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
         let texture_bind_group_layout = GpuTexture::bind_group_layout(&device);
         let fallback_texture = GpuTexture::create_fallback(&device, &queue);
 
@@ -134,6 +143,7 @@ impl Renderer {
             render_pipeline,
             camera_buffer,
             camera_bind_group,
+            default_instance_buffer,
             texture_bind_group_layout,
             fallback_texture,
             depth_texture,
@@ -202,6 +212,19 @@ impl Renderer {
         items: &[(&GpuMesh, Option<&GpuTexture>)],
         clear_color: [f64; 4],
     ) -> Result<(), wgpu::SurfaceError> {
+        let default_instances = [InstanceRaw::default()];
+        let instanced_items: Vec<(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])> = items
+            .iter()
+            .map(|(m, t)| (*m, *t, default_instances.as_slice()))
+            .collect();
+        self.render_instanced(&instanced_items, clear_color)
+    }
+
+    pub fn render_instanced(
+        &mut self,
+        items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        clear_color: [f64; 4],
+    ) -> Result<(), wgpu::SurfaceError> {
         let surface = match &self.surface {
             Some(s) => s,
             None => return Ok(()),
@@ -249,16 +272,36 @@ impl Renderer {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            for (mesh, maybe_tex) in items {
+            for (mesh, maybe_tex, instances) in items {
+                if instances.is_empty() {
+                    continue;
+                }
                 let bind_group = match maybe_tex {
                     Some(tex) => &tex.bind_group,
                     None => &self.fallback_texture.bind_group,
                 };
                 render_pass.set_bind_group(1, bind_group, &[]);
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+
+                let inst_buf;
+                let (buf_slice, count) =
+                    if instances.len() == 1 && instances[0] == InstanceRaw::default() {
+                        (self.default_instance_buffer.slice(..), 1u32)
+                    } else {
+                        inst_buf =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("Skylands Dynamic Instance Buffer"),
+                                    contents: bytemuck::cast_slice(instances),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+                        (inst_buf.slice(..), instances.len() as u32)
+                    };
+
+                render_pass.set_vertex_buffer(1, buf_slice);
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..mesh.num_elements, 0, 0..1);
+                render_pass.draw_indexed(0..mesh.num_elements, 0, 0..count);
             }
         }
 

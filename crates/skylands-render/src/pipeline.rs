@@ -1,4 +1,4 @@
-use crate::mesh::Vertex;
+use crate::mesh::{InstanceRaw, Vertex};
 use bytemuck::{Pod, Zeroable};
 
 pub const SHADER_SRC: &str = r#"
@@ -21,6 +21,13 @@ struct VertexInput {
     @location(3) color: vec4<f32>,
 };
 
+struct InstanceInput {
+    @location(4) model_0: vec4<f32>,
+    @location(5) model_1: vec4<f32>,
+    @location(6) model_2: vec4<f32>,
+    @location(7) model_3: vec4<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
@@ -29,10 +36,21 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_main(model: VertexInput) -> VertexOutput {
+fn vs_main(model: VertexInput, instance: InstanceInput) -> VertexOutput {
+    let model_matrix = mat4x4<f32>(
+        instance.model_0,
+        instance.model_1,
+        instance.model_2,
+        instance.model_3,
+    );
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(model.position, 1.0);
-    out.normal = model.normal;
+    out.clip_position = camera.view_proj * model_matrix * vec4<f32>(model.position, 1.0);
+    let normal_matrix = mat3x3<f32>(
+        model_matrix[0].xyz,
+        model_matrix[1].xyz,
+        model_matrix[2].xyz,
+    );
+    out.normal = normal_matrix * model.normal;
     out.uv = model.uv;
     out.color = model.color;
     return out;
@@ -92,7 +110,7 @@ pub fn create_render_pipeline(
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_main"),
-            buffers: &[Vertex::desc()],
+            buffers: &[Vertex::desc(), InstanceRaw::desc()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {

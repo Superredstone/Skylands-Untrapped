@@ -8,7 +8,8 @@ use skylands_formats::{decode_cmpr, ArchiveMount};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    GpuMesh, GpuTexture, Mesh, RenderAppHandler, Renderer, WindowApp, WindowConfig,
+    mat4, Camera, GpuMesh, GpuTexture, InstanceRaw, Mesh, RenderAppHandler, Renderer, WindowApp,
+    WindowConfig,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -161,6 +162,7 @@ impl GameEngine {
 pub struct AppRuntime {
     pub engine: GameEngine,
     pub renderer: Option<Renderer>,
+    pub camera: Camera,
     pub pedestal_mesh: Option<GpuMesh>,
     pub actor_mesh: Option<GpuMesh>,
     pub actor_texture: Option<GpuTexture>,
@@ -171,6 +173,7 @@ impl AppRuntime {
         Self {
             engine,
             renderer: None,
+            camera: Camera::new(1280.0 / 720.0),
             pedestal_mesh: None,
             actor_mesh: None,
             actor_texture: None,
@@ -214,6 +217,8 @@ impl RenderAppHandler for AppRuntime {
                     }
                 }
 
+                self.camera.aspect =
+                    renderer.config.width as f32 / renderer.config.height.max(1) as f32;
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
                 self.renderer = Some(renderer);
@@ -226,6 +231,9 @@ impl RenderAppHandler for AppRuntime {
     }
 
     fn on_resize(&mut self, width: u32, height: u32) {
+        if height > 0 {
+            self.camera.aspect = width as f32 / height as f32;
+        }
         if let Some(r) = &mut self.renderer {
             r.resize(width, height);
         }
@@ -241,14 +249,21 @@ impl RenderAppHandler for AppRuntime {
 
     fn on_render(&mut self) {
         if let Some(r) = &mut self.renderer {
-            // Setup camera view-projection matrix
-            // Center camera at (0, 2.5, -4.5) looking toward (0, 0, 0)
-            let view_proj = [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 0.8, -0.6, 0.0],
-                [0.0, 0.6, 0.8, 0.0],
-                [0.0, -1.0, 3.0, 1.0],
-            ];
+            if let Some(hero_id) = self.engine.world.active_hero_id {
+                if let Some(hero) = self.engine.world.actors.iter().find(|a| a.id == hero_id) {
+                    self.camera.target = hero.position;
+                    self.camera.eye = [
+                        hero.position[0],
+                        hero.position[1] + 4.5,
+                        hero.position[2] + 7.5,
+                    ];
+                }
+            } else {
+                self.camera.target = [0.0, 0.0, 0.0];
+                self.camera.eye = [0.0, 4.5, 7.5];
+            }
+
+            let view_proj = self.camera.build_view_projection_matrix();
             r.update_camera(view_proj);
 
             let clear_color = if self.engine.state.is_villain_capture() {
@@ -259,17 +274,29 @@ impl RenderAppHandler for AppRuntime {
                 [0.2, 0.5, 0.8, 1.0]
             };
 
-            let mut to_render: Vec<(&GpuMesh, Option<&GpuTexture>)> = Vec::new();
+            let mut to_render = Vec::new();
+            let pedestal_instances = [InstanceRaw::default()];
             if let Some(pedestal) = &self.pedestal_mesh {
-                to_render.push((pedestal, None));
+                to_render.push((pedestal, None, pedestal_instances.as_slice()));
             }
-            if !self.engine.world.actors.is_empty() {
+
+            let actor_instances: Vec<InstanceRaw> = self
+                .engine
+                .world
+                .actors
+                .iter()
+                .map(|a| InstanceRaw {
+                    model: mat4::transform(a.position, a.rotation, [1.0, 1.0, 1.0]),
+                })
+                .collect();
+
+            if !actor_instances.is_empty() {
                 if let Some(actor) = &self.actor_mesh {
-                    to_render.push((actor, self.actor_texture.as_ref()));
+                    to_render.push((actor, self.actor_texture.as_ref(), &actor_instances));
                 }
             }
 
-            if let Err(e) = r.render_textured(&to_render, clear_color) {
+            if let Err(e) = r.render_instanced(&to_render, clear_color) {
                 warn!("Render pass error: {:?}", e);
             }
         }
