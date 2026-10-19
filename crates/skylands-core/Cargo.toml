@@ -1,0 +1,12 @@
+[package]
+name = "skylands-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gilrs = { workspace = true }
+rodio = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+skylands-portal = { workspace = true }
+skylands-formats = { workspace = true }

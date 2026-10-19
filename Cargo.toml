@@ -4,6 +4,8 @@ members = [
     "crates/skylands-formats",
     "crates/skylands-portal",
     "crates/skylands-extractor",
+    "crates/skylands-render",
+    "crates/skylands-core",
     "crates/skylands-app",
 ]
 
@@ -15,3 +17,14 @@ env_logger = "0.11"
 hidapi = "2.6"
 clap = { version = "4.5", features = ["derive"] }
 crc32fast = "1.4"
+wgpu = "24"
+winit = "0.30"
+bytemuck = { version = "1.21", features = ["derive"] }
+gilrs = "0.11"
+rodio = "0.20"
+pollster = "1.0"
+skylands-formats = { path = "crates/skylands-formats" }
+skylands-portal = { path = "crates/skylands-portal" }
+skylands-extractor = { path = "crates/skylands-extractor" }
+skylands-render = { path = "crates/skylands-render" }
+skylands-core = { path = "crates/skylands-core" }

@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-skylands-formats = { path = "../skylands-formats" }
-skylands-portal = { path = "../skylands-portal" }
-skylands-extractor = { path = "../skylands-extractor" }
+skylands-formats = { workspace = true }
+skylands-portal = { workspace = true }
+skylands-extractor = { workspace = true }
+skylands-render = { workspace = true }
+skylands-core = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 thiserror = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
