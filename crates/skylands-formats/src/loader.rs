@@ -83,7 +83,20 @@ impl AssetLoader {
         }
 
         let raw = self.load_raw(path)?;
-        let model = IgbModel::parse(&raw[..])?;
+        let model = match IgbModel::parse(&raw[..]) {
+            Ok(m) => m,
+            Err(e) => {
+                let candidates = ArchiveMount::scan_embedded_igb(&raw);
+                if let Some(first_valid) = candidates
+                    .into_iter()
+                    .find_map(|sub| IgbModel::parse(sub).ok())
+                {
+                    first_valid
+                } else {
+                    return Err(AssetError::Igb(e));
+                }
+            }
+        };
         let arc_model = Arc::new(model);
         // ponytail: unbounded IGB cache; add LRU capacity bound when model count exceeds 256
         self.igb_cache
@@ -91,6 +104,30 @@ impl AssetLoader {
             .unwrap()
             .insert(key, arc_model.clone());
         Ok(arc_model)
+    }
+
+    pub fn load_level_models(&self, path: &str) -> Result<Vec<Arc<IgbModel>>, AssetError> {
+        let raw = self.load_raw(path)?;
+        let chunks = ArchiveMount::scan_embedded_igb(&raw);
+        let mut models = Vec::new();
+        for chunk in chunks {
+            if let Ok(model) = IgbModel::parse(chunk) {
+                models.push(Arc::new(model));
+            }
+        }
+        if models.is_empty() {
+            if let Ok(single) = IgbModel::parse(&raw[..]) {
+                models.push(Arc::new(single));
+            }
+        }
+        if models.is_empty() {
+            Err(AssetError::NotFound(format!(
+                "No valid IGB models in {}",
+                path
+            )))
+        } else {
+            Ok(models)
+        }
     }
 
     pub fn load_cmpr_rgba(
@@ -313,6 +350,19 @@ mod tests {
         loader.clear_cache();
         assert_eq!(loader.cached_raw_count(), 0);
         assert_eq!(loader.cached_igb_count(), 0);
+
+        // 4. Embedded IGB chunk extraction
+        let mut level_bld_bytes = Vec::new();
+        level_bld_bytes.extend_from_slice(b"IGZ\x01\0\0\0\0dummy header padding");
+        level_bld_bytes.resize(64, 0);
+        level_bld_bytes.extend_from_slice(&igb_bytes);
+
+        let scanned = ArchiveMount::scan_embedded_igb(&level_bld_bytes);
+        assert_eq!(scanned.len(), 1);
+        let models = loader
+            .load_level_models("models/hero.igb")
+            .expect("load level models");
+        assert_eq!(models.len(), 1);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

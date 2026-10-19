@@ -1,5 +1,7 @@
 use crate::mesh::{GpuMesh, InstanceRaw};
-use crate::pipeline::{create_render_pipeline, CameraUniform};
+use crate::pipeline::{
+    create_render_pipeline, create_skybox_pipeline, CameraUniform, LightUniform,
+};
 use crate::texture::GpuTexture;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -12,8 +14,11 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pub size: (u32, u32),
     pub render_pipeline: wgpu::RenderPipeline,
+    pub skybox_pipeline: wgpu::RenderPipeline,
     pub camera_buffer: wgpu::Buffer,
+    pub light_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
+    pub skybox_bind_group: wgpu::BindGroup,
     pub default_instance_buffer: wgpu::Buffer,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
     pub fallback_texture: GpuTexture,
@@ -84,7 +89,56 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let light_uniform = LightUniform::default();
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light Buffer"),
+            contents: bytemuck::cast_slice(&[light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Camera and Light Bind Group Layout"),
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Camera and Light Bind Group"),
+        });
+
+        let skybox_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -96,16 +150,16 @@ impl Renderer {
                     },
                     count: None,
                 }],
-                label: Some("Camera Bind Group Layout"),
+                label: Some("Skybox Bind Group Layout"),
             });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &skybox_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
             }],
-            label: Some("Camera Bind Group"),
+            label: Some("Skybox Bind Group"),
         });
 
         let default_instance = InstanceRaw::default();
@@ -125,9 +179,23 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        let skybox_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Skylands Skybox Pipeline Layout"),
+                bind_group_layouts: &[&skybox_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
         let render_pipeline = create_render_pipeline(
             &device,
             &pipeline_layout,
+            config.format,
+            Some(Self::DEPTH_FORMAT),
+        );
+
+        let skybox_pipeline = create_skybox_pipeline(
+            &device,
+            &skybox_pipeline_layout,
             config.format,
             Some(Self::DEPTH_FORMAT),
         );
@@ -141,8 +209,11 @@ impl Renderer {
             config,
             size: (width, height),
             render_pipeline,
+            skybox_pipeline,
             camera_buffer,
+            light_buffer,
             camera_bind_group,
+            skybox_bind_group,
             default_instance_buffer,
             texture_bind_group_layout,
             fallback_texture,
@@ -195,7 +266,56 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let light_uniform = LightUniform::default();
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light Buffer"),
+            contents: bytemuck::cast_slice(&[light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Camera and Light Bind Group Layout"),
+            });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Camera and Light Bind Group"),
+        });
+
+        let skybox_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -207,16 +327,16 @@ impl Renderer {
                     },
                     count: None,
                 }],
-                label: Some("Camera Bind Group Layout"),
+                label: Some("Skybox Bind Group Layout"),
             });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &skybox_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
             }],
-            label: Some("Camera Bind Group"),
+            label: Some("Skybox Bind Group"),
         });
 
         let default_instance = InstanceRaw::default();
@@ -236,9 +356,23 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        let skybox_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Skylands Skybox Pipeline Layout"),
+                bind_group_layouts: &[&skybox_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
         let render_pipeline = create_render_pipeline(
             &device,
             &pipeline_layout,
+            config.format,
+            Some(Self::DEPTH_FORMAT),
+        );
+
+        let skybox_pipeline = create_skybox_pipeline(
+            &device,
+            &skybox_pipeline_layout,
             config.format,
             Some(Self::DEPTH_FORMAT),
         );
@@ -252,8 +386,11 @@ impl Renderer {
             config,
             size: (width, height),
             render_pipeline,
+            skybox_pipeline,
             camera_buffer,
+            light_buffer,
             camera_bind_group,
+            skybox_bind_group,
             default_instance_buffer,
             texture_bind_group_layout,
             fallback_texture,
@@ -308,6 +445,11 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
+    pub fn update_light(&self, light: LightUniform) {
+        self.queue
+            .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[light]));
+    }
+
     pub fn render(
         &mut self,
         meshes: &[&GpuMesh],
@@ -333,6 +475,15 @@ impl Renderer {
 
     pub fn render_instanced(
         &mut self,
+        items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        clear_color: [f64; 4],
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene(None, items, clear_color)
+    }
+
+    pub fn render_scene(
+        &mut self,
+        skybox: Option<&GpuMesh>,
         items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
         clear_color: [f64; 4],
     ) -> Result<(), wgpu::SurfaceError> {
@@ -380,6 +531,16 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
+            // 1. Draw skybox if present
+            if let Some(sb) = skybox {
+                render_pass.set_pipeline(&self.skybox_pipeline);
+                render_pass.set_bind_group(0, &self.skybox_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, sb.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(sb.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..sb.num_elements, 0, 0..1);
+            }
+
+            // 2. Draw scene items
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 

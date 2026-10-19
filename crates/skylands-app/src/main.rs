@@ -9,8 +9,8 @@ use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    mat4, Camera, EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuTexture, InstanceRaw, Mesh,
-    ModelInstance, RenderAppHandler, Renderer, WindowApp, WindowConfig,
+    mat4, Camera, EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuTexture, InstanceRaw,
+    LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer, WindowApp, WindowConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -186,15 +186,30 @@ impl GameEngine {
         let candidates = [
             path.to_string(),
             format!("{}.igb", path),
+            format!("{}.bld", path),
+            "wii_courtyard.bld".to_string(),
             "levels/hub.igb".to_string(),
             "maps/courtyard.igb".to_string(),
             "level_hub_2014_01.bld".to_string(),
         ];
         for cand in &candidates {
             if self.assets.has_file(cand) {
-                if let Ok(igb) = self.assets.load_igb(cand) {
-                    self.world.environment.mesh = CollisionMesh::from_igb(&igb);
-                    return;
+                if let Ok(models) = self.assets.load_level_models(cand) {
+                    let mut combined_mesh = CollisionMesh::from_triangles(Vec::new());
+                    for model in models {
+                        let sub = CollisionMesh::from_igb(&model);
+                        combined_mesh = CollisionMesh::from_triangles(
+                            combined_mesh
+                                .triangles
+                                .into_iter()
+                                .chain(sub.triangles)
+                                .collect(),
+                        );
+                    }
+                    if !combined_mesh.triangles.is_empty() {
+                        self.world.environment.mesh = combined_mesh;
+                        return;
+                    }
                 }
             }
         }
@@ -209,6 +224,7 @@ pub struct AppRuntime {
     pub camera: Camera,
     pub pedestal_mesh: Option<GpuMesh>,
     pub actor_mesh: Option<GpuMesh>,
+    pub skybox_mesh: Option<GpuMesh>,
     pub actor_texture: Option<GpuTexture>,
     pub dynamic_textures: HashMap<String, GpuTexture>,
     pub dynamic_meshes: HashMap<String, GpuMesh>,
@@ -226,6 +242,7 @@ impl AppRuntime {
             camera: Camera::new(1280.0 / 720.0),
             pedestal_mesh: None,
             actor_mesh: None,
+            skybox_mesh: None,
             actor_texture: None,
             dynamic_textures: HashMap::new(),
             dynamic_meshes: HashMap::new(),
@@ -374,49 +391,79 @@ impl AppRuntime {
         let candidates = [
             path.to_string(),
             format!("{}.igb", path),
+            format!("{}.bld", path),
+            "wii_courtyard.bld".to_string(),
             "levels/hub.igb".to_string(),
             "maps/courtyard.igb".to_string(),
             "level_hub_2014_01.bld".to_string(),
         ];
 
-        let mut resolved_igb = None;
+        let mut resolved_models = Vec::new();
         let mut loaded_name = path.to_string();
         for cand in &candidates {
             if self.assets.has_file(cand) {
-                if let Ok(igb) = self.assets.load_igb(cand) {
-                    resolved_igb = Some(igb);
+                if let Ok(models) = self.assets.load_level_models(cand) {
+                    resolved_models = models;
                     loaded_name = cand.clone();
                     break;
                 }
             }
         }
 
-        if let Some(igb) = resolved_igb {
-            self.engine.world.environment.mesh = CollisionMesh::from_igb(&igb);
-            let instances = igb.evaluate_scene_graph();
+        if !resolved_models.is_empty() {
+            let mut combined_collision = CollisionMesh::from_triangles(Vec::new());
             let mut submesh_defs = Vec::new();
 
-            for (geo_idx, geo) in igb.geometries.iter().enumerate() {
-                if let Some(mesh) = Mesh::from_geometry(geo) {
-                    let tex = mesh
-                        .material_name
-                        .as_deref()
-                        .and_then(|mat_name| self.resolve_material_texture(mat_name));
+            for igb in &resolved_models {
+                let sub_col = CollisionMesh::from_igb(igb);
+                combined_collision = CollisionMesh::from_triangles(
+                    combined_collision
+                        .triangles
+                        .into_iter()
+                        .chain(sub_col.triangles)
+                        .collect(),
+                );
 
-                    let matching_instances: Vec<InstanceRaw> = instances
-                        .iter()
-                        .filter(|inst| inst.geometry_index == geo_idx)
-                        .map(|inst| InstanceRaw::from_flat_slice(&inst.world_transform))
-                        .collect();
+                let instances = igb.evaluate_scene_graph();
+                for (geo_idx, geo) in igb.geometries.iter().enumerate() {
+                    if let Some(mesh) = Mesh::from_geometry(geo) {
+                        let tex = mesh
+                            .material_name
+                            .as_deref()
+                            .and_then(|mat_name| self.resolve_material_texture(mat_name));
 
-                    let inst_list = if matching_instances.is_empty() {
-                        vec![InstanceRaw::default()]
-                    } else {
-                        matching_instances
-                    };
+                        let matching_instances: Vec<InstanceRaw> = instances
+                            .iter()
+                            .filter(|inst| inst.geometry_index == geo_idx)
+                            .map(|inst| InstanceRaw::from_flat_slice(&inst.world_transform))
+                            .collect();
 
-                    submesh_defs.push((mesh, tex, inst_list));
+                        let inst_list = if matching_instances.is_empty() {
+                            vec![InstanceRaw::default()]
+                        } else {
+                            matching_instances
+                        };
+
+                        submesh_defs.push((mesh, tex, inst_list));
+                    }
                 }
+
+                if igb.geometries.is_empty() {
+                    for igb_mesh in &igb.meshes {
+                        let mesh = Mesh::from_igb(igb_mesh);
+                        let tex = mesh
+                            .material_name
+                            .as_deref()
+                            .and_then(|mat_name| self.resolve_material_texture(mat_name));
+                        submesh_defs.push((mesh, tex, vec![InstanceRaw::default()]));
+                    }
+                }
+            }
+
+            if !combined_collision.triangles.is_empty() {
+                self.engine.world.environment.mesh = combined_collision;
+            } else {
+                self.engine.world.environment.mesh = CollisionMesh::synthetic_courtyard();
             }
 
             let renderer = self.renderer.as_ref()?;
@@ -448,9 +495,11 @@ impl RenderAppHandler for AppRuntime {
             Ok(renderer) => {
                 let pedestal = Mesh::portal_pedestal(1.5, 0.2, 32);
                 let hero_quad = Mesh::unit_quad();
+                let skybox = Mesh::skybox_cube(80.0);
 
                 let gpu_pedestal = GpuMesh::from_mesh(&renderer.device, &pedestal);
                 let gpu_hero = GpuMesh::from_mesh(&renderer.device, &hero_quad);
+                let gpu_skybox = GpuMesh::from_mesh(&renderer.device, &skybox);
 
                 // Decode 8x8 CMPR demo texture (cyan / orange blocks)
                 let mut cmpr_data = vec![0u8; 32];
@@ -481,6 +530,7 @@ impl RenderAppHandler for AppRuntime {
                     renderer.config.width as f32 / renderer.config.height.max(1) as f32;
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
+                self.skybox_mesh = Some(gpu_skybox);
                 self.renderer = Some(renderer);
 
                 self.load_environment("levels/hub.igb");
@@ -571,6 +621,7 @@ impl RenderAppHandler for AppRuntime {
 
             let view_proj = self.camera.build_view_projection_matrix();
             r.update_camera(view_proj);
+            r.update_light(LightUniform::default());
 
             let clear_color = if self.engine.state.is_villain_capture() {
                 // Trap capture background (dark vortex purple)
@@ -647,7 +698,7 @@ impl RenderAppHandler for AppRuntime {
                 }
             }
 
-            if let Err(e) = r.render_instanced(&to_render, clear_color) {
+            if let Err(e) = r.render_scene(self.skybox_mesh.as_ref(), &to_render, clear_color) {
                 warn!("Render pass error: {:?}", e);
             }
         }

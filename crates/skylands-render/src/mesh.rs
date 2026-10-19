@@ -239,6 +239,76 @@ impl Mesh {
 
         Self::new("portal_pedestal", vertices, indices)
     }
+
+    pub fn skybox_cube(size: f32) -> Self {
+        let half = size * 0.5;
+        // 8 cube vertices, inward facing normals, gradient sky color
+        let p = [
+            [-half, -half, -half], // 0
+            [half, -half, -half],  // 1
+            [half, half, -half],   // 2
+            [-half, half, -half],  // 3
+            [-half, -half, half],  // 4
+            [half, -half, half],   // 5
+            [half, half, half],    // 6
+            [-half, half, half],   // 7
+        ];
+
+        let horizon_color = [0.45, 0.65, 0.85, 1.0];
+        let zenith_color = [0.12, 0.28, 0.55, 1.0];
+
+        let make_vert = |pos: [f32; 3]| -> Vertex {
+            let t = ((pos[1] / half) + 1.0) * 0.5;
+            let color = [
+                horizon_color[0] * (1.0 - t) + zenith_color[0] * t,
+                horizon_color[1] * (1.0 - t) + zenith_color[1] * t,
+                horizon_color[2] * (1.0 - t) + zenith_color[2] * t,
+                1.0,
+            ];
+            Vertex {
+                position: pos,
+                normal: [-pos[0] / half, -pos[1] / half, -pos[2] / half],
+                uv: [0.0, 0.0],
+                color,
+            }
+        };
+
+        // Inward facing cube faces (quad = 2 triangles)
+        let faces = [
+            // Front (-Z): 0, 3, 2, 0, 2, 1
+            (p[0], p[3], p[2], p[1]),
+            // Back (+Z): 5, 6, 7, 5, 7, 4
+            (p[5], p[6], p[7], p[4]),
+            // Left (-X): 4, 7, 3, 4, 3, 0
+            (p[4], p[7], p[3], p[0]),
+            // Right (+X): 1, 2, 6, 1, 6, 5
+            (p[1], p[2], p[6], p[5]),
+            // Top (+Y): 3, 7, 6, 3, 6, 2
+            (p[3], p[7], p[6], p[2]),
+            // Bottom (-Y): 4, 0, 1, 4, 1, 5
+            (p[4], p[0], p[1], p[5]),
+        ];
+
+        let mut vertices = Vec::with_capacity(24);
+        let mut indices = Vec::with_capacity(36);
+
+        for (v0, v1, v2, v3) in faces {
+            let start = vertices.len() as u32;
+            vertices.push(make_vert(v0));
+            vertices.push(make_vert(v1));
+            vertices.push(make_vert(v2));
+            vertices.push(make_vert(v3));
+
+            indices.push(start);
+            indices.push(start + 1);
+            indices.push(start + 2);
+            indices.push(start);
+            indices.push(start + 2);
+            indices.push(start + 3);
+        }
+
+        Self::new("skybox_cube", vertices, indices)
+    }
 }
 
 pub struct GpuMesh {

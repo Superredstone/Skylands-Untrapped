@@ -556,6 +556,40 @@ impl ArchiveMount {
         }
         files
     }
+
+    pub fn scan_embedded_igb(data: &[u8]) -> Vec<&[u8]> {
+        let mut results = Vec::new();
+        if data.len() < 16 {
+            return results;
+        }
+
+        let mut offset = 0;
+        while offset + 4 <= data.len() {
+            if &data[offset..offset + 4] == b"IGBF" {
+                let sub = &data[offset..];
+                if Cursor::new(sub).read_exact(&mut [0u8; 16]).is_ok() {
+                    let mut cur = Cursor::new(&sub[4..16]);
+                    let ver_le = cur.read_u32::<LittleEndian>().unwrap_or(u32::MAX);
+                    let (version, obj_count) = if ver_le < 0x1000 {
+                        (ver_le, cur.read_u32::<LittleEndian>().unwrap_or(0))
+                    } else {
+                        let mut cur_be = Cursor::new(&sub[4..16]);
+                        (
+                            cur_be.read_u32::<BigEndian>().unwrap_or(u32::MAX),
+                            cur_be.read_u32::<BigEndian>().unwrap_or(0),
+                        )
+                    };
+                    if (1..=20).contains(&version) || obj_count > 0 {
+                        results.push(sub);
+                    }
+                }
+                offset += 4;
+            } else {
+                offset += 1;
+            }
+        }
+        results
+    }
 }
 
 impl Default for ArchiveMount {

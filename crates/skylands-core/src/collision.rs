@@ -313,12 +313,48 @@ impl CollisionMesh {
     }
 
     pub fn from_igb(igb: &IgbModel) -> Self {
+        Self::from_igb_filtered(igb, true)
+    }
+
+    pub fn from_igb_filtered(igb: &IgbModel, filter_prefixes: bool) -> Self {
         let instances = igb.evaluate_scene_graph();
         let mut triangles = Vec::new();
+
+        let has_col_or_trig = if filter_prefixes {
+            let in_geos = igb.geometries.iter().any(|g| {
+                let lower = g.name.to_ascii_lowercase();
+                lower.starts_with("col_") || lower.starts_with("trig_")
+            });
+            let in_meshes = igb.meshes.iter().any(|m| {
+                let lower = m.name.to_ascii_lowercase();
+                lower.starts_with("col_") || lower.starts_with("trig_")
+            });
+            in_geos || in_meshes
+        } else {
+            false
+        };
+
+        let should_include = |name: &str| -> bool {
+            if !filter_prefixes {
+                return true;
+            }
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with("vis_") {
+                return false;
+            }
+            if has_col_or_trig {
+                lower.starts_with("col_") || lower.starts_with("trig_")
+            } else {
+                true
+            }
+        };
 
         if !igb.geometries.is_empty() {
             for inst in instances {
                 if let Some(geo) = igb.geometries.get(inst.geometry_index) {
+                    if !should_include(&geo.name) {
+                        continue;
+                    }
                     if let Some(mesh) = &geo.mesh {
                         let verts: Vec<[f32; 3]> =
                             mesh.vertices.iter().map(|v| v.position).collect();
@@ -333,6 +369,9 @@ impl CollisionMesh {
             }
         } else {
             for mesh in &igb.meshes {
+                if !should_include(&mesh.name) {
+                    continue;
+                }
                 let verts: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
                 let sub = Self::from_vertices_and_indices(&verts, &mesh.indices, None);
                 triangles.extend(sub.triangles);
@@ -498,5 +537,84 @@ mod tests {
         // No collision in open space
         let none = env.resolve_sphere([0.0, 1.0, 0.0], 0.5);
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn test_collision_mesh_prefix_filtering() {
+        use skylands_formats::igb::{IgbGeometryNode, IgbMesh, IgbVertex};
+
+        let mut igb = IgbModel {
+            header: skylands_formats::igb::IgbHeader {
+                magic: *skylands_formats::igb::IGB_MAGIC,
+                version: 8,
+                object_count: 3,
+                string_table_offset: 0,
+                endian: skylands_formats::igb::IgbEndian::Little,
+            },
+            directory: Vec::new(),
+            nodes: Vec::new(),
+            geometries: Vec::new(),
+            attr_lists: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffers: Vec::new(),
+            materials: Vec::new(),
+            textures: Vec::new(),
+            meshes: Vec::new(),
+        };
+
+        let make_mesh = |name: &str| -> IgbMesh {
+            IgbMesh {
+                name: name.to_string(),
+                vertices: vec![
+                    IgbVertex {
+                        position: [0.0, 0.0, 0.0],
+                        ..Default::default()
+                    },
+                    IgbVertex {
+                        position: [1.0, 0.0, 0.0],
+                        ..Default::default()
+                    },
+                    IgbVertex {
+                        position: [0.0, 0.0, 1.0],
+                        ..Default::default()
+                    },
+                ],
+                indices: vec![0, 1, 2],
+                material_name: None,
+            }
+        };
+
+        igb.geometries.push(IgbGeometryNode {
+            name: "col_floor".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: Some(make_mesh("col_floor")),
+        });
+        igb.geometries.push(IgbGeometryNode {
+            name: "vis_pillar".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: Some(make_mesh("vis_pillar")),
+        });
+        igb.geometries.push(IgbGeometryNode {
+            name: "trig_exit".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: Some(make_mesh("trig_exit")),
+        });
+
+        // Filtered: col_floor and trig_exit included (2 triangles), vis_pillar excluded
+        let filtered = CollisionMesh::from_igb(&igb);
+        assert_eq!(filtered.triangles.len(), 2);
+
+        // Unfiltered: all 3 included
+        let unfiltered = CollisionMesh::from_igb_filtered(&igb, false);
+        assert_eq!(unfiltered.triangles.len(), 3);
     }
 }
