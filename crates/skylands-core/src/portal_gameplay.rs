@@ -78,10 +78,11 @@ pub fn get_character_voice_path(character_id: u16) -> Option<&'static str> {
 
 pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'static str>) {
     match character_id {
-        400 => (
-            "models/characters/snapshot.igb",
+        400 | 462 => (
+            "462_Water_Crocky.bld",
             Some("textures/characters/snapshot.png"),
         ),
+        1010 => ("1010_Kaos.bld", Some("textures/characters/kaos.png")),
         401 => (
             "models/characters/foodfight.igb",
             Some("textures/characters/foodfight.png"),
@@ -109,10 +110,6 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
         407 => (
             "models/characters/gusto.igb",
             Some("textures/characters/gusto.png"),
-        ),
-        1010 => (
-            "models/characters/kaos.igb",
-            Some("textures/characters/kaos.png"),
         ),
         1001 => (
             "models/characters/thegulper.igb",
@@ -240,7 +237,27 @@ impl PortalGameplay {
         state: &mut GameStateMachine,
         audio: &mut AudioEngine,
     ) -> Vec<[u8; REPORT_SIZE]> {
-        let mut cmds = Vec::new();
+        // If slot already has an active tag with different character, remove it first
+        let mut cmds = if let Some((_, old_tag)) = self.active_tags.get(&slot) {
+            let old_id = if old_tag.is_trap {
+                old_tag.villain_id.unwrap_or(old_tag.variant)
+            } else {
+                old_tag.character_id
+            };
+            let new_id = if tag.is_trap || zone == PortalZone::TrapSlot {
+                tag.villain_id.unwrap_or(tag.variant)
+            } else {
+                tag.character_id
+            };
+            if old_id != new_id {
+                self.on_tag_removed(slot, world, state)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         let (name, elem) = get_character_info(tag.character_id);
 
         if tag.is_trap || zone == PortalZone::TrapSlot {
@@ -255,27 +272,31 @@ impl PortalGameplay {
             cmds.push(encode_trap_light_packet(r, g, b));
 
             let (model_path, tex_path) = get_character_asset_paths(villain);
-            world.spawn(
-                villain,
-                tag.variant,
-                name,
-                [0.0, 0.2, 0.0],
-                true,
-                Some(model_path.to_string()),
-                tex_path.map(|s| s.to_string()),
-            );
+            if world.find_by_character_id(villain).is_none() {
+                world.spawn(
+                    villain,
+                    tag.variant,
+                    name,
+                    [0.0, 0.2, 0.0],
+                    true,
+                    Some(model_path.to_string()),
+                    tex_path.map(|s| s.to_string()),
+                );
+            }
         } else {
             let (model_path, tex_path) = get_character_asset_paths(tag.character_id);
-            world.spawn(
-                tag.character_id,
-                tag.variant,
-                name,
-                [0.0, 0.2, 0.0],
-                false,
-                Some(model_path.to_string()),
-                tex_path.map(|s| s.to_string()),
-            );
-            audio.on_hero_summoned();
+            if world.find_by_character_id(tag.character_id).is_none() {
+                world.spawn(
+                    tag.character_id,
+                    tag.variant,
+                    name,
+                    [0.0, 0.2, 0.0],
+                    false,
+                    Some(model_path.to_string()),
+                    tex_path.map(|s| s.to_string()),
+                );
+                audio.on_hero_summoned();
+            }
 
             let (r, g, b) = elem.rgb();
             cmds.push(encode_color_packet(zone, r, g, b));
@@ -342,7 +363,7 @@ mod tests {
         assert_eq!(world.actors[0].character_id, 400);
         assert_eq!(
             world.actors[0].model_path,
-            Some("models/characters/snapshot.igb".to_string())
+            Some("462_Water_Crocky.bld".to_string())
         );
         assert_eq!(
             world.actors[0].texture_path,
@@ -370,7 +391,7 @@ mod tests {
         assert_eq!(world.actors[0].character_id, 1010);
         assert_eq!(
             world.actors[0].model_path,
-            Some("models/characters/kaos.igb".to_string())
+            Some("1010_Kaos.bld".to_string())
         );
         assert_eq!(
             world.actors[0].texture_path,
@@ -383,16 +404,13 @@ mod tests {
         assert_eq!(
             get_character_asset_paths(400),
             (
-                "models/characters/snapshot.igb",
+                "462_Water_Crocky.bld",
                 Some("textures/characters/snapshot.png")
             )
         );
         assert_eq!(
             get_character_asset_paths(1010),
-            (
-                "models/characters/kaos.igb",
-                Some("textures/characters/kaos.png")
-            )
+            ("1010_Kaos.bld", Some("textures/characters/kaos.png"))
         );
         assert_eq!(
             get_character_asset_paths(401),

@@ -136,11 +136,28 @@ impl GameEngine {
         let prev_state = self.state.current().clone();
         let events = self.portal.poll_events();
         for ev in events {
-            let outgoing =
+            let mut outgoing =
                 self.gameplay
                     .handle_event(ev, &mut self.world, &mut self.state, &mut self.audio);
-            for pkt in outgoing {
-                self.portal.send_packet(&pkt);
+            while !outgoing.is_empty() {
+                let current_outgoing = std::mem::take(&mut outgoing);
+                for pkt in current_outgoing {
+                    if let ActivePortal::Mock(mock) = &mut self.portal {
+                        if let Some(resp) = mock.send_command(&pkt) {
+                            if let Some(resp_ev) = decode_portal_response(&resp) {
+                                let extra = self.gameplay.handle_event(
+                                    resp_ev,
+                                    &mut self.world,
+                                    &mut self.state,
+                                    &mut self.audio,
+                                );
+                                outgoing.extend(extra);
+                            }
+                        }
+                    } else {
+                        self.portal.send_packet(&pkt);
+                    }
+                }
             }
         }
 
@@ -1030,6 +1047,41 @@ impl RenderAppHandler for AppRuntime {
             return;
         }
 
+        // Interactive Portal Hotkeys 1-8: swap Skylanders / summon villains on mock portal
+        if state {
+            let portal_target: Option<(u8, u16, bool, Option<u16>)> = match key_code {
+                KeyCode::Digit1 | KeyCode::Numpad1 => Some((1, 400, false, None)), // Snap Shot
+                KeyCode::Digit2 | KeyCode::Numpad2 => Some((1, 401, false, None)), // Food Fight
+                KeyCode::Digit3 | KeyCode::Numpad3 => Some((1, 402, false, None)), // Wildfire
+                KeyCode::Digit4 | KeyCode::Numpad4 => Some((1, 403, false, None)), // Wallop
+                KeyCode::Digit5 | KeyCode::Numpad5 => Some((1, 404, false, None)), // Gearshift
+                KeyCode::Digit6 | KeyCode::Numpad6 => Some((1, 405, false, None)), // Krypt King
+                KeyCode::Digit7 | KeyCode::Numpad7 => Some((1, 406, false, None)), // Enigma
+                KeyCode::Digit8 | KeyCode::Numpad8 => Some((0, 3010, true, Some(1010))), // Kaos Trap
+                _ => None,
+            };
+
+            if let Some((slot, char_id, is_trap, villain_id)) = portal_target {
+                if let ActivePortal::Mock(mock) = &mut self.engine.portal {
+                    mock.remove_tag(slot);
+                    let mut b0 = [0u8; 16];
+                    b0[0..4].copy_from_slice(&(0x1000u32 + char_id as u32).to_le_bytes());
+                    let mut b1 = [0u8; 16];
+                    b1[0..2].copy_from_slice(&char_id.to_le_bytes());
+                    if let Some(v) = villain_id {
+                        b1[2..4].copy_from_slice(&v.to_le_bytes());
+                    }
+                    let b8 = [0u8; 16];
+                    mock.insert_tag(slot, vec![b0, b1, b8]);
+                    info!(
+                        "Portal hotkey: inserted tag slot {} (char_id: {}, is_trap: {})",
+                        slot, char_id, is_trap
+                    );
+                }
+                return;
+            }
+        }
+
         if self.free_cam.enabled {
             match key_code {
                 KeyCode::KeyW
@@ -1434,7 +1486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn create_mock_portal() -> ActivePortal {
     let mut mock = MockPortal::new();
-    // Simulate placing Kaos Trap into Trap Slot (slot 0)
+    // 1. Simulate placing Kaos Trap into Trap Slot (slot 0)
     let mut block0 = [0u8; 16];
     block0[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
     let mut block1 = [0u8; 16];
@@ -1442,12 +1494,27 @@ fn create_mock_portal() -> ActivePortal {
     block1[2..4].copy_from_slice(&1010u16.to_le_bytes()); // Kaos Villain ID
     let block8 = [0u8; 16];
 
-    let tag = SkylanderTag::parse_blocks(&block0, &block1, &block8);
+    let trap_tag = SkylanderTag::parse_blocks(&block0, &block1, &block8);
     info!(
         "Mock Portal: inserted tag in Trap Slot (Character ID: {}, Villain: {:?}, IsTrap: {})",
-        tag.character_id, tag.villain_id, tag.is_trap
+        trap_tag.character_id, trap_tag.villain_id, trap_tag.is_trap
     );
     mock.insert_tag(0, vec![block0, block1, block8]);
+
+    // 2. Default Skylander hero (Snap Shot 400) placed in ring slot 1
+    let mut hero_block0 = [0u8; 16];
+    hero_block0[0..4].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+    let mut hero_block1 = [0u8; 16];
+    hero_block1[0..2].copy_from_slice(&400u16.to_le_bytes()); // Snap Shot
+    let hero_block8 = [0u8; 16];
+
+    let hero_tag = SkylanderTag::parse_blocks(&hero_block0, &hero_block1, &hero_block8);
+    info!(
+        "Mock Portal: inserted hero in Ring Slot (Character ID: {}, Name: Snap Shot)",
+        hero_tag.character_id
+    );
+    mock.insert_tag(1, vec![hero_block0, hero_block1, hero_block8]);
+
     ActivePortal::Mock(mock)
 }
 
@@ -1529,10 +1596,7 @@ mod tests {
             .find_by_character_id(1010)
             .expect("Kaos spawned");
         assert!(kaos.is_villain);
-        assert_eq!(
-            kaos.model_path.as_deref(),
-            Some("models/characters/kaos.igb")
-        );
+        assert_eq!(kaos.model_path.as_deref(), Some("1010_Kaos.bld"));
         assert_eq!(
             kaos.texture_path.as_deref(),
             Some("textures/characters/kaos.png")
@@ -1543,10 +1607,7 @@ mod tests {
             .find_by_character_id(400)
             .expect("Hero spawned");
         assert!(!hero.is_villain);
-        assert_eq!(
-            hero.model_path.as_deref(),
-            Some("models/characters/snapshot.igb")
-        );
+        assert_eq!(hero.model_path.as_deref(), Some("462_Water_Crocky.bld"));
         assert_eq!(
             hero.texture_path.as_deref(),
             Some("textures/characters/snapshot.png")
@@ -2123,5 +2184,35 @@ mod tests {
             .find(|a| a.id == hero_id)
             .unwrap();
         assert_eq!(hero.current_anim.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn test_interactive_portal_hotkeys_swap() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        // Advance ticks to let initial mock tags register
+        for _ in 0..5 {
+            runtime.engine.tick();
+        }
+        assert!(runtime.engine.world.find_by_character_id(400).is_some());
+
+        // Press Digit2: swaps slot 1 to Food Fight (401)
+        runtime.on_key(KeyCode::Digit2, true);
+        for _ in 0..5 {
+            runtime.engine.tick();
+        }
+        assert!(runtime.engine.world.find_by_character_id(400).is_none());
+        assert!(runtime.engine.world.find_by_character_id(401).is_some());
+
+        // Press Digit1: swaps back to Snap Shot (400)
+        runtime.on_key(KeyCode::Digit1, true);
+        for _ in 0..5 {
+            runtime.engine.tick();
+        }
+        assert!(runtime.engine.world.find_by_character_id(401).is_none());
+        assert!(runtime.engine.world.find_by_character_id(400).is_some());
     }
 }

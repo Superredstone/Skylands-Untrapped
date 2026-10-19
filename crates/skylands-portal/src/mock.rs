@@ -63,15 +63,25 @@ impl MockPortal {
             CMD_QUERY => {
                 let slot = pkt[1];
                 let block = pkt[2] as usize;
-                if let Some(blocks) = self.loaded_tags.get(&slot) {
-                    if block < blocks.len() {
-                        let mut resp = [0u8; REPORT_SIZE];
-                        resp[0] = CMD_QUERY;
-                        resp[1] = slot;
-                        resp[2] = block as u8;
-                        resp[3..19].copy_from_slice(&blocks[block]);
-                        return Some(resp);
-                    }
+                let block_data = match block {
+                    0 => self.loaded_tags.get(&slot).and_then(|b| b.first().copied()),
+                    1 => self.loaded_tags.get(&slot).and_then(|b| b.get(1).copied()),
+                    8 => self
+                        .loaded_tags
+                        .get(&slot)
+                        .and_then(|b| b.get(2).or_else(|| b.get(8)).copied()),
+                    other => self
+                        .loaded_tags
+                        .get(&slot)
+                        .and_then(|b| b.get(other).copied()),
+                };
+                if let Some(data) = block_data {
+                    let mut resp = [0u8; REPORT_SIZE];
+                    resp[0] = CMD_QUERY;
+                    resp[1] = slot;
+                    resp[2] = block as u8;
+                    resp[3..19].copy_from_slice(&data);
+                    return Some(resp);
                 }
                 None
             }
