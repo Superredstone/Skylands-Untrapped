@@ -230,6 +230,8 @@ pub enum MarkerKind {
     Spawn,
     Prop,
     Collectible,
+    TriggerZone,
+    Doorway,
     Other,
 }
 
@@ -238,6 +240,10 @@ impl MarkerKind {
         let lower = name.to_ascii_lowercase();
         if lower.starts_with("sp_") || lower.starts_with("spawn_") {
             Some(MarkerKind::Spawn)
+        } else if lower.starts_with("door_") || lower.starts_with("exit_") {
+            Some(MarkerKind::Doorway)
+        } else if lower.starts_with("portal_") || lower.starts_with("zone_") {
+            Some(MarkerKind::TriggerZone)
         } else if lower.starts_with("prop_") {
             Some(MarkerKind::Prop)
         } else if lower.starts_with("pickup_")

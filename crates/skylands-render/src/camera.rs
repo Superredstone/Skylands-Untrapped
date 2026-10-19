@@ -114,6 +114,32 @@ pub mod mat4 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CameraVolumeMode {
+    FixedOverhead { height: f32, distance: f32 },
+    FollowingChase { height: f32, distance: f32 },
+    FixedCinematic { eye: [f32; 3], target: [f32; 3] },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraVolume {
+    pub name: String,
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub mode: CameraVolumeMode,
+}
+
+impl CameraVolume {
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        p[0] >= self.bounds_min[0]
+            && p[0] <= self.bounds_max[0]
+            && p[1] >= self.bounds_min[1]
+            && p[1] <= self.bounds_max[1]
+            && p[2] >= self.bounds_min[2]
+            && p[2] <= self.bounds_max[2]
+    }
+}
+
 pub struct Camera {
     pub eye: [f32; 3],
     pub target: [f32; 3],
@@ -122,18 +148,64 @@ pub struct Camera {
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+    pub target_eye: [f32; 3],
+    pub target_target: [f32; 3],
+    pub volumes: Vec<CameraVolume>,
 }
 
 impl Camera {
     pub fn new(aspect: f32) -> Self {
+        let eye = [0.0, 4.0, 7.0];
+        let target = [0.0, 0.0, 0.0];
         Self {
-            eye: [0.0, 4.0, 7.0],
-            target: [0.0, 0.0, 0.0],
+            eye,
+            target,
             up: [0.0, 1.0, 0.0],
             fov_y: 60.0f32.to_radians(),
             aspect,
             near: 0.1,
             far: 100.0,
+            target_eye: eye,
+            target_target: target,
+            volumes: Vec::new(),
+        }
+    }
+
+    pub fn update_interpolation(&mut self, dt: f32) {
+        let t = (dt * 5.0).clamp(0.0, 1.0);
+        for i in 0..3 {
+            self.eye[i] += (self.target_eye[i] - self.eye[i]) * t;
+            self.target[i] += (self.target_target[i] - self.target[i]) * t;
+        }
+    }
+
+    pub fn set_immediate(&mut self, eye: [f32; 3], target: [f32; 3]) {
+        self.eye = eye;
+        self.target = target;
+        self.target_eye = eye;
+        self.target_target = target;
+    }
+
+    pub fn update_target_for_hero(&mut self, hero_pos: [f32; 3]) {
+        if let Some(vol) = self.volumes.iter().find(|v| v.contains(hero_pos)) {
+            match vol.mode {
+                CameraVolumeMode::FixedOverhead { height, distance } => {
+                    self.target_target = hero_pos;
+                    self.target_eye = [hero_pos[0], hero_pos[1] + height, hero_pos[2] + distance];
+                }
+                CameraVolumeMode::FollowingChase { height, distance } => {
+                    self.target_target = hero_pos;
+                    self.target_eye = [hero_pos[0], hero_pos[1] + height, hero_pos[2] + distance];
+                }
+                CameraVolumeMode::FixedCinematic { eye, target } => {
+                    self.target_eye = eye;
+                    self.target_target = target;
+                }
+            }
+        } else {
+            // Default following chase camera
+            self.target_target = hero_pos;
+            self.target_eye = [hero_pos[0], hero_pos[1] + 4.5, hero_pos[2] + 7.5];
         }
     }
 
@@ -196,5 +268,29 @@ mod tests {
         // Point behind camera should return None
         let behind = cam.project_to_screen([0.0, 10.0, 20.0], (800.0, 600.0));
         assert!(behind.is_none());
+    }
+
+    #[test]
+    fn test_camera_smooth_lerp() {
+        let mut cam = Camera::new(16.0 / 9.0);
+        cam.set_immediate([0.0, 5.0, 10.0], [0.0, 0.0, 0.0]);
+        assert_eq!(cam.eye, [0.0, 5.0, 10.0]);
+
+        cam.target_eye = [10.0, 5.0, 10.0];
+        cam.target_target = [10.0, 0.0, 0.0];
+
+        // Step by 0.016s (approx 60Hz dt)
+        cam.update_interpolation(0.016);
+
+        // Camera must move towards target without snapping immediately
+        assert!(cam.eye[0] > 0.0 && cam.eye[0] < 10.0);
+        assert!(cam.target[0] > 0.0 && cam.target[0] < 10.0);
+
+        // Multiple steps converge
+        for _ in 0..60 {
+            cam.update_interpolation(0.05);
+        }
+        assert!((cam.eye[0] - 10.0).abs() < 0.1);
+        assert!((cam.target[0] - 10.0).abs() < 0.1);
     }
 }

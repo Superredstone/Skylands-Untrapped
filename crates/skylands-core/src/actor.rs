@@ -45,12 +45,30 @@ pub enum ActorKind {
     Collectible { value: u32, collected: bool },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WorldAudioCue {
     PickupCollected,
     HeroAttack(AttackKind),
     AttackHit,
     PropDestroyed,
+    ZoneEntered(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneTrigger {
+    pub id: u32,
+    pub position: [f32; 3],
+    pub radius: f32,
+    pub target_zone: String,
+    pub target_spawn: [f32; 3],
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Zone {
+    pub name: String,
+    pub archive_path: String,
+    pub bounding_box: ([f32; 3], [f32; 3]),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +102,10 @@ pub struct World {
     pub coins: u32,
     pub damage_popups: Vec<DamagePopup>,
     pub projectiles: Vec<Projectile>,
+    pub active_zone: String,
+    pub zones: Vec<Zone>,
+    pub triggers: Vec<ZoneTrigger>,
+    pub active_prompt: Option<String>,
 }
 
 impl World {
@@ -97,6 +119,10 @@ impl World {
             coins: 0,
             damage_popups: Vec::new(),
             projectiles: Vec::new(),
+            active_zone: "Courtyard".to_string(),
+            zones: Vec::new(),
+            triggers: Vec::new(),
+            active_prompt: None,
         }
     }
 
@@ -238,6 +264,14 @@ impl World {
         std::mem::take(&mut self.pending_audio_cues)
     }
 
+    pub fn unload_zone_entities(&mut self) {
+        self.actors.retain(|a| Some(a.id) == self.active_hero_id);
+        self.projectiles.clear();
+        self.damage_popups.clear();
+        self.triggers.clear();
+        self.active_prompt = None;
+    }
+
     pub fn load_level_entities(&mut self, markers: &[LevelMarker]) {
         for marker in markers {
             let lower = marker.name.to_ascii_lowercase();
@@ -254,6 +288,27 @@ impl World {
             } else {
                 match marker.kind {
                     MarkerKind::Spawn => {}
+                    MarkerKind::TriggerZone | MarkerKind::Doorway => {
+                        let target_zone = if lower.contains("library") {
+                            "Library".to_string()
+                        } else if lower.contains("arena") {
+                            "Arena".to_string()
+                        } else if lower.contains("courtyard") {
+                            "Courtyard".to_string()
+                        } else {
+                            "Next Zone".to_string()
+                        };
+                        let prompt = format!("Press A to enter {}", target_zone);
+                        let trigger_id = (self.triggers.len() + 1) as u32;
+                        self.triggers.push(ZoneTrigger {
+                            id: trigger_id,
+                            position: marker.position,
+                            radius: 2.5,
+                            target_zone,
+                            target_spawn: [0.0, 0.0, 0.0],
+                            prompt,
+                        });
+                    }
                     MarkerKind::Prop => {
                         let destructible = lower.contains("barrel")
                             || lower.contains("crate")
@@ -607,6 +662,34 @@ impl World {
                 }
             }
         }
+
+        // 6. Update triggers and interactive prompts
+        let mut active_prompt = None;
+        let mut triggered_transition: Option<(String, [f32; 3])> = None;
+
+        if has_hero {
+            for trigger in &self.triggers {
+                let dx = hero_pos[0] - trigger.position[0];
+                let dy = hero_pos[1] - trigger.position[1];
+                let dz = hero_pos[2] - trigger.position[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist <= trigger.radius {
+                    active_prompt = Some(trigger.prompt.clone());
+                    if input.is_down(WiiButton::A) {
+                        triggered_transition =
+                            Some((trigger.target_zone.clone(), trigger.target_spawn));
+                    }
+                    break;
+                }
+            }
+        }
+        self.active_prompt = active_prompt;
+
+        if let Some((target_zone, target_spawn)) = triggered_transition {
+            self.pending_audio_cues
+                .push(WorldAudioCue::ZoneEntered(target_zone.clone()));
+            self.transition_to_zone(&target_zone, target_spawn);
+        }
     }
 
     pub fn apply_damage(&mut self, target_id: u32, damage: u32, hit_pos: [f32; 3]) {
@@ -683,6 +766,18 @@ impl World {
         }
     }
 
+    pub fn transition_to_zone(&mut self, target_zone: &str, target_spawn: [f32; 3]) {
+        self.active_zone = target_zone.to_string();
+        self.unload_zone_entities();
+        self.environment.spawn_point = target_spawn;
+        if let Some(hero_id) = self.active_hero_id {
+            if let Some(hero) = self.actors.iter_mut().find(|a| a.id == hero_id) {
+                hero.position = target_spawn;
+                hero.velocity = [0.0, 0.0, 0.0];
+            }
+        }
+    }
+
     pub fn hud_state(&self, state: &crate::state::GameStateMachine) -> HudState {
         let (hero_name, hero_element, health, max_health) = if let Some(hero) = self
             .active_hero_id
@@ -717,6 +812,16 @@ impl World {
             max_health,
             coins: self.coins,
             villain_capture,
+            prompt: self.active_prompt.clone(),
+            transition: match state.current() {
+                crate::state::GameState::ZoneTransition {
+                    from_zone,
+                    to_zone,
+                    timer,
+                    fade_duration,
+                } => Some((from_zone.clone(), to_zone.clone(), *timer, *fade_duration)),
+                _ => None,
+            },
         }
     }
 }
@@ -729,6 +834,8 @@ pub struct HudState {
     pub max_health: u32,
     pub coins: u32,
     pub villain_capture: Option<(String, f32)>,
+    pub prompt: Option<String>,
+    pub transition: Option<(String, String, f32, f32)>,
 }
 
 impl Default for World {
@@ -1018,5 +1125,82 @@ mod tests {
         assert!(world.projectiles.is_empty());
         assert!(!world.damage_popups.is_empty());
         assert_eq!(world.damage_popups[0].text, "-75");
+    }
+
+    #[test]
+    fn test_zone_trigger_detection_and_prompt() {
+        let mut world = World::new();
+        let hero_id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+        world.active_hero_id = Some(hero_id);
+
+        world.triggers.push(ZoneTrigger {
+            id: 1,
+            position: [0.0, 0.0, 5.0],
+            radius: 2.0,
+            target_zone: "Library".to_string(),
+            target_spawn: [1.0, 0.0, 1.0],
+            prompt: "Press A to enter Library".to_string(),
+        });
+
+        let sm = crate::state::GameStateMachine::new();
+
+        // 1. Outside radius -> no prompt
+        let neutral = WiiInputState::new();
+        world.update(0.016, &neutral);
+        assert_eq!(world.active_prompt, None);
+        let hud = world.hud_state(&sm);
+        assert_eq!(hud.prompt, None);
+
+        // 2. Move hero inside trigger radius (at [0.0, 0.0, 4.5])
+        if let Some(hero) = world.actors.iter_mut().find(|a| a.id == hero_id) {
+            hero.position = [0.0, 0.0, 4.5];
+        }
+        world.update(0.016, &neutral);
+        assert_eq!(
+            world.active_prompt,
+            Some("Press A to enter Library".to_string())
+        );
+        let hud = world.hud_state(&sm);
+        assert_eq!(hud.prompt, Some("Press A to enter Library".to_string()));
+    }
+
+    #[test]
+    fn test_zone_transition_hero_reposition() {
+        let mut world = World::new();
+        let hero_id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 4.5], false, None, None);
+        world.active_hero_id = Some(hero_id);
+
+        // Spawn a prop that should be unloaded during zone transition
+        let prop_id = world.spawn_prop("prop_barrel", [1.0, 0.0, 1.0], true, None, None);
+        assert!(world.actors.iter().any(|a| a.id == prop_id));
+
+        world.triggers.push(ZoneTrigger {
+            id: 1,
+            position: [0.0, 0.0, 5.0],
+            radius: 2.0,
+            target_zone: "Academy Arena".to_string(),
+            target_spawn: [10.0, 1.0, -15.0],
+            prompt: "Press A to enter Academy Arena".to_string(),
+        });
+
+        // Press A while inside trigger
+        let mut input = WiiInputState::new();
+        input.press(WiiButton::A);
+        world.update(0.016, &input);
+
+        // Zone entered audio cue emitted
+        let cues = world.drain_audio_cues();
+        assert_eq!(
+            cues,
+            vec![WorldAudioCue::ZoneEntered("Academy Arena".to_string())]
+        );
+
+        // Active zone updated, hero repositioned at target spawn
+        assert_eq!(world.active_zone, "Academy Arena");
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert_eq!(hero.position, [10.0, 1.0, -15.0]);
+
+        // Old dynamic prop entity unloaded; hero preserved
+        assert!(world.actors.iter().all(|a| a.id == hero_id));
     }
 }

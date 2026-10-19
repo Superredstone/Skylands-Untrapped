@@ -9,9 +9,9 @@ use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    mat4, Camera, EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuTexture, InstanceRaw,
-    LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer, UiBatch, WindowApp,
-    WindowConfig,
+    mat4, Camera, CameraVolume, CameraVolumeMode, EnvironmentScene, EnvironmentSubmesh, GpuMesh,
+    GpuTexture, InstanceRaw, LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer,
+    UiBatch, WindowApp, WindowConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,10 +105,20 @@ impl GameEngine {
             academy_area: "Skylander Academy Courtyard".into(),
         });
 
+        let mut world = World::new();
+        world.triggers.push(skylands_core::ZoneTrigger {
+            id: 1,
+            position: [0.0, 0.0, -8.0],
+            radius: 2.5,
+            target_zone: "Academy Library".to_string(),
+            target_spawn: [0.0, 0.0, 5.0],
+            prompt: "Press A to Enter Academy".to_string(),
+        });
+
         Self {
             portal,
             gameplay: PortalGameplay::new(),
-            world: World::new(),
+            world,
             state,
             input: InputMapper::new(),
             audio: AudioEngine::new(),
@@ -167,6 +177,16 @@ impl GameEngine {
                 WorldAudioCue::HeroAttack(kind) => self.audio.on_hero_attack(kind),
                 WorldAudioCue::AttackHit => self.audio.on_attack_hit(),
                 WorldAudioCue::PropDestroyed => self.audio.on_prop_destroyed(),
+                WorldAudioCue::ZoneEntered(ref to_zone) => {
+                    self.audio.system.play_sfx_tone(660.0, 0.25);
+                    let from_zone = self.world.active_zone.clone();
+                    self.state.set_state(GameState::ZoneTransition {
+                        from_zone,
+                        to_zone: to_zone.clone(),
+                        timer: 0.0,
+                        fade_duration: 1.0,
+                    });
+                }
             }
         }
 
@@ -228,6 +248,16 @@ impl GameEngine {
             }
         }
         self.world.environment.mesh = CollisionMesh::synthetic_courtyard();
+        if self.world.triggers.is_empty() {
+            self.world.triggers.push(skylands_core::ZoneTrigger {
+                id: 1,
+                position: [0.0, 0.0, -8.0],
+                radius: 2.5,
+                target_zone: "Academy Library".to_string(),
+                target_spawn: [0.0, 0.0, 5.0],
+                prompt: "Press A to Enter Academy".to_string(),
+            });
+        }
     }
 }
 
@@ -254,11 +284,34 @@ pub struct AppRuntime {
 
 impl AppRuntime {
     pub fn new(engine: GameEngine, assets: Arc<AssetLoader>) -> Self {
+        let mut camera = Camera::new(1280.0 / 720.0);
+        // Camera volumes:
+        // 1. Hub Courtyard fixed overhead view
+        camera.volumes.push(CameraVolume {
+            name: "Courtyard Overhead".to_string(),
+            bounds_min: [-15.0, -5.0, -15.0],
+            bounds_max: [15.0, 15.0, 15.0],
+            mode: CameraVolumeMode::FixedOverhead {
+                height: 8.0,
+                distance: 10.0,
+            },
+        });
+        // 2. Portal gate fixed cinematic angle
+        camera.volumes.push(CameraVolume {
+            name: "Portal Cinematic".to_string(),
+            bounds_min: [-3.0, -2.0, -12.0],
+            bounds_max: [3.0, 10.0, -5.0],
+            mode: CameraVolumeMode::FixedCinematic {
+                eye: [0.0, 3.0, -4.0],
+                target: [0.0, 1.0, -8.0],
+            },
+        });
+
         Self {
             engine,
             assets,
             renderer: None,
-            camera: Camera::new(1280.0 / 720.0),
+            camera,
             pedestal_mesh: None,
             actor_mesh: None,
             skybox_mesh: None,
@@ -513,12 +566,14 @@ impl AppRuntime {
                         || l.starts_with("spawn_start")
                         || l.starts_with("sp_start")
                 }) {
-                    self.camera.target = spawn.position;
-                    self.camera.eye = [
-                        spawn.position[0],
-                        spawn.position[1] + 4.5,
-                        spawn.position[2] + 7.5,
-                    ];
+                    self.camera.set_immediate(
+                        [
+                            spawn.position[0],
+                            spawn.position[1] + 4.5,
+                            spawn.position[2] + 7.5,
+                        ],
+                        spawn.position,
+                    );
                 }
             }
 
@@ -542,6 +597,17 @@ impl AppRuntime {
             self.environment = Some(EnvironmentScene::new(loaded_name, submeshes));
         } else {
             self.engine.world.environment.mesh = CollisionMesh::synthetic_courtyard();
+            // Default courtyard triggers if no level file loaded
+            if self.engine.world.triggers.is_empty() {
+                self.engine.world.triggers.push(skylands_core::ZoneTrigger {
+                    id: 1,
+                    position: [0.0, 0.0, -8.0],
+                    radius: 2.5,
+                    target_zone: "Academy Library".to_string(),
+                    target_spawn: [0.0, 0.0, 5.0],
+                    prompt: "Press A to Enter Academy".to_string(),
+                });
+            }
             let renderer = self.renderer.as_ref()?;
             self.environment = Some(EnvironmentScene::synthetic_courtyard(&renderer.device));
         }
@@ -692,6 +758,66 @@ impl AppRuntime {
                 ui_batch.draw_text(1, &popup.text, sx, sy - y_offset, 14.0, color);
             }
         }
+
+        // 5. Interaction prompt banner at screen bottom when near a trigger
+        if let Some(prompt) = &hud.prompt {
+            let banner_w = 460.0_f32.min(width - 40.0);
+            let banner_h = 44.0;
+            let banner_x = (width - banner_w) * 0.5;
+            let banner_y = height - 70.0;
+
+            // Outer dark frame
+            ui_batch.draw_rect(
+                [banner_x, banner_y, banner_w, banner_h],
+                [0.1, 0.12, 0.18, 0.9],
+            );
+            // Inner accent frame
+            ui_batch.draw_rect(
+                [
+                    banner_x + 2.0,
+                    banner_y + 2.0,
+                    banner_w - 4.0,
+                    banner_h - 4.0,
+                ],
+                [0.15, 0.22, 0.32, 0.95],
+            );
+
+            // Button badge icon (A)
+            let badge_x = banner_x + 24.0;
+            let badge_y = banner_y + 22.0;
+            ui_batch.draw_diamond(badge_x, badge_y, 14.0, [0.1, 0.6, 0.9, 1.0]);
+            ui_batch.draw_text(
+                1,
+                "A",
+                badge_x - 4.0,
+                badge_y - 7.0,
+                14.0,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+
+            // Prompt text
+            ui_batch.draw_text(
+                1,
+                prompt,
+                banner_x + 48.0,
+                banner_y + 14.0,
+                14.0,
+                [1.0, 0.95, 0.7, 1.0],
+            );
+        }
+
+        // 6. Screen fade overlay (black quad with alpha fade_alpha) during GameState::ZoneTransition
+        if let Some((_, _, timer, duration)) = hud.transition {
+            if duration > 0.0 {
+                let half_dur = duration * 0.5;
+                let fade_alpha = if timer < half_dur {
+                    (timer / half_dur).clamp(0.0, 1.0)
+                } else {
+                    (1.0 - (timer - half_dur) / half_dur).clamp(0.0, 1.0)
+                };
+                ui_batch.draw_rect([0.0, 0.0, width, height], [0.0, 0.0, 0.0, fade_alpha]);
+            }
+        }
     }
 }
 
@@ -781,7 +907,8 @@ impl RenderAppHandler for AppRuntime {
     }
 
     fn on_render(&mut self) {
-        self.anim_time += 1.0 / 60.0;
+        let dt = 1.0 / 60.0;
+        self.anim_time += dt;
 
         if self.engine.world.active_hero_id != self.last_active_hero_id {
             self.last_active_hero_id = self.engine.world.active_hero_id;
@@ -823,17 +950,13 @@ impl RenderAppHandler for AppRuntime {
         if let Some(r) = &mut self.renderer {
             if let Some(hero_id) = self.engine.world.active_hero_id {
                 if let Some(hero) = self.engine.world.actors.iter().find(|a| a.id == hero_id) {
-                    self.camera.target = hero.position;
-                    self.camera.eye = [
-                        hero.position[0],
-                        hero.position[1] + 4.5,
-                        hero.position[2] + 7.5,
-                    ];
+                    self.camera.update_target_for_hero(hero.position);
                 }
             } else {
-                self.camera.target = [0.0, 0.0, 0.0];
-                self.camera.eye = [0.0, 4.5, 7.5];
+                self.camera.target_target = [0.0, 0.0, 0.0];
+                self.camera.target_eye = [0.0, 4.5, 7.5];
             }
+            self.camera.update_interpolation(dt);
 
             let view_proj = self.camera.build_view_projection_matrix();
             r.update_camera(view_proj);
@@ -1481,5 +1604,82 @@ mod tests {
         AppRuntime::build_hud_overlay(&runtime.engine, &camera, 800.0, 600.0, &mut ui);
         assert!(!ui.vertices.is_empty());
         assert!(!ui.indices.is_empty());
+    }
+
+    #[test]
+    fn test_headless_zone_transition_walk_into_trigger_and_step() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        let hero_id =
+            runtime
+                .engine
+                .world
+                .spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+        assert_eq!(runtime.engine.world.active_hero_id, Some(hero_id));
+
+        // Place a doorway trigger 3m ahead on -Z
+        runtime.engine.world.triggers.clear();
+        runtime
+            .engine
+            .world
+            .triggers
+            .push(skylands_core::ZoneTrigger {
+                id: 1,
+                position: [0.0, 0.0, -3.0],
+                radius: 1.5,
+                target_zone: "Academy Library".to_string(),
+                target_spawn: [0.0, 0.0, 10.0],
+                prompt: "Press A to Enter Library".to_string(),
+            });
+
+        // Walk hero forward (Key W -> positive stick Y -> negative Z velocity)
+        runtime.engine.input.handle_key_code(17, true);
+        for _ in 0..20 {
+            runtime.engine.tick();
+        }
+        runtime.engine.input.handle_key_code(17, false);
+
+        // Verify hero moved inside trigger and prompt is active
+        assert_eq!(
+            runtime.engine.world.active_prompt,
+            Some("Press A to Enter Library".to_string())
+        );
+
+        // Trigger Button A (Space keycode 57 -> WiiButton::A)
+        runtime.engine.input.handle_key_code(57, true);
+        runtime.engine.tick();
+        runtime.engine.input.handle_key_code(57, false);
+
+        // State machine entered ZoneTransition
+        assert!(matches!(
+            runtime.engine.state.current(),
+            GameState::ZoneTransition { .. }
+        ));
+
+        // Step 30 ticks through fade transition
+        for _ in 0..30 {
+            runtime.engine.tick();
+            if let Some(hero) = runtime.engine.world.actors.iter().find(|a| a.id == hero_id) {
+                runtime.camera.update_target_for_hero(hero.position);
+            }
+            runtime.camera.update_interpolation(0.016);
+        }
+
+        // Verify active zone is Library, hero repositioned at target spawn (10.0 on Z)
+        assert_eq!(runtime.engine.world.active_zone, "Academy Library");
+        let hero = runtime
+            .engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.position, [0.0, 0.0, 10.0]);
+
+        // Verify camera smoothly repositioned towards hero
+        assert!(runtime.camera.target[2] > 0.0);
     }
 }

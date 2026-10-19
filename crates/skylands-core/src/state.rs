@@ -2,9 +2,23 @@
 pub enum GameState {
     Boot,
     Title,
-    Hub { academy_area: String },
-    Level { level_id: u32, name: String },
-    VillainCapture { villain_id: u16, progress: f32 },
+    Hub {
+        academy_area: String,
+    },
+    Level {
+        level_id: u32,
+        name: String,
+    },
+    VillainCapture {
+        villain_id: u16,
+        progress: f32,
+    },
+    ZoneTransition {
+        from_zone: String,
+        to_zone: String,
+        timer: f32,
+        fade_duration: f32,
+    },
 }
 
 pub struct GameStateMachine {
@@ -34,19 +48,32 @@ impl GameStateMachine {
     }
 
     pub fn tick(&mut self, dt: f32) {
-        if let GameState::VillainCapture {
-            villain_id: _,
-            progress,
-        } = &mut self.current
-        {
-            *progress = (*progress + dt * 0.5).min(1.0);
-            if *progress >= 1.0 {
-                // Restore state prior to capture, or default to Hub
-                let next = self.previous.take().unwrap_or_else(|| GameState::Hub {
-                    academy_area: "Courtyard".into(),
-                });
-                self.current = next;
+        match &mut self.current {
+            GameState::VillainCapture { progress, .. } => {
+                *progress = (*progress + dt * 0.5).min(1.0);
+                if *progress >= 1.0 {
+                    // Restore state prior to capture, or default to Hub
+                    let next = self.previous.take().unwrap_or_else(|| GameState::Hub {
+                        academy_area: "Courtyard".into(),
+                    });
+                    self.current = next;
+                }
             }
+            GameState::ZoneTransition {
+                to_zone,
+                timer,
+                fade_duration,
+                ..
+            } => {
+                *timer += dt;
+                if *timer >= *fade_duration {
+                    let target_area = to_zone.clone();
+                    self.current = GameState::Hub {
+                        academy_area: target_area,
+                    };
+                }
+            }
+            _ => {}
         }
     }
 

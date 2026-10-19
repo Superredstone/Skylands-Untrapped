@@ -8,7 +8,7 @@ pub mod tick;
 
 pub use actor::{
     ActiveAttack, Actor, ActorKind, AttackKind, DamagePopup, HudState, Projectile, World,
-    WorldAudioCue,
+    WorldAudioCue, Zone, ZoneTrigger,
 };
 pub use audio::{AudioEngine, PortalSpeakerSink, SystemAudioSink};
 pub use collision::{Aabb, CharacterCollider, CollisionMesh, Environment, Triangle};
