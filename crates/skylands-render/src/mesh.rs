@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use skylands_formats::igb::{IgbMesh, IgbVertex};
+use skylands_formats::igb::{IgbGeometryNode, IgbMesh, IgbVertex};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -114,6 +114,10 @@ impl Mesh {
             vertices,
             indices: igb_mesh.indices.clone(),
         }
+    }
+
+    pub fn from_geometry(geometry: &IgbGeometryNode) -> Option<Self> {
+        geometry.mesh.as_ref().map(Self::from_igb)
     }
 
     pub fn unit_quad() -> Self {
@@ -267,6 +271,26 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 1);
         assert_eq!(mesh.vertices[0].position, [1.0, 2.0, 3.0]);
         assert_eq!(mesh.indices, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_mesh_conversion_from_geometry_node() {
+        let igb_mesh = IgbMesh {
+            name: "geo_mesh".to_string(),
+            vertices: vec![IgbVertex::default()],
+            indices: vec![0, 0, 0],
+        };
+        let geo = IgbGeometryNode {
+            name: "geo_node".to_string(),
+            vertex_buffer_index: Some(0),
+            index_buffer_index: Some(0),
+            attr_list_index: Some(0),
+            mesh: Some(igb_mesh),
+        };
+
+        let mesh = Mesh::from_geometry(&geo).expect("Mesh converted from geometry");
+        assert_eq!(mesh.name, "geo_mesh");
+        assert_eq!(mesh.vertices.len(), 1);
     }
 
     #[test]

@@ -194,14 +194,43 @@ impl AppRuntime {
         if !self.dynamic_meshes.contains_key(&key) {
             let renderer = self.renderer.as_ref()?;
             if let Ok(igb) = self.assets.load_igb(path) {
-                if let Some(first_mesh) = igb.meshes.first() {
-                    let mesh = Mesh::from_igb(first_mesh);
+                // First inspect parsed igGeometry nodes if present
+                let mut resolved_mesh = None;
+                for geo in &igb.geometries {
+                    if let Some(m) = Mesh::from_geometry(geo) {
+                        resolved_mesh = Some(m);
+                        break;
+                    }
+                }
+                // Fallback to top-level meshes
+                let mesh = resolved_mesh.or_else(|| igb.meshes.first().map(Mesh::from_igb));
+                if let Some(mesh) = mesh {
                     let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
                     self.dynamic_meshes.insert(key.clone(), gpu_mesh);
                 }
             }
         }
         self.dynamic_meshes.get(&key)
+    }
+
+    pub fn load_geometry_nodes(&mut self, path: &str) -> Vec<String> {
+        let mut loaded_keys = Vec::new();
+        let renderer = match self.renderer.as_ref() {
+            Some(r) => r,
+            None => return loaded_keys,
+        };
+
+        if let Ok(igb) = self.assets.load_igb(path) {
+            for (i, geo) in igb.geometries.iter().enumerate() {
+                if let Some(mesh) = Mesh::from_geometry(geo) {
+                    let subkey = format!("{}:{}", path.replace('\\', "/").to_ascii_lowercase(), i);
+                    let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
+                    self.dynamic_meshes.insert(subkey.clone(), gpu_mesh);
+                    loaded_keys.push(subkey);
+                }
+            }
+        }
+        loaded_keys
     }
 
     pub fn load_cmpr_texture(
