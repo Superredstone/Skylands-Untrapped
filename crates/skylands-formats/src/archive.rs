@@ -478,6 +478,28 @@ impl ArchiveMount {
         Ok(())
     }
 
+    pub fn mount_dir<P: AsRef<Path>>(&mut self, dir: P) -> Result<usize, ArchiveError> {
+        let mut count = 0;
+        let dir = dir.as_ref();
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                count += self.mount_dir(&path)?;
+            } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if (ext.eq_ignore_ascii_case("arc") || ext.eq_ignore_ascii_case("bld"))
+                    && self.mount(&path).is_ok()
+                {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     pub fn count(&self) -> usize {
         self.archives.len()
     }
@@ -502,18 +524,24 @@ impl ArchiveMount {
                 return archive.read_file_by_hash(hash);
             }
         }
-        let hash = hash_path(path);
-        self.read_file_by_hash(hash)
+        let hash = hash_path(&normalized);
+        if let Ok(data) = self.read_file_by_hash(hash) {
+            return Ok(data);
+        }
+        let hash_lower = hash_path(&lower);
+        self.read_file_by_hash(hash_lower)
     }
 
     pub fn contains_path(&self, path: &str) -> bool {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
-        let hash = hash_path(path);
+        let hash = hash_path(&normalized);
+        let hash_lower = hash_path(&lower);
         for archive in &self.archives {
             if archive.name_to_hash.contains_key(&normalized)
                 || archive.name_to_hash.contains_key(&lower)
                 || archive.entries.contains_key(&hash)
+                || archive.entries.contains_key(&hash_lower)
             {
                 return true;
             }

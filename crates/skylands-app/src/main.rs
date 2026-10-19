@@ -4,13 +4,14 @@ use skylands_core::{
     AudioEngine, FixedTimestep, GameState, GameStateMachine, InputMapper, PortalGameplay, World,
 };
 use skylands_extractor::Extractor;
-use skylands_formats::{decode_cmpr, ArchiveMount};
+use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
     mat4, Camera, GpuMesh, GpuTexture, InstanceRaw, Mesh, RenderAppHandler, Renderer, WindowApp,
     WindowConfig,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -92,10 +93,11 @@ pub struct GameEngine {
     pub audio: AudioEngine,
     pub timestep: FixedTimestep,
     pub last_frame: Instant,
+    pub assets: Arc<AssetLoader>,
 }
 
 impl GameEngine {
-    pub fn new(portal: ActivePortal) -> Self {
+    pub fn new(portal: ActivePortal, assets: Arc<AssetLoader>) -> Self {
         let mut state = GameStateMachine::new();
         state.set_state(GameState::Hub {
             academy_area: "Skylander Academy Courtyard".into(),
@@ -110,6 +112,7 @@ impl GameEngine {
             audio: AudioEngine::new(),
             timestep: FixedTimestep::new(),
             last_frame: Instant::now(),
+            assets,
         }
     }
 
@@ -161,23 +164,69 @@ impl GameEngine {
 
 pub struct AppRuntime {
     pub engine: GameEngine,
+    pub assets: Arc<AssetLoader>,
     pub renderer: Option<Renderer>,
     pub camera: Camera,
     pub pedestal_mesh: Option<GpuMesh>,
     pub actor_mesh: Option<GpuMesh>,
     pub actor_texture: Option<GpuTexture>,
+    pub dynamic_textures: HashMap<String, GpuTexture>,
+    pub dynamic_meshes: HashMap<String, GpuMesh>,
 }
 
 impl AppRuntime {
-    pub fn new(engine: GameEngine) -> Self {
+    pub fn new(engine: GameEngine, assets: Arc<AssetLoader>) -> Self {
         Self {
             engine,
+            assets,
             renderer: None,
             camera: Camera::new(1280.0 / 720.0),
             pedestal_mesh: None,
             actor_mesh: None,
             actor_texture: None,
+            dynamic_textures: HashMap::new(),
+            dynamic_meshes: HashMap::new(),
         }
+    }
+
+    pub fn load_mesh(&mut self, path: &str) -> Option<&GpuMesh> {
+        let key = path.replace('\\', "/").to_ascii_lowercase();
+        if !self.dynamic_meshes.contains_key(&key) {
+            let renderer = self.renderer.as_ref()?;
+            if let Ok(igb) = self.assets.load_igb(path) {
+                if let Some(first_mesh) = igb.meshes.first() {
+                    let mesh = Mesh::from_igb(first_mesh);
+                    let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
+                    self.dynamic_meshes.insert(key.clone(), gpu_mesh);
+                }
+            }
+        }
+        self.dynamic_meshes.get(&key)
+    }
+
+    pub fn load_cmpr_texture(
+        &mut self,
+        path: &str,
+        width: u32,
+        height: u32,
+    ) -> Option<&GpuTexture> {
+        let key = path.replace('\\', "/").to_ascii_lowercase();
+        if !self.dynamic_textures.contains_key(&key) {
+            let renderer = self.renderer.as_ref()?;
+            if let Ok(rgba) = self.assets.load_cmpr_rgba(path, width, height) {
+                if let Ok(tex) = GpuTexture::from_rgba(
+                    &renderer.device,
+                    &renderer.queue,
+                    &rgba,
+                    width,
+                    height,
+                    Some(path),
+                ) {
+                    self.dynamic_textures.insert(key.clone(), tex);
+                }
+            }
+        }
+        self.dynamic_textures.get(&key)
     }
 }
 
@@ -222,6 +271,11 @@ impl RenderAppHandler for AppRuntime {
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
                 self.renderer = Some(renderer);
+
+                // Dynamically resolve meshes from VFS if available
+                if self.assets.has_file("models/hero.igb") {
+                    let _ = self.load_mesh("models/hero.igb");
+                }
                 info!("Render pipeline successfully initialized.");
             }
             Err(e) => {
@@ -291,8 +345,12 @@ impl RenderAppHandler for AppRuntime {
                 .collect();
 
             if !actor_instances.is_empty() {
-                if let Some(actor) = &self.actor_mesh {
-                    to_render.push((actor, self.actor_texture.as_ref(), &actor_instances));
+                let dynamic_mesh = self.dynamic_meshes.values().next();
+                let actor = dynamic_mesh.or(self.actor_mesh.as_ref());
+                let dynamic_tex = self.dynamic_textures.values().next();
+                let tex = dynamic_tex.or(self.actor_texture.as_ref());
+                if let Some(actor) = actor {
+                    to_render.push((actor, tex, &actor_instances));
                 }
             }
 
@@ -321,18 +379,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Found existing extracted assets in {:?}", args.assets_dir);
     }
 
-    // 2. Mount Alchemy v8.1.0 game archives
-    let mut vfs = ArchiveMount::new();
-    let permanent_dir = args.assets_dir.join("files").join("permanent");
-    for arc_name in ["global.arc", "global.bld"] {
-        let arc_path = permanent_dir.join(arc_name);
-        if arc_path.exists() {
-            match vfs.mount(&arc_path) {
-                Ok(_) => info!("Successfully mounted {} (Alchemy IGA v11)", arc_name),
-                Err(e) => warn!("Failed to mount {}: {}", arc_name, e),
+    // 2. Mount Alchemy v8.1.0 game archives into VFS AssetLoader
+    let mut assets = AssetLoader::default();
+    let files_dir = args.assets_dir.join("files");
+    let mounted_count = match assets.mount_dir(&files_dir) {
+        Ok(count) => count,
+        Err(e) => {
+            warn!("Scanning {:?} failed: {}", files_dir, e);
+            0
+        }
+    };
+    if mounted_count > 0 {
+        info!(
+            "Mounted {} archive(s) into VFS from {:?}",
+            mounted_count, files_dir
+        );
+    } else {
+        let permanent_dir = files_dir.join("permanent");
+        for arc_name in ["global.arc", "global.bld"] {
+            let arc_path = permanent_dir.join(arc_name);
+            if arc_path.exists() {
+                match assets.mount(&arc_path) {
+                    Ok(_) => info!("Successfully mounted {} (Alchemy IGA v11)", arc_name),
+                    Err(e) => warn!("Failed to mount {}: {}", arc_name, e),
+                }
             }
         }
     }
+    let assets = Arc::new(assets);
 
     // 3. Initialize Traptanium Portal (USB HID or Mock)
     let portal = if !args.mock_portal {
@@ -357,7 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_mock_portal()
     };
 
-    let engine = GameEngine::new(portal);
+    let engine = GameEngine::new(portal, assets.clone());
 
     if args.headless {
         info!("Running in headless mode for {} ticks...", args.ticks);
@@ -376,7 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Window & Render Loop
     info!("Starting window lifecycle & wgpu rendering...");
     let event_loop = EventLoop::new()?;
-    let runtime = AppRuntime::new(engine);
+    let runtime = AppRuntime::new(engine, assets);
     let app = WindowApp::new(WindowConfig::default(), runtime);
     app.run(event_loop)?;
 
@@ -409,7 +483,8 @@ mod tests {
     #[test]
     fn test_game_engine_mock_ticks() {
         let portal = create_mock_portal();
-        let mut engine = GameEngine::new(portal);
+        let assets = Arc::new(AssetLoader::default());
+        let mut engine = GameEngine::new(portal, assets);
         assert_eq!(
             engine.state.current(),
             &GameState::Hub {
@@ -424,5 +499,22 @@ mod tests {
 
         assert!(engine.state.is_villain_capture());
         assert!(engine.audio.portal.is_streaming());
+    }
+
+    #[test]
+    fn test_app_runtime_vfs_loading() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        assert!(runtime.renderer.is_none());
+        assert!(runtime.dynamic_meshes.is_empty());
+        assert!(runtime.dynamic_textures.is_empty());
+        // Load without active GPU renderer returns None gracefully
+        assert!(runtime.load_mesh("models/hero.igb").is_none());
+        assert!(runtime
+            .load_cmpr_texture("textures/hero.png", 8, 8)
+            .is_none());
     }
 }
