@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event_loop::EventLoop;
+use winit::keyboard::KeyCode;
 use winit::window::Window;
 
 #[derive(Parser, Debug)]
@@ -898,7 +899,7 @@ impl RenderAppHandler for AppRuntime {
         }
     }
 
-    fn on_key(&mut self, key_code: u32, state: bool) {
+    fn on_key(&mut self, key_code: KeyCode, state: bool) {
         self.engine.input.handle_key_code(key_code, state);
     }
 
@@ -1580,10 +1581,10 @@ mod tests {
         }
 
         // Simulate 10 ticks: tick 0 triggers primary attack (Key J -> WiiButton::B)
-        runtime.engine.input.handle_key_code(36, true);
+        runtime.engine.input.handle_key_code(KeyCode::KeyJ, true);
         for tick in 0..10 {
             if tick == 1 {
-                runtime.engine.input.handle_key_code(36, false);
+                runtime.engine.input.handle_key_code(KeyCode::KeyJ, false);
             }
             runtime.engine.tick();
         }
@@ -1636,11 +1637,11 @@ mod tests {
             });
 
         // Walk hero forward (Key W -> positive stick Y -> negative Z velocity)
-        runtime.engine.input.handle_key_code(17, true);
+        runtime.engine.input.handle_key_code(KeyCode::KeyW, true);
         for _ in 0..20 {
             runtime.engine.tick();
         }
-        runtime.engine.input.handle_key_code(17, false);
+        runtime.engine.input.handle_key_code(KeyCode::KeyW, false);
 
         // Verify hero moved inside trigger and prompt is active
         assert_eq!(
@@ -1648,10 +1649,10 @@ mod tests {
             Some("Press A to Enter Library".to_string())
         );
 
-        // Trigger Button A (Space keycode 57 -> WiiButton::A)
-        runtime.engine.input.handle_key_code(57, true);
+        // Trigger Button A (Space keycode -> WiiButton::A)
+        runtime.engine.input.handle_key_code(KeyCode::Space, true);
         runtime.engine.tick();
-        runtime.engine.input.handle_key_code(57, false);
+        runtime.engine.input.handle_key_code(KeyCode::Space, false);
 
         // State machine entered ZoneTransition
         assert!(matches!(

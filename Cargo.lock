@@ -2220,6 +2220,7 @@ dependencies = [
  "skylands-formats",
  "skylands-portal",
  "thiserror 2.0.21",
+ "winit",
 ]
 
 [[package]]

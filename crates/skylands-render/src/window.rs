@@ -2,6 +2,7 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 pub struct WindowConfig {
@@ -25,7 +26,7 @@ pub trait RenderAppHandler {
     fn on_resize(&mut self, width: u32, height: u32);
     fn on_update(&mut self);
     fn on_render(&mut self);
-    fn on_key(&mut self, key_code: u32, state: bool);
+    fn on_key(&mut self, key_code: KeyCode, state: bool);
 }
 
 pub struct WindowApp<H: RenderAppHandler> {
@@ -83,11 +84,9 @@ impl<H: RenderAppHandler> ApplicationHandler for WindowApp<H> {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state.is_pressed();
-                let code = match event.physical_key {
-                    winit::keyboard::PhysicalKey::Code(kc) => kc as u32,
-                    winit::keyboard::PhysicalKey::Unidentified(_) => 0,
-                };
-                self.handler.on_key(code, pressed);
+                if let PhysicalKey::Code(kc) = event.physical_key {
+                    self.handler.on_key(kc, pressed);
+                }
             }
             _ => {}
         }

@@ -1,4 +1,5 @@
 use gilrs::{Axis, Button, Event, EventType, Gilrs};
+pub use winit::keyboard::KeyCode;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,32 +92,36 @@ impl InputMapper {
         }
     }
 
-    pub fn handle_key_code(&mut self, key_code: u32, pressed: bool) {
+    pub fn handle_key_code(&mut self, key_code: KeyCode, pressed: bool) {
         match key_code {
-            17 | 25 | 103 => {
+            KeyCode::KeyW | KeyCode::ArrowUp => {
                 self.key_w = pressed;
                 self.state.set_button(WiiButton::DpadUp, pressed);
             }
-            31 | 39 | 108 => {
+            KeyCode::KeyS | KeyCode::ArrowDown => {
                 self.key_s = pressed;
                 self.state.set_button(WiiButton::DpadDown, pressed);
             }
-            30 | 38 | 105 => {
+            KeyCode::KeyA | KeyCode::ArrowLeft => {
                 self.key_a = pressed;
                 self.state.set_button(WiiButton::DpadLeft, pressed);
             }
-            32 | 40 | 106 => {
+            KeyCode::KeyD | KeyCode::ArrowRight => {
                 self.key_d = pressed;
                 self.state.set_button(WiiButton::DpadRight, pressed);
             }
-            57 => self.state.set_button(WiiButton::A, pressed),
-            36 | 44 => self.state.set_button(WiiButton::B, pressed),
-            37 | 45 => self.state.set_button(WiiButton::Z, pressed),
-            46 => self.state.set_button(WiiButton::C, pressed),
-            22 => self.state.set_button(WiiButton::One, pressed),
-            23 => self.state.set_button(WiiButton::Two, pressed),
-            28 => self.state.set_button(WiiButton::Plus, pressed),
-            1 | 14 => self.state.set_button(WiiButton::Minus, pressed),
+            KeyCode::Space => self.state.set_button(WiiButton::A, pressed),
+            KeyCode::KeyJ => self.state.set_button(WiiButton::B, pressed),
+            KeyCode::KeyK => self.state.set_button(WiiButton::Z, pressed),
+            KeyCode::KeyL => self.state.set_button(WiiButton::C, pressed),
+            KeyCode::Digit1 | KeyCode::Numpad1 => self.state.set_button(WiiButton::One, pressed),
+            KeyCode::Digit2 | KeyCode::Numpad2 => self.state.set_button(WiiButton::Two, pressed),
+            KeyCode::Equal | KeyCode::NumpadAdd | KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.state.set_button(WiiButton::Plus, pressed)
+            }
+            KeyCode::Minus | KeyCode::NumpadSubtract | KeyCode::Escape | KeyCode::Backspace => {
+                self.state.set_button(WiiButton::Minus, pressed)
+            }
             _ => {}
         }
 
@@ -196,21 +201,37 @@ mod tests {
     #[test]
     fn test_keyboard_to_wii_mapping() {
         let mut mapper = InputMapper::new();
-        mapper.handle_key_code(57, true);
+        mapper.handle_key_code(KeyCode::Space, true);
         assert!(mapper.state().is_down(WiiButton::A));
 
-        mapper.handle_key_code(57, false);
+        mapper.handle_key_code(KeyCode::Space, false);
         assert!(!mapper.state().is_down(WiiButton::A));
 
-        mapper.handle_key_code(17, true);
+        mapper.handle_key_code(KeyCode::KeyW, true);
         assert_eq!(mapper.state().stick, [0.0, 1.0]);
 
-        mapper.handle_key_code(32, true);
+        mapper.handle_key_code(KeyCode::KeyD, true);
         assert_eq!(mapper.state().stick, [1.0, 1.0]);
 
-        mapper.handle_key_code(22, true);
+        mapper.handle_key_code(KeyCode::KeyW, false);
+        mapper.handle_key_code(KeyCode::KeyD, false);
+
+        mapper.handle_key_code(KeyCode::ArrowUp, true);
+        mapper.handle_key_code(KeyCode::ArrowLeft, true);
+        assert_eq!(mapper.state().stick, [-1.0, 1.0]);
+
+        mapper.handle_key_code(KeyCode::KeyJ, true);
+        assert!(mapper.state().is_down(WiiButton::B));
+
+        mapper.handle_key_code(KeyCode::KeyK, true);
+        assert!(mapper.state().is_down(WiiButton::Z));
+
+        mapper.handle_key_code(KeyCode::KeyL, true);
+        assert!(mapper.state().is_down(WiiButton::C));
+
+        mapper.handle_key_code(KeyCode::Digit1, true);
         assert!(mapper.state().is_down(WiiButton::One));
-        mapper.handle_key_code(23, true);
+        mapper.handle_key_code(KeyCode::Digit2, true);
         assert!(mapper.state().is_down(WiiButton::Two));
     }
 }
