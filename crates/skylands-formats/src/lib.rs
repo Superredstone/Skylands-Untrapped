@@ -6,8 +6,8 @@ pub mod texture;
 pub use archive::{ArchiveMount, ArchiveReader, FileEntry};
 pub use igb::{
     AttrFormat, AttrSemantic, IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError,
-    IgbGeometryNode, IgbHeader, IgbIndexBuffer, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode,
-    IgbVertex, IgbVertexBuffer, IndexTopology,
+    IgbGeometryNode, IgbHeader, IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType,
+    IgbSceneNode, IgbTextureRef, IgbVertex, IgbVertexBuffer, IndexTopology,
 };
 pub use loader::{AssetError, AssetLoader};
 pub use texture::{decode_cmpr, decode_dxt1, decode_dxt1_block, decode_rgb565, TextureError};

@@ -8,6 +8,7 @@ pub enum TextureRenderError {
     BufferMismatch { expected: usize, actual: usize },
 }
 
+#[derive(Clone)]
 pub struct GpuTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,

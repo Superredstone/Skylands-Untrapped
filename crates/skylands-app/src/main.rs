@@ -8,8 +8,8 @@ use skylands_formats::{decode_cmpr, AssetLoader};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
-    mat4, Camera, GpuMesh, GpuTexture, InstanceRaw, Mesh, RenderAppHandler, Renderer, WindowApp,
-    WindowConfig,
+    mat4, Camera, GpuMesh, GpuTexture, InstanceRaw, Mesh, ModelInstance, RenderAppHandler,
+    Renderer, WindowApp, WindowConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -172,6 +172,8 @@ pub struct AppRuntime {
     pub actor_texture: Option<GpuTexture>,
     pub dynamic_textures: HashMap<String, GpuTexture>,
     pub dynamic_meshes: HashMap<String, GpuMesh>,
+    pub dynamic_models: HashMap<String, ModelInstance>,
+    pub last_active_hero_id: Option<u32>,
 }
 
 impl AppRuntime {
@@ -186,7 +188,74 @@ impl AppRuntime {
             actor_texture: None,
             dynamic_textures: HashMap::new(),
             dynamic_meshes: HashMap::new(),
+            dynamic_models: HashMap::new(),
+            last_active_hero_id: None,
         }
+    }
+
+    pub fn resolve_material_texture(&mut self, material_name: &str) -> Option<GpuTexture> {
+        let key = material_name.replace('\\', "/").to_ascii_lowercase();
+        if let Some(tex) = self.dynamic_textures.get(&key) {
+            return Some(tex.clone());
+        }
+
+        let candidates = [
+            format!("textures/{}.png", key),
+            format!("textures/{}.cmpr", key),
+            format!("textures/characters/{}.png", key),
+            format!("textures/characters/{}.cmpr", key),
+            key.clone(),
+        ];
+
+        for cand in &candidates {
+            if self.assets.has_file(cand) {
+                if let Some(tex) = self.load_cmpr_texture(cand, 64, 64) {
+                    return Some(tex.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn load_model(&mut self, path: &str) -> Option<&ModelInstance> {
+        let key = path.replace('\\', "/").to_ascii_lowercase();
+        if !self.dynamic_models.contains_key(&key) {
+            self.renderer.as_ref()?;
+            let igb = self.assets.load_igb(path).ok()?;
+            let mut submesh_defs = Vec::new();
+
+            for geo in &igb.geometries {
+                if let Some(mesh) = Mesh::from_geometry(geo) {
+                    let tex = mesh
+                        .material_name
+                        .as_deref()
+                        .and_then(|mat| self.resolve_material_texture(mat));
+                    submesh_defs.push((mesh, tex));
+                }
+            }
+            if submesh_defs.is_empty() {
+                for igb_mesh in &igb.meshes {
+                    let mesh = Mesh::from_igb(igb_mesh);
+                    let tex = mesh
+                        .material_name
+                        .as_deref()
+                        .and_then(|mat| self.resolve_material_texture(mat));
+                    submesh_defs.push((mesh, tex));
+                }
+            }
+
+            if !submesh_defs.is_empty() {
+                let renderer = self.renderer.as_ref()?;
+                let mut submeshes = Vec::with_capacity(submesh_defs.len());
+                for (mesh, tex) in submesh_defs {
+                    let gpu_mesh = GpuMesh::from_mesh(&renderer.device, &mesh);
+                    submeshes.push((gpu_mesh, tex));
+                }
+                self.dynamic_models
+                    .insert(key.clone(), ModelInstance::new(submeshes));
+            }
+        }
+        self.dynamic_models.get(&key)
     }
 
     pub fn load_mesh(&mut self, path: &str) -> Option<&GpuMesh> {
@@ -331,6 +400,45 @@ impl RenderAppHandler for AppRuntime {
     }
 
     fn on_render(&mut self) {
+        if self.engine.world.active_hero_id != self.last_active_hero_id {
+            self.last_active_hero_id = self.engine.world.active_hero_id;
+            let active_keys: std::collections::HashSet<String> = self
+                .engine
+                .world
+                .actors
+                .iter()
+                .filter_map(|a| a.model_path.as_ref())
+                .map(|p| p.replace('\\', "/").to_ascii_lowercase())
+                .collect();
+            self.dynamic_models
+                .retain(|k, _| active_keys.contains(k) || k == "models/hero.igb");
+            self.dynamic_meshes
+                .retain(|k, _| active_keys.contains(k) || k == "models/hero.igb");
+        }
+
+        let preload_paths: Vec<(String, Option<String>)> = self
+            .engine
+            .world
+            .actors
+            .iter()
+            .map(|a| {
+                (
+                    a.model_path
+                        .clone()
+                        .unwrap_or_else(|| "models/hero.igb".into()),
+                    a.texture_path.clone(),
+                )
+            })
+            .collect();
+
+        for (model_path, tex_path) in preload_paths {
+            let _ = self.load_model(&model_path);
+            let _ = self.load_mesh(&model_path);
+            if let Some(tp) = tex_path {
+                let _ = self.load_cmpr_texture(&tp, 64, 64);
+            }
+        }
+
         if let Some(r) = &mut self.renderer {
             if let Some(hero_id) = self.engine.world.active_hero_id {
                 if let Some(hero) = self.engine.world.actors.iter().find(|a| a.id == hero_id) {
@@ -363,23 +471,53 @@ impl RenderAppHandler for AppRuntime {
                 to_render.push((pedestal, None, pedestal_instances.as_slice()));
             }
 
-            let actor_instances: Vec<InstanceRaw> = self
+            let actor_instances: Vec<[InstanceRaw; 1]> = self
                 .engine
                 .world
                 .actors
                 .iter()
-                .map(|a| InstanceRaw {
-                    model: mat4::transform(a.position, a.rotation, [1.0, 1.0, 1.0]),
+                .map(|a| {
+                    [InstanceRaw {
+                        model: mat4::transform(a.position, a.rotation, [1.0, 1.0, 1.0]),
+                    }]
                 })
                 .collect();
 
-            if !actor_instances.is_empty() {
-                let dynamic_mesh = self.dynamic_meshes.values().next();
-                let actor = dynamic_mesh.or(self.actor_mesh.as_ref());
-                let dynamic_tex = self.dynamic_textures.values().next();
-                let tex = dynamic_tex.or(self.actor_texture.as_ref());
-                if let Some(actor) = actor {
-                    to_render.push((actor, tex, &actor_instances));
+            for (idx, actor) in self.engine.world.actors.iter().enumerate() {
+                let inst_slice = actor_instances[idx].as_slice();
+                let model_path = actor.model_path.as_deref().unwrap_or("models/hero.igb");
+                let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
+
+                if let Some(model) = self.dynamic_models.get(&model_key) {
+                    for (gpu_mesh, submesh_tex) in &model.submeshes {
+                        let tex = submesh_tex
+                            .as_ref()
+                            .or_else(|| {
+                                actor.texture_path.as_ref().and_then(|tp| {
+                                    self.dynamic_textures
+                                        .get(&tp.replace('\\', "/").to_ascii_lowercase())
+                                })
+                            })
+                            .or(self.actor_texture.as_ref());
+                        to_render.push((gpu_mesh, tex, inst_slice));
+                    }
+                    continue;
+                }
+
+                // Fallback to single mesh
+                let dynamic_mesh = self.dynamic_meshes.get(&model_key);
+                let actor_mesh = dynamic_mesh.or(self.actor_mesh.as_ref());
+                let tex = actor
+                    .texture_path
+                    .as_ref()
+                    .and_then(|tp| {
+                        self.dynamic_textures
+                            .get(&tp.replace('\\', "/").to_ascii_lowercase())
+                    })
+                    .or(self.actor_texture.as_ref());
+
+                if let Some(m) = actor_mesh {
+                    to_render.push((m, tex, inst_slice));
                 }
             }
 
@@ -542,8 +680,82 @@ mod tests {
         assert!(runtime.dynamic_textures.is_empty());
         // Load without active GPU renderer returns None gracefully
         assert!(runtime.load_mesh("models/hero.igb").is_none());
+        assert!(runtime.load_model("models/hero.igb").is_none());
         assert!(runtime
             .load_cmpr_texture("textures/hero.png", 8, 8)
             .is_none());
+    }
+
+    #[test]
+    fn test_mock_portal_character_resolution_and_actor_binding() {
+        let mut mock = MockPortal::new();
+
+        // 1. Kaos trap in slot 0
+        let mut b0 = [0u8; 16];
+        b0[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let mut b1 = [0u8; 16];
+        b1[0..2].copy_from_slice(&3010u16.to_le_bytes()); // Kaos Trap
+        b1[2..4].copy_from_slice(&1010u16.to_le_bytes()); // Kaos Villain
+        let b8 = [0u8; 16];
+        mock.insert_tag(0, vec![b0, b1, b8]);
+
+        // 2. Snap Shot hero in slot 1
+        let mut h0 = [0u8; 16];
+        h0[0..4].copy_from_slice(&[0x55, 0x66, 0x77, 0x88]);
+        let mut h1 = [0u8; 16];
+        h1[0..2].copy_from_slice(&400u16.to_le_bytes()); // Snap Shot
+        let h8 = [0u8; 16];
+        mock.insert_tag(1, vec![h0, h1, h8]);
+
+        let assets = Arc::new(AssetLoader::default());
+        let mut engine = GameEngine::new(ActivePortal::Mock(mock), assets);
+
+        for _ in 0..10 {
+            engine.tick();
+        }
+
+        assert_eq!(engine.world.actors.len(), 2);
+
+        let kaos = engine
+            .world
+            .find_by_character_id(1010)
+            .expect("Kaos spawned");
+        assert!(kaos.is_villain);
+        assert_eq!(
+            kaos.model_path.as_deref(),
+            Some("models/characters/kaos.igb")
+        );
+        assert_eq!(
+            kaos.texture_path.as_deref(),
+            Some("textures/characters/kaos.png")
+        );
+
+        let hero = engine
+            .world
+            .find_by_character_id(400)
+            .expect("Hero spawned");
+        assert!(!hero.is_villain);
+        assert_eq!(
+            hero.model_path.as_deref(),
+            Some("models/characters/snapshot.igb")
+        );
+        assert_eq!(
+            hero.texture_path.as_deref(),
+            Some("textures/characters/snapshot.png")
+        );
+
+        // Despawn hero
+        match &mut engine.portal {
+            ActivePortal::Mock(m) => m.remove_tag(1),
+            _ => unreachable!(),
+        }
+
+        for _ in 0..5 {
+            engine.tick();
+        }
+
+        assert_eq!(engine.world.actors.len(), 1);
+        assert!(engine.world.find_by_character_id(400).is_none());
+        assert!(engine.world.find_by_character_id(1010).is_some());
     }
 }

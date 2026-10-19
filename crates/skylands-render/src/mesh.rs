@@ -1,3 +1,4 @@
+use crate::texture::GpuTexture;
 use bytemuck::{Pod, Zeroable};
 use skylands_formats::igb::{IgbGeometryNode, IgbMesh, IgbVertex};
 use wgpu::util::DeviceExt;
@@ -96,6 +97,7 @@ pub struct Mesh {
     pub name: String,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub material_name: Option<String>,
 }
 
 impl Mesh {
@@ -104,7 +106,13 @@ impl Mesh {
             name: name.into(),
             vertices,
             indices,
+            material_name: None,
         }
+    }
+
+    pub fn with_material(mut self, material_name: impl Into<String>) -> Self {
+        self.material_name = Some(material_name.into());
+        self
     }
 
     pub fn from_igb(igb_mesh: &IgbMesh) -> Self {
@@ -113,6 +121,7 @@ impl Mesh {
             name: igb_mesh.name.clone(),
             vertices,
             indices: igb_mesh.indices.clone(),
+            material_name: igb_mesh.material_name.clone(),
         }
     }
 
@@ -225,6 +234,7 @@ pub struct GpuMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_elements: u32,
+    pub material_name: Option<String>,
 }
 
 impl GpuMesh {
@@ -245,7 +255,26 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             num_elements: mesh.indices.len() as u32,
+            material_name: mesh.material_name.clone(),
         }
+    }
+}
+
+pub struct ModelInstance {
+    pub submeshes: Vec<(GpuMesh, Option<GpuTexture>)>,
+}
+
+impl ModelInstance {
+    pub fn new(submeshes: Vec<(GpuMesh, Option<GpuTexture>)>) -> Self {
+        Self { submeshes }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.submeshes.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.submeshes.len()
     }
 }
 
@@ -264,10 +293,12 @@ mod tests {
                 color: [1.0, 0.0, 0.0, 1.0],
             }],
             indices: vec![0, 0, 0],
+            material_name: Some("test_mat".to_string()),
         };
 
         let mesh = Mesh::from_igb(&igb_mesh);
         assert_eq!(mesh.name, "test_igb");
+        assert_eq!(mesh.material_name, Some("test_mat".to_string()));
         assert_eq!(mesh.vertices.len(), 1);
         assert_eq!(mesh.vertices[0].position, [1.0, 2.0, 3.0]);
         assert_eq!(mesh.indices, vec![0, 0, 0]);
@@ -279,17 +310,20 @@ mod tests {
             name: "geo_mesh".to_string(),
             vertices: vec![IgbVertex::default()],
             indices: vec![0, 0, 0],
+            material_name: Some("geo_mat".to_string()),
         };
         let geo = IgbGeometryNode {
             name: "geo_node".to_string(),
             vertex_buffer_index: Some(0),
             index_buffer_index: Some(0),
             attr_list_index: Some(0),
+            material_index: Some(0),
             mesh: Some(igb_mesh),
         };
 
         let mesh = Mesh::from_geometry(&geo).expect("Mesh converted from geometry");
         assert_eq!(mesh.name, "geo_mesh");
+        assert_eq!(mesh.material_name, Some("geo_mat".to_string()));
         assert_eq!(mesh.vertices.len(), 1);
     }
 

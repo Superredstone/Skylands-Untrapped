@@ -82,6 +82,8 @@ pub enum IgbObjectType {
     IgAttrList,
     IgVertexBuffer,
     IgIndexBuffer,
+    IgMaterial,
+    IgTexture,
     Unknown(u32),
 }
 
@@ -93,6 +95,8 @@ impl From<u32> for IgbObjectType {
             3 => IgbObjectType::IgAttrList,
             4 => IgbObjectType::IgVertexBuffer,
             5 => IgbObjectType::IgIndexBuffer,
+            6 => IgbObjectType::IgMaterial,
+            7 => IgbObjectType::IgTexture,
             other => IgbObjectType::Unknown(other),
         }
     }
@@ -167,6 +171,7 @@ pub struct IgbGeometryNode {
     pub vertex_buffer_index: Option<usize>,
     pub index_buffer_index: Option<usize>,
     pub attr_list_index: Option<usize>,
+    pub material_index: Option<usize>,
     pub mesh: Option<IgbMesh>,
 }
 
@@ -177,6 +182,20 @@ pub struct IgbSceneNode {
     pub children: Vec<usize>,
     pub geometry_index: Option<usize>,
     pub transform: [f32; 16],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IgbMaterial {
+    pub name: String,
+    pub texture_index: Option<usize>,
+    pub texture_name: Option<String>,
+    pub blend_mode: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IgbTextureRef {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +222,7 @@ pub struct IgbMesh {
     pub name: String,
     pub vertices: Vec<IgbVertex>,
     pub indices: Vec<u32>,
+    pub material_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +234,8 @@ pub struct IgbModel {
     pub attr_lists: Vec<IgbAttrList>,
     pub vertex_buffers: Vec<IgbVertexBuffer>,
     pub index_buffers: Vec<IgbIndexBuffer>,
+    pub materials: Vec<IgbMaterial>,
+    pub textures: Vec<IgbTextureRef>,
     pub meshes: Vec<IgbMesh>,
 }
 
@@ -239,6 +261,8 @@ impl IgbModel {
                 attr_lists: Vec::new(),
                 vertex_buffers: Vec::new(),
                 index_buffers: Vec::new(),
+                materials: Vec::new(),
+                textures: Vec::new(),
                 meshes,
             });
         }
@@ -263,6 +287,8 @@ impl IgbModel {
                 attr_lists: Vec::new(),
                 vertex_buffers: Vec::new(),
                 index_buffers: Vec::new(),
+                materials: Vec::new(),
+                textures: Vec::new(),
                 meshes,
             });
         }
@@ -294,6 +320,8 @@ impl IgbModel {
         let mut attr_lists = Vec::new();
         let mut vertex_buffers = Vec::new();
         let mut index_buffers = Vec::new();
+        let mut materials = Vec::new();
+        let mut textures = Vec::new();
 
         // Parse parsed components by object directory type
         for entry in &directory {
@@ -330,7 +358,39 @@ impl IgbModel {
                         nodes.push(node);
                     }
                 }
+                IgbObjectType::IgMaterial => {
+                    if let Ok(mat) = Self::parse_material(
+                        data,
+                        &entry.name,
+                        header.endian,
+                        &full_file,
+                        str_table_offset,
+                    ) {
+                        materials.push(mat);
+                    }
+                }
+                IgbObjectType::IgTexture => {
+                    if let Ok(tex) = Self::parse_texture(
+                        data,
+                        &entry.name,
+                        header.endian,
+                        &full_file,
+                        str_table_offset,
+                    ) {
+                        textures.push(tex);
+                    }
+                }
                 _ => {}
+            }
+        }
+
+        for mat in &mut materials {
+            if mat.texture_name.is_none() {
+                if let Some(tex_idx) = mat.texture_index {
+                    if let Some(tex) = textures.get(tex_idx) {
+                        mat.texture_name = Some(tex.path.clone());
+                    }
+                }
             }
         }
 
@@ -356,10 +416,16 @@ impl IgbModel {
             if let (Some(vb), Some(ib), Some(attr)) = (vb, ib, attr) {
                 let vertices = Self::decode_vertices(vb, attr, header.endian);
                 let indices = ib.indices.clone();
+                let material_name = geo
+                    .material_index
+                    .and_then(|idx| materials.get(idx))
+                    .or_else(|| materials.get(i))
+                    .map(|m| m.name.clone());
                 let mesh = IgbMesh {
                     name: geo.name.clone(),
                     vertices,
                     indices,
+                    material_name,
                 };
                 geo.mesh = Some(mesh.clone());
                 meshes.push(mesh);
@@ -383,6 +449,8 @@ impl IgbModel {
             attr_lists,
             vertex_buffers,
             index_buffers,
+            materials,
+            textures,
             meshes,
         })
     }
@@ -707,11 +775,15 @@ impl IgbModel {
         let mut vertex_buffer_index = None;
         let mut index_buffer_index = None;
         let mut attr_list_index = None;
+        let mut material_index = None;
 
         if data.len() >= 12 {
             vertex_buffer_index = Some(Self::read_u32(data, 0, endian) as usize);
             index_buffer_index = Some(Self::read_u32(data, 4, endian) as usize);
             attr_list_index = Some(Self::read_u32(data, 8, endian) as usize);
+        }
+        if data.len() >= 16 {
+            material_index = Some(Self::read_u32(data, 12, endian) as usize);
         }
 
         Ok(IgbGeometryNode {
@@ -719,7 +791,69 @@ impl IgbModel {
             vertex_buffer_index,
             index_buffer_index,
             attr_list_index,
+            material_index,
             mesh: None,
+        })
+    }
+
+    pub fn parse_material(
+        data: &[u8],
+        name: &str,
+        endian: IgbEndian,
+        full_file: &[u8],
+        str_table_offset: usize,
+    ) -> Result<IgbMaterial, IgbError> {
+        let mut texture_index = None;
+        let mut blend_mode = 0;
+        let mut texture_name = None;
+
+        if data.len() >= 4 {
+            let tex_idx = Self::read_u32(data, 0, endian);
+            if tex_idx != u32::MAX {
+                texture_index = Some(tex_idx as usize);
+            }
+        }
+        if data.len() >= 8 {
+            blend_mode = Self::read_u32(data, 4, endian);
+        }
+        if data.len() >= 12 {
+            let tex_name_off = Self::read_u32(data, 8, endian);
+            if tex_name_off != u32::MAX {
+                let s = Self::resolve_string(full_file, str_table_offset, tex_name_off);
+                if !s.is_empty() {
+                    texture_name = Some(s);
+                }
+            }
+        }
+
+        Ok(IgbMaterial {
+            name: name.to_string(),
+            texture_index,
+            texture_name,
+            blend_mode,
+        })
+    }
+
+    pub fn parse_texture(
+        data: &[u8],
+        name: &str,
+        endian: IgbEndian,
+        full_file: &[u8],
+        str_table_offset: usize,
+    ) -> Result<IgbTextureRef, IgbError> {
+        let mut path = name.to_string();
+        if data.len() >= 4 {
+            let path_off = Self::read_u32(data, 0, endian);
+            if path_off != u32::MAX {
+                let s = Self::resolve_string(full_file, str_table_offset, path_off);
+                if !s.is_empty() {
+                    path = s;
+                }
+            }
+        }
+        Ok(IgbTextureRef {
+            name: name.to_string(),
+            path,
         })
     }
 
@@ -852,6 +986,7 @@ impl IgbModel {
             name: "mesh_0".to_string(),
             vertices,
             indices,
+            material_name: None,
         })
     }
 }
@@ -1081,5 +1216,164 @@ mod tests {
         assert!((mesh.vertices[0].normal[1] - 1.0).abs() < 1e-4);
         // Stripped triangles: [0, 1, 2] valid, [1, 2, 2] degenerate skipped, [2, 2, 3] degenerate skipped
         assert_eq!(mesh.indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_synthetic_igb_multi_submesh_and_materials() {
+        let mut igb_bytes = Vec::new();
+        // 8 directory objects: AttrList, VB, IB, Mat0, Mat1, Tex0, Geo0, Geo1
+        igb_bytes.extend_from_slice(b"IGBF");
+        igb_bytes.extend_from_slice(&8u32.to_le_bytes()); // LittleEndian
+        igb_bytes.extend_from_slice(&8u32.to_le_bytes()); // 8 objects
+        let str_table_pos = 16 + 8 * 16 + 500;
+        igb_bytes.extend_from_slice(&(str_table_pos as u32).to_le_bytes());
+
+        let off_attr = 16 + 8 * 16;
+        let mut attr_bytes = Vec::new();
+        attr_bytes.extend_from_slice(&12u32.to_le_bytes()); // stride 12
+        attr_bytes.extend_from_slice(&1u32.to_le_bytes()); // 1 attr
+        attr_bytes.extend_from_slice(&1u32.to_le_bytes()); // Position
+        attr_bytes.extend_from_slice(&0u32.to_le_bytes()); // Float32x3
+        attr_bytes.extend_from_slice(&0u32.to_le_bytes()); // offset 0
+        attr_bytes.extend_from_slice(&1.0f32.to_bits().to_le_bytes()); // scale 1.0
+
+        let off_vb = off_attr + attr_bytes.len();
+        let mut vb_bytes = Vec::new();
+        vb_bytes.extend_from_slice(&3u32.to_le_bytes()); // 3 verts
+        vb_bytes.extend_from_slice(&12u32.to_le_bytes()); // stride 12
+        for _ in 0..3 {
+            vb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+            vb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+            vb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+
+        let off_ib = off_vb + vb_bytes.len();
+        let mut ib_bytes = Vec::new();
+        ib_bytes.extend_from_slice(&0u32.to_le_bytes()); // Triangles
+        ib_bytes.extend_from_slice(&1u32.to_le_bytes()); // u32 format
+        ib_bytes.extend_from_slice(&3u32.to_le_bytes()); // 3 indices
+        ib_bytes.extend_from_slice(&0u32.to_le_bytes());
+        ib_bytes.extend_from_slice(&1u32.to_le_bytes());
+        ib_bytes.extend_from_slice(&2u32.to_le_bytes());
+
+        let off_tex0 = off_ib + ib_bytes.len();
+        let mut tex0_bytes = Vec::new();
+        tex0_bytes.extend_from_slice(&0u32.to_le_bytes()); // string off 0 -> "textures/body.png"
+
+        let off_mat0 = off_tex0 + tex0_bytes.len();
+        let mut mat0_bytes = Vec::new();
+        mat0_bytes.extend_from_slice(&0u32.to_le_bytes()); // tex index 0
+        mat0_bytes.extend_from_slice(&1u32.to_le_bytes()); // blend mode 1
+        mat0_bytes.extend_from_slice(&0u32.to_le_bytes()); // tex name off 0
+
+        let off_mat1 = off_mat0 + mat0_bytes.len();
+        let mut mat1_bytes = Vec::new();
+        mat1_bytes.extend_from_slice(&0u32.to_le_bytes()); // tex index 0
+        mat1_bytes.extend_from_slice(&0u32.to_le_bytes()); // blend mode 0
+        mat1_bytes.extend_from_slice(&20u32.to_le_bytes()); // tex name off 20 -> "textures/weapon.png"
+
+        let off_geo0 = off_mat1 + mat1_bytes.len();
+        let mut geo0_bytes = Vec::new();
+        geo0_bytes.extend_from_slice(&0u32.to_le_bytes()); // vb 0
+        geo0_bytes.extend_from_slice(&0u32.to_le_bytes()); // ib 0
+        geo0_bytes.extend_from_slice(&0u32.to_le_bytes()); // attr 0
+        geo0_bytes.extend_from_slice(&0u32.to_le_bytes()); // mat 0
+
+        let off_geo1 = off_geo0 + geo0_bytes.len();
+        let mut geo1_bytes = Vec::new();
+        geo1_bytes.extend_from_slice(&0u32.to_le_bytes()); // vb 0
+        geo1_bytes.extend_from_slice(&0u32.to_le_bytes()); // ib 0
+        geo1_bytes.extend_from_slice(&0u32.to_le_bytes()); // attr 0
+        geo1_bytes.extend_from_slice(&1u32.to_le_bytes()); // mat 1
+
+        // Directory table: 8 entries
+        // 0: Attr (type 3)
+        igb_bytes.extend_from_slice(&3u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&45u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&(off_attr as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(attr_bytes.len() as u32).to_le_bytes());
+        // 1: VB (type 4)
+        igb_bytes.extend_from_slice(&4u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&45u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&(off_vb as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(vb_bytes.len() as u32).to_le_bytes());
+        // 2: IB (type 5)
+        igb_bytes.extend_from_slice(&5u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&45u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&(off_ib as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(ib_bytes.len() as u32).to_le_bytes());
+        // 3: Tex0 (type 7)
+        igb_bytes.extend_from_slice(&7u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&(off_tex0 as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(tex0_bytes.len() as u32).to_le_bytes());
+        // 4: Mat0 (type 6)
+        igb_bytes.extend_from_slice(&6u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&45u32.to_le_bytes()); // "mat_body"
+        igb_bytes.extend_from_slice(&(off_mat0 as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(mat0_bytes.len() as u32).to_le_bytes());
+        // 5: Mat1 (type 6)
+        igb_bytes.extend_from_slice(&6u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&60u32.to_le_bytes()); // "mat_weapon"
+        igb_bytes.extend_from_slice(&(off_mat1 as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(mat1_bytes.len() as u32).to_le_bytes());
+        // 6: Geo0 (type 2)
+        igb_bytes.extend_from_slice(&2u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&75u32.to_le_bytes()); // "submesh_body"
+        igb_bytes.extend_from_slice(&(off_geo0 as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(geo0_bytes.len() as u32).to_le_bytes());
+        // 7: Geo1 (type 2)
+        igb_bytes.extend_from_slice(&2u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&90u32.to_le_bytes()); // "submesh_weapon"
+        igb_bytes.extend_from_slice(&(off_geo1 as u32).to_le_bytes());
+        igb_bytes.extend_from_slice(&(geo1_bytes.len() as u32).to_le_bytes());
+
+        // Append payloads
+        igb_bytes.extend_from_slice(&attr_bytes);
+        igb_bytes.extend_from_slice(&vb_bytes);
+        igb_bytes.extend_from_slice(&ib_bytes);
+        igb_bytes.extend_from_slice(&tex0_bytes);
+        igb_bytes.extend_from_slice(&mat0_bytes);
+        igb_bytes.extend_from_slice(&mat1_bytes);
+        igb_bytes.extend_from_slice(&geo0_bytes);
+        igb_bytes.extend_from_slice(&geo1_bytes);
+
+        if igb_bytes.len() < str_table_pos {
+            igb_bytes.resize(str_table_pos, 0);
+        }
+
+        let mut str_table = Vec::new();
+        str_table.extend_from_slice(b"textures/body.png\0"); // 0..18
+        str_table.resize(20, 0);
+        str_table.extend_from_slice(b"textures/weapon.png\0"); // 20..40
+        str_table.resize(45, 0);
+        str_table.extend_from_slice(b"mat_body\0"); // 45..54
+        str_table.resize(60, 0);
+        str_table.extend_from_slice(b"mat_weapon\0"); // 60..71
+        str_table.resize(75, 0);
+        str_table.extend_from_slice(b"submesh_body\0"); // 75..88
+        str_table.resize(90, 0);
+        str_table.extend_from_slice(b"submesh_weapon\0"); // 90..105
+        igb_bytes.extend_from_slice(&str_table);
+
+        let model = IgbModel::parse(Cursor::new(&igb_bytes)).expect("Parse multi-submesh IGB");
+        assert_eq!(model.geometries.len(), 2);
+        assert_eq!(model.materials.len(), 2);
+        assert_eq!(model.textures.len(), 1);
+        assert_eq!(model.meshes.len(), 2);
+
+        assert_eq!(model.meshes[0].name, "submesh_body");
+        assert_eq!(model.meshes[0].material_name, Some("mat_body".into()));
+        assert_eq!(model.meshes[1].name, "submesh_weapon");
+        assert_eq!(model.meshes[1].material_name, Some("mat_weapon".into()));
+
+        assert_eq!(
+            model.materials[0].texture_name,
+            Some("textures/body.png".into())
+        );
+        assert_eq!(
+            model.materials[1].texture_name,
+            Some("textures/weapon.png".into())
+        );
     }
 }

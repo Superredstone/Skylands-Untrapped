@@ -11,6 +11,8 @@ pub struct Actor {
     pub rotation: f32,
     pub is_villain: bool,
     pub active: bool,
+    pub model_path: Option<String>,
+    pub texture_path: Option<String>,
 }
 
 pub struct World {
@@ -28,6 +30,7 @@ impl World {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &mut self,
         character_id: u16,
@@ -35,6 +38,8 @@ impl World {
         name: impl Into<String>,
         position: [f32; 3],
         is_villain: bool,
+        model_path: Option<String>,
+        texture_path: Option<String>,
     ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -49,6 +54,8 @@ impl World {
             rotation: 0.0,
             is_villain,
             active: true,
+            model_path,
+            texture_path,
         };
 
         if !is_villain && self.active_hero_id.is_none() {
@@ -120,7 +127,15 @@ mod tests {
     #[test]
     fn test_actor_spawn_move() {
         let mut world = World::new();
-        let id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false);
+        let id = world.spawn(
+            400,
+            0,
+            "Snap Shot",
+            [0.0, 0.0, 0.0],
+            false,
+            Some("models/characters/snapshot.igb".into()),
+            Some("textures/characters/snapshot.png".into()),
+        );
         assert_eq!(world.active_hero_id, Some(id));
 
         let mut input = WiiInputState::new();

@@ -61,6 +61,84 @@ pub fn get_character_info(character_id: u16) -> (&'static str, Element) {
     }
 }
 
+pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'static str>) {
+    match character_id {
+        400 => (
+            "models/characters/snapshot.igb",
+            Some("textures/characters/snapshot.png"),
+        ),
+        401 => (
+            "models/characters/foodfight.igb",
+            Some("textures/characters/foodfight.png"),
+        ),
+        402 => (
+            "models/characters/wildfire.igb",
+            Some("textures/characters/wildfire.png"),
+        ),
+        403 => (
+            "models/characters/wallop.igb",
+            Some("textures/characters/wallop.png"),
+        ),
+        404 => (
+            "models/characters/gearshift.igb",
+            Some("textures/characters/gearshift.png"),
+        ),
+        405 => (
+            "models/characters/kryptking.igb",
+            Some("textures/characters/kryptking.png"),
+        ),
+        406 => (
+            "models/characters/enigma.igb",
+            Some("textures/characters/enigma.png"),
+        ),
+        407 => (
+            "models/characters/gusto.igb",
+            Some("textures/characters/gusto.png"),
+        ),
+        1010 => (
+            "models/characters/kaos.igb",
+            Some("textures/characters/kaos.png"),
+        ),
+        1001 => (
+            "models/characters/thegulper.igb",
+            Some("textures/characters/thegulper.png"),
+        ),
+        1002 => (
+            "models/characters/wolfgang.igb",
+            Some("textures/characters/wolfgang.png"),
+        ),
+        1003 => (
+            "models/characters/chompymage.igb",
+            Some("textures/characters/chompymage.png"),
+        ),
+        1004 => (
+            "models/characters/goldenqueen.igb",
+            Some("textures/characters/goldenqueen.png"),
+        ),
+        1005 => (
+            "models/characters/chefpepperjack.igb",
+            Some("textures/characters/chefpepperjack.png"),
+        ),
+        1006 => (
+            "models/characters/drkrankcase.igb",
+            Some("textures/characters/drkrankcase.png"),
+        ),
+        1007 => (
+            "models/characters/dreamcatcher.igb",
+            Some("textures/characters/dreamcatcher.png"),
+        ),
+        1008 => (
+            "models/characters/painyatta.igb",
+            Some("textures/characters/painyatta.png"),
+        ),
+        3000..=3100 => (
+            "models/characters/trap.igb",
+            Some("textures/characters/trap.png"),
+        ),
+        _ => ("models/hero.igb", None),
+    }
+}
+
 pub struct PortalGameplay {
     pub active_tags: HashMap<u8, (PortalZone, SkylanderTag)>,
     pending_blocks: HashMap<u8, HashMap<u8, [u8; 16]>>,
@@ -160,8 +238,28 @@ impl PortalGameplay {
 
             let (r, g, b) = elem.rgb();
             cmds.push(encode_trap_light_packet(r, g, b));
+
+            let (model_path, tex_path) = get_character_asset_paths(villain);
+            world.spawn(
+                villain,
+                tag.variant,
+                name,
+                [0.0, 0.2, 0.0],
+                true,
+                Some(model_path.to_string()),
+                tex_path.map(|s| s.to_string()),
+            );
         } else {
-            world.spawn(tag.character_id, tag.variant, name, [0.0, 0.2, 0.0], false);
+            let (model_path, tex_path) = get_character_asset_paths(tag.character_id);
+            world.spawn(
+                tag.character_id,
+                tag.variant,
+                name,
+                [0.0, 0.2, 0.0],
+                false,
+                Some(model_path.to_string()),
+                tex_path.map(|s| s.to_string()),
+            );
             audio.on_hero_summoned();
 
             let (r, g, b) = elem.rgb();
@@ -183,6 +281,8 @@ impl PortalGameplay {
 
         if let Some((zone, tag)) = self.active_tags.remove(&slot) {
             if tag.is_trap || zone == PortalZone::TrapSlot {
+                let villain = tag.villain_id.unwrap_or(tag.variant);
+                world.despawn_by_character_id(villain);
                 cmds.push(encode_trap_light_packet(0, 0, 0));
                 if state.is_villain_capture() {
                     state.set_state(GameState::Hub {
@@ -225,6 +325,14 @@ mod tests {
         assert!(!cmds.is_empty());
         assert_eq!(world.actors.len(), 1);
         assert_eq!(world.actors[0].character_id, 400);
+        assert_eq!(
+            world.actors[0].model_path,
+            Some("models/characters/snapshot.igb".to_string())
+        );
+        assert_eq!(
+            world.actors[0].texture_path,
+            Some("textures/characters/snapshot.png".to_string())
+        );
     }
 
     #[test]
@@ -243,5 +351,41 @@ mod tests {
         assert!(!cmds.is_empty());
         assert!(state.is_villain_capture());
         assert!(audio.portal.is_streaming());
+        assert_eq!(world.actors.len(), 1);
+        assert_eq!(world.actors[0].character_id, 1010);
+        assert_eq!(
+            world.actors[0].model_path,
+            Some("models/characters/kaos.igb".to_string())
+        );
+        assert_eq!(
+            world.actors[0].texture_path,
+            Some("textures/characters/kaos.png".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_character_asset_paths() {
+        assert_eq!(
+            get_character_asset_paths(400),
+            (
+                "models/characters/snapshot.igb",
+                Some("textures/characters/snapshot.png")
+            )
+        );
+        assert_eq!(
+            get_character_asset_paths(1010),
+            (
+                "models/characters/kaos.igb",
+                Some("textures/characters/kaos.png")
+            )
+        );
+        assert_eq!(
+            get_character_asset_paths(401),
+            (
+                "models/characters/foodfight.igb",
+                Some("textures/characters/foodfight.png")
+            )
+        );
+        assert_eq!(get_character_asset_paths(9999), ("models/hero.igb", None));
     }
 }
