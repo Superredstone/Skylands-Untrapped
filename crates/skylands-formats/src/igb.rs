@@ -85,6 +85,9 @@ pub enum IgbObjectType {
     IgIndexBuffer,
     IgMaterial,
     IgTexture,
+    IgSkeleton,
+    IgSkin,
+    IgAnimation,
     Unknown(u32),
 }
 
@@ -98,6 +101,9 @@ impl From<u32> for IgbObjectType {
             5 => IgbObjectType::IgIndexBuffer,
             6 => IgbObjectType::IgMaterial,
             7 => IgbObjectType::IgTexture,
+            8 => IgbObjectType::IgSkeleton,
+            9 => IgbObjectType::IgSkin,
+            10 => IgbObjectType::IgAnimation,
             other => IgbObjectType::Unknown(other),
         }
     }
@@ -118,6 +124,8 @@ pub enum AttrSemantic {
     Normal,
     TexCoord,
     Color,
+    BlendIndices,
+    BlendWeights,
     Unknown(u32),
 }
 
@@ -130,6 +138,8 @@ pub enum AttrFormat {
     PackedI8x3Normal, // 3 x i8 normal, scaled by 1.0 / 127.0
     PackedI8x4Color,  // 4 x u8 or i8 color normalized
     U16x2UV,          // 2 x u16 UV, scaled by 1.0 / (1 << frac_bits) or 1.0 / 65535.0
+    PackedU8x4,       // 4 x u8 indices or weights
+    PackedU16x4,      // 4 x u16 indices
     Unknown(u32),
 }
 
@@ -205,6 +215,8 @@ pub struct IgbVertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    pub bone_indices: [u32; 4],
+    pub bone_weights: [f32; 4],
 }
 
 impl Default for IgbVertex {
@@ -214,6 +226,8 @@ impl Default for IgbVertex {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
             color: [1.0, 1.0, 1.0, 1.0],
+            bone_indices: [0, 0, 0, 0],
+            bone_weights: [1.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -305,6 +319,390 @@ pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     out
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bone {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub inverse_bind_pose: [f32; 16],
+    pub local_transform: [f32; 16],
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Skeleton {
+    pub bones: Vec<Bone>,
+    pub root: usize,
+    pub name_to_index: std::collections::HashMap<String, usize>,
+}
+
+impl Skeleton {
+    pub fn new(bones: Vec<Bone>, root: usize) -> Self {
+        let mut name_to_index = std::collections::HashMap::new();
+        for (i, b) in bones.iter().enumerate() {
+            name_to_index.insert(b.name.clone(), i);
+        }
+        Self {
+            bones,
+            root,
+            name_to_index,
+        }
+    }
+
+    pub fn get_bone_index(&self, name: &str) -> Option<usize> {
+        self.name_to_index.get(name).copied()
+    }
+
+    pub fn serialize_binary(&self, endian: IgbEndian) -> Vec<u8> {
+        let mut out = Vec::new();
+        match endian {
+            IgbEndian::Little => {
+                out.extend_from_slice(&(self.bones.len() as u32).to_le_bytes());
+                out.extend_from_slice(&(self.root as u32).to_le_bytes());
+                for bone in &self.bones {
+                    let p = match bone.parent {
+                        Some(idx) => idx as i32,
+                        None => -1,
+                    };
+                    out.extend_from_slice(&p.to_le_bytes());
+                    for &f in &bone.inverse_bind_pose {
+                        out.extend_from_slice(&f.to_le_bytes());
+                    }
+                    for &f in &bone.local_transform {
+                        out.extend_from_slice(&f.to_le_bytes());
+                    }
+                    let name_bytes = bone.name.as_bytes();
+                    out.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                    out.extend_from_slice(name_bytes);
+                }
+            }
+            IgbEndian::Big => {
+                out.extend_from_slice(&(self.bones.len() as u32).to_be_bytes());
+                out.extend_from_slice(&(self.root as u32).to_be_bytes());
+                for bone in &self.bones {
+                    let p = match bone.parent {
+                        Some(idx) => idx as i32,
+                        None => -1,
+                    };
+                    out.extend_from_slice(&p.to_be_bytes());
+                    for &f in &bone.inverse_bind_pose {
+                        out.extend_from_slice(&f.to_be_bytes());
+                    }
+                    for &f in &bone.local_transform {
+                        out.extend_from_slice(&f.to_be_bytes());
+                    }
+                    let name_bytes = bone.name.as_bytes();
+                    out.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+                    out.extend_from_slice(name_bytes);
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Keyframe<T> {
+    pub time: f32,
+    pub value: T,
+}
+
+impl<T> Keyframe<T> {
+    pub fn new(time: f32, value: T) -> Self {
+        Self { time, value }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BoneTrack {
+    pub bone_index: usize,
+    pub positions: Vec<Keyframe<[f32; 3]>>,
+    pub rotations: Vec<Keyframe<[f32; 4]>>,
+    pub scales: Vec<Keyframe<[f32; 3]>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnimationClip {
+    pub name: String,
+    pub duration: f32,
+    pub tracks: Vec<BoneTrack>,
+}
+
+pub fn lerp_vec3(a: &[f32; 3], b: &[f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+pub fn slerp_quat(q1: &[f32; 4], q2: &[f32; 4], t: f32) -> [f32; 4] {
+    let mut dot = q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3];
+    let mut q2_adj = *q2;
+    if dot < 0.0 {
+        dot = -dot;
+        q2_adj = [-q2[0], -q2[1], -q2[2], -q2[3]];
+    }
+
+    if dot > 0.9995 {
+        let out = [
+            q1[0] + t * (q2_adj[0] - q1[0]),
+            q1[1] + t * (q2_adj[1] - q1[1]),
+            q1[2] + t * (q2_adj[2] - q1[2]),
+            q1[3] + t * (q2_adj[3] - q1[3]),
+        ];
+        let len = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]).sqrt();
+        if len > 1e-6 {
+            [out[0] / len, out[1] / len, out[2] / len, out[3] / len]
+        } else {
+            [0.0, 0.0, 0.0, 1.0]
+        }
+    } else {
+        let theta = dot.clamp(-1.0, 1.0).acos();
+        let sin_theta = theta.sin();
+        let scale0 = ((1.0 - t) * theta).sin() / sin_theta;
+        let scale1 = (t * theta).sin() / sin_theta;
+        [
+            scale0 * q1[0] + scale1 * q2_adj[0],
+            scale0 * q1[1] + scale1 * q2_adj[1],
+            scale0 * q1[2] + scale1 * q2_adj[2],
+            scale0 * q1[3] + scale1 * q2_adj[3],
+        ]
+    }
+}
+
+pub fn quat_to_mat4(q: &[f32; 4]) -> [f32; 16] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let x2 = x + x;
+    let y2 = y + y;
+    let z2 = z + z;
+    let xx = x * x2;
+    let xy = x * y2;
+    let xz = x * z2;
+    let yy = y * y2;
+    let yz = y * z2;
+    let zz = z * z2;
+    let wx = w * x2;
+    let wy = w * y2;
+    let wz = w * z2;
+
+    [
+        1.0 - (yy + zz),
+        xy + wz,
+        xz - wy,
+        0.0,
+        xy - wz,
+        1.0 - (xx + zz),
+        yz + wx,
+        0.0,
+        xz + wy,
+        yz - wx,
+        1.0 - (xx + yy),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+}
+
+pub fn compose_transform(pos: &[f32; 3], rot: &[f32; 4], scale: &[f32; 3]) -> [f32; 16] {
+    let r = quat_to_mat4(rot);
+    [
+        r[0] * scale[0],
+        r[1] * scale[0],
+        r[2] * scale[0],
+        0.0,
+        r[4] * scale[1],
+        r[5] * scale[1],
+        r[6] * scale[1],
+        0.0,
+        r[8] * scale[2],
+        r[9] * scale[2],
+        r[10] * scale[2],
+        0.0,
+        pos[0],
+        pos[1],
+        pos[2],
+        1.0,
+    ]
+}
+
+fn sample_channel<T: Copy, F: Fn(&T, &T, f32) -> T>(
+    keyframes: &[Keyframe<T>],
+    time: f32,
+    interpolate: F,
+) -> Option<T> {
+    if keyframes.is_empty() {
+        return None;
+    }
+    if keyframes.len() == 1 || time <= keyframes[0].time {
+        return Some(keyframes[0].value);
+    }
+    if time >= keyframes.last().unwrap().time {
+        return Some(keyframes.last().unwrap().value);
+    }
+
+    for i in 0..keyframes.len() - 1 {
+        let k0 = &keyframes[i];
+        let k1 = &keyframes[i + 1];
+        if time >= k0.time && time <= k1.time {
+            let dt = k1.time - k0.time;
+            let factor = if dt > 0.0 { (time - k0.time) / dt } else { 0.0 };
+            return Some(interpolate(&k0.value, &k1.value, factor));
+        }
+    }
+    Some(keyframes.last().unwrap().value)
+}
+
+pub fn sample_vec3(keyframes: &[Keyframe<[f32; 3]>], time: f32) -> Option<[f32; 3]> {
+    sample_channel(keyframes, time, lerp_vec3)
+}
+
+pub fn sample_quat(keyframes: &[Keyframe<[f32; 4]>], time: f32) -> Option<[f32; 4]> {
+    sample_channel(keyframes, time, slerp_quat)
+}
+
+impl AnimationClip {
+    pub fn new(name: impl Into<String>, duration: f32, tracks: Vec<BoneTrack>) -> Self {
+        Self {
+            name: name.into(),
+            duration,
+            tracks,
+        }
+    }
+
+    pub fn sample_pose(&self, time: f32, skeleton: &Skeleton) -> Vec<[f32; 16]> {
+        let global_transforms = self.sample_global_transforms(time, skeleton);
+        let mut skinning_matrices = vec![mat4_identity(); skeleton.bones.len()];
+        for (i, bone) in skeleton.bones.iter().enumerate() {
+            skinning_matrices[i] = mat4_mul(&global_transforms[i], &bone.inverse_bind_pose);
+        }
+        skinning_matrices
+    }
+
+    pub fn sample_global_transforms(&self, time: f32, skeleton: &Skeleton) -> Vec<[f32; 16]> {
+        let t = if self.duration > 0.0 {
+            time.rem_euclid(self.duration)
+        } else {
+            0.0
+        };
+
+        let mut local_transforms: Vec<[f32; 16]> =
+            skeleton.bones.iter().map(|b| b.local_transform).collect();
+
+        for track in &self.tracks {
+            if track.bone_index >= local_transforms.len() {
+                continue;
+            }
+            let pos = sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]);
+            let rot = sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let scale = sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]);
+            local_transforms[track.bone_index] = compose_transform(&pos, &rot, &scale);
+        }
+
+        let mut computed = vec![false; skeleton.bones.len()];
+        let mut global_transforms = vec![mat4_identity(); skeleton.bones.len()];
+
+        fn compute_bone(
+            idx: usize,
+            skeleton: &Skeleton,
+            local: &[[f32; 16]],
+            global: &mut [[f32; 16]],
+            computed: &mut [bool],
+        ) {
+            if computed[idx] {
+                return;
+            }
+            if let Some(p) = skeleton.bones[idx].parent {
+                if p < skeleton.bones.len() && p != idx {
+                    compute_bone(p, skeleton, local, global, computed);
+                    global[idx] = mat4_mul(&global[p], &local[idx]);
+                    computed[idx] = true;
+                    return;
+                }
+            }
+            global[idx] = local[idx];
+            computed[idx] = true;
+        }
+
+        for i in 0..skeleton.bones.len() {
+            compute_bone(
+                i,
+                skeleton,
+                &local_transforms,
+                &mut global_transforms,
+                &mut computed,
+            );
+        }
+
+        global_transforms
+    }
+
+    pub fn serialize_binary(&self, endian: IgbEndian) -> Vec<u8> {
+        let mut out = Vec::new();
+        match endian {
+            IgbEndian::Little => {
+                out.extend_from_slice(&self.duration.to_le_bytes());
+                out.extend_from_slice(&(self.tracks.len() as u32).to_le_bytes());
+                for track in &self.tracks {
+                    out.extend_from_slice(&(track.bone_index as u32).to_le_bytes());
+                    out.extend_from_slice(&(track.positions.len() as u32).to_le_bytes());
+                    out.extend_from_slice(&(track.rotations.len() as u32).to_le_bytes());
+                    out.extend_from_slice(&(track.scales.len() as u32).to_le_bytes());
+                    for kf in &track.positions {
+                        out.extend_from_slice(&kf.time.to_le_bytes());
+                        out.extend_from_slice(&kf.value[0].to_le_bytes());
+                        out.extend_from_slice(&kf.value[1].to_le_bytes());
+                        out.extend_from_slice(&kf.value[2].to_le_bytes());
+                    }
+                    for kf in &track.rotations {
+                        out.extend_from_slice(&kf.time.to_le_bytes());
+                        out.extend_from_slice(&kf.value[0].to_le_bytes());
+                        out.extend_from_slice(&kf.value[1].to_le_bytes());
+                        out.extend_from_slice(&kf.value[2].to_le_bytes());
+                        out.extend_from_slice(&kf.value[3].to_le_bytes());
+                    }
+                    for kf in &track.scales {
+                        out.extend_from_slice(&kf.time.to_le_bytes());
+                        out.extend_from_slice(&kf.value[0].to_le_bytes());
+                        out.extend_from_slice(&kf.value[1].to_le_bytes());
+                        out.extend_from_slice(&kf.value[2].to_le_bytes());
+                    }
+                }
+            }
+            IgbEndian::Big => {
+                out.extend_from_slice(&self.duration.to_be_bytes());
+                out.extend_from_slice(&(self.tracks.len() as u32).to_be_bytes());
+                for track in &self.tracks {
+                    out.extend_from_slice(&(track.bone_index as u32).to_be_bytes());
+                    out.extend_from_slice(&(track.positions.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&(track.rotations.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&(track.scales.len() as u32).to_be_bytes());
+                    for kf in &track.positions {
+                        out.extend_from_slice(&kf.time.to_be_bytes());
+                        out.extend_from_slice(&kf.value[0].to_be_bytes());
+                        out.extend_from_slice(&kf.value[1].to_be_bytes());
+                        out.extend_from_slice(&kf.value[2].to_be_bytes());
+                    }
+                    for kf in &track.rotations {
+                        out.extend_from_slice(&kf.time.to_be_bytes());
+                        out.extend_from_slice(&kf.value[0].to_be_bytes());
+                        out.extend_from_slice(&kf.value[1].to_be_bytes());
+                        out.extend_from_slice(&kf.value[2].to_be_bytes());
+                        out.extend_from_slice(&kf.value[3].to_be_bytes());
+                    }
+                    for kf in &track.scales {
+                        out.extend_from_slice(&kf.time.to_be_bytes());
+                        out.extend_from_slice(&kf.value[0].to_be_bytes());
+                        out.extend_from_slice(&kf.value[1].to_be_bytes());
+                        out.extend_from_slice(&kf.value[2].to_be_bytes());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IgbModel {
     pub header: IgbHeader,
@@ -317,6 +715,8 @@ pub struct IgbModel {
     pub materials: Vec<IgbMaterial>,
     pub textures: Vec<IgbTextureRef>,
     pub meshes: Vec<IgbMesh>,
+    pub skeletons: Vec<Skeleton>,
+    pub animations: Vec<AnimationClip>,
 }
 
 impl IgbModel {
@@ -352,6 +752,8 @@ impl IgbModel {
                 materials: Vec::new(),
                 textures: Vec::new(),
                 meshes,
+                skeletons: Vec::new(),
+                animations: Vec::new(),
             });
         }
 
@@ -378,6 +780,8 @@ impl IgbModel {
                 materials: Vec::new(),
                 textures: Vec::new(),
                 meshes,
+                skeletons: Vec::new(),
+                animations: Vec::new(),
             });
         }
 
@@ -410,6 +814,8 @@ impl IgbModel {
         let mut index_buffers = Vec::new();
         let mut materials = Vec::new();
         let mut textures = Vec::new();
+        let mut skeletons = Vec::new();
+        let mut animations = Vec::new();
 
         // Parse parsed components by object directory type
         for entry in &directory {
@@ -444,6 +850,16 @@ impl IgbModel {
                 IgbObjectType::IgNode => {
                     if let Ok(node) = Self::parse_node(data, &entry.name, header.endian) {
                         nodes.push(node);
+                    }
+                }
+                IgbObjectType::IgSkeleton => {
+                    if let Ok(skel) = Self::parse_skeleton(data, &entry.name, header.endian) {
+                        skeletons.push(skel);
+                    }
+                }
+                IgbObjectType::IgAnimation => {
+                    if let Ok(anim) = Self::parse_animation(data, &entry.name, header.endian) {
+                        animations.push(anim);
                     }
                 }
                 IgbObjectType::IgMaterial => {
@@ -540,6 +956,8 @@ impl IgbModel {
             materials,
             textures,
             meshes,
+            skeletons,
+            animations,
         })
     }
 
@@ -625,6 +1043,8 @@ impl IgbModel {
                 2 => AttrSemantic::Normal,
                 3 => AttrSemantic::TexCoord,
                 4 => AttrSemantic::Color,
+                5 => AttrSemantic::BlendIndices,
+                6 => AttrSemantic::BlendWeights,
                 other => AttrSemantic::Unknown(other),
             };
 
@@ -636,6 +1056,8 @@ impl IgbModel {
                 4 => AttrFormat::PackedI8x3Normal,
                 5 => AttrFormat::PackedI8x4Color,
                 6 => AttrFormat::U16x2UV,
+                7 => AttrFormat::PackedU8x4,
+                8 => AttrFormat::PackedU16x4,
                 other => AttrFormat::Unknown(other),
             };
 
@@ -845,6 +1267,56 @@ impl IgbModel {
                         }
                         _ => {}
                     },
+                    AttrSemantic::BlendIndices => match attr.format {
+                        AttrFormat::PackedU8x4 | AttrFormat::PackedI8x4Color
+                            if aoff + 4 <= slice.len() =>
+                        {
+                            vert.bone_indices = [
+                                slice[aoff] as u32,
+                                slice[aoff + 1] as u32,
+                                slice[aoff + 2] as u32,
+                                slice[aoff + 3] as u32,
+                            ];
+                        }
+                        AttrFormat::PackedU16x4 if aoff + 8 <= slice.len() => {
+                            vert.bone_indices = [
+                                Self::read_u16(slice, aoff, endian) as u32,
+                                Self::read_u16(slice, aoff + 2, endian) as u32,
+                                Self::read_u16(slice, aoff + 4, endian) as u32,
+                                Self::read_u16(slice, aoff + 6, endian) as u32,
+                            ];
+                        }
+                        AttrFormat::Float32x4 if aoff + 16 <= slice.len() => {
+                            vert.bone_indices = [
+                                Self::read_f32(slice, aoff, endian) as u32,
+                                Self::read_f32(slice, aoff + 4, endian) as u32,
+                                Self::read_f32(slice, aoff + 8, endian) as u32,
+                                Self::read_f32(slice, aoff + 12, endian) as u32,
+                            ];
+                        }
+                        _ => {}
+                    },
+                    AttrSemantic::BlendWeights => match attr.format {
+                        AttrFormat::Float32x4 if aoff + 16 <= slice.len() => {
+                            vert.bone_weights = [
+                                Self::read_f32(slice, aoff, endian),
+                                Self::read_f32(slice, aoff + 4, endian),
+                                Self::read_f32(slice, aoff + 8, endian),
+                                Self::read_f32(slice, aoff + 12, endian),
+                            ];
+                        }
+                        AttrFormat::PackedU8x4 | AttrFormat::PackedI8x4Color
+                            if aoff + 4 <= slice.len() =>
+                        {
+                            vert.bone_weights = [
+                                slice[aoff] as f32 / 255.0,
+                                slice[aoff + 1] as f32 / 255.0,
+                                slice[aoff + 2] as f32 / 255.0,
+                                slice[aoff + 3] as f32 / 255.0,
+                            ];
+                        }
+                        _ => {}
+                    },
                     AttrSemantic::Unknown(_) => {}
                 }
             }
@@ -1037,6 +1509,8 @@ impl IgbModel {
                         cur.read_f32::<LittleEndian>()?,
                         cur.read_f32::<LittleEndian>()?,
                     ],
+                    bone_indices: [0, 0, 0, 0],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
                 },
                 IgbEndian::Big => IgbVertex {
                     position: [
@@ -1056,6 +1530,8 @@ impl IgbModel {
                         cur.read_f32::<BigEndian>()?,
                         cur.read_f32::<BigEndian>()?,
                     ],
+                    bone_indices: [0, 0, 0, 0],
+                    bone_weights: [1.0, 0.0, 0.0, 0.0],
                 },
             };
             vertices.push(v);
@@ -1141,6 +1617,243 @@ impl IgbModel {
         }
 
         visited[node_idx] = false;
+    }
+
+    pub fn evaluate_animated_scene_graph(
+        &self,
+        clip: &AnimationClip,
+        time: f32,
+    ) -> Vec<SceneInstance> {
+        if self.nodes.is_empty() {
+            return self.evaluate_scene_graph();
+        }
+
+        let t = if clip.duration > 0.0 {
+            time.rem_euclid(clip.duration)
+        } else {
+            0.0
+        };
+
+        let mut local_transforms: Vec<[f32; 16]> = self.nodes.iter().map(|n| n.transform).collect();
+
+        for track in &clip.tracks {
+            if track.bone_index < local_transforms.len() {
+                let pos = sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]);
+                let rot = sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                let scale = sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]);
+                local_transforms[track.bone_index] = compose_transform(&pos, &rot, &scale);
+            }
+        }
+
+        let mut child_set = std::collections::HashSet::new();
+        for node in &self.nodes {
+            for &child_idx in &node.children {
+                child_set.insert(child_idx);
+            }
+        }
+
+        let root_indices: Vec<usize> = (0..self.nodes.len())
+            .filter(|idx| !child_set.contains(idx))
+            .collect();
+
+        let mut instances = Vec::new();
+        let mut visited = vec![false; self.nodes.len()];
+
+        for root_idx in root_indices {
+            self.traverse_animated_scene_node(
+                root_idx,
+                &mat4_identity(),
+                &local_transforms,
+                &mut visited,
+                &mut instances,
+            );
+        }
+
+        instances
+    }
+
+    fn traverse_animated_scene_node(
+        &self,
+        node_idx: usize,
+        parent_transform: &[f32; 16],
+        local_transforms: &[[f32; 16]],
+        visited: &mut [bool],
+        instances: &mut Vec<SceneInstance>,
+    ) {
+        if node_idx >= self.nodes.len() || visited[node_idx] {
+            return;
+        }
+        visited[node_idx] = true;
+
+        let node = &self.nodes[node_idx];
+        let local = if node_idx < local_transforms.len() {
+            &local_transforms[node_idx]
+        } else {
+            &node.transform
+        };
+        let world_transform = mat4_mul(parent_transform, local);
+
+        if let Some(geo_idx) = node.geometry_index {
+            instances.push(SceneInstance {
+                node_index: node_idx,
+                geometry_index: geo_idx,
+                world_transform,
+            });
+        }
+
+        for &child_idx in &node.children {
+            self.traverse_animated_scene_node(
+                child_idx,
+                &world_transform,
+                local_transforms,
+                visited,
+                instances,
+            );
+        }
+
+        visited[node_idx] = false;
+    }
+
+    pub fn parse_skeleton(
+        data: &[u8],
+        _name: &str,
+        endian: IgbEndian,
+    ) -> Result<Skeleton, IgbError> {
+        if data.len() < 8 {
+            return Ok(Skeleton::default());
+        }
+        let bone_count = Self::read_u32(data, 0, endian) as usize;
+        let root = Self::read_u32(data, 4, endian) as usize;
+        let mut bones = Vec::with_capacity(bone_count);
+        let mut cur_offset = 8usize;
+
+        for i in 0..bone_count {
+            if cur_offset + 132 > data.len() {
+                break;
+            }
+            let parent_raw = match endian {
+                IgbEndian::Little => LittleEndian::read_i32(&data[cur_offset..cur_offset + 4]),
+                IgbEndian::Big => BigEndian::read_i32(&data[cur_offset..cur_offset + 4]),
+            };
+            let parent = if parent_raw >= 0 {
+                Some(parent_raw as usize)
+            } else {
+                None
+            };
+            cur_offset += 4;
+
+            let mut inverse_bind_pose = [0.0f32; 16];
+            for (m, val) in inverse_bind_pose.iter_mut().enumerate() {
+                *val = Self::read_f32(data, cur_offset + m * 4, endian);
+            }
+            cur_offset += 64;
+
+            let mut local_transform = [0.0f32; 16];
+            for (m, val) in local_transform.iter_mut().enumerate() {
+                *val = Self::read_f32(data, cur_offset + m * 4, endian);
+            }
+            cur_offset += 64;
+
+            let name_len = if cur_offset + 4 <= data.len() {
+                let l = Self::read_u32(data, cur_offset, endian) as usize;
+                cur_offset += 4;
+                l
+            } else {
+                0
+            };
+
+            let name = if name_len > 0 && cur_offset + name_len <= data.len() {
+                let s =
+                    String::from_utf8_lossy(&data[cur_offset..cur_offset + name_len]).to_string();
+                cur_offset += name_len;
+                s
+            } else {
+                format!("bone_{}", i)
+            };
+
+            bones.push(Bone {
+                name,
+                parent,
+                inverse_bind_pose,
+                local_transform,
+            });
+        }
+
+        Ok(Skeleton::new(bones, root))
+    }
+
+    pub fn parse_animation(
+        data: &[u8],
+        name: &str,
+        endian: IgbEndian,
+    ) -> Result<AnimationClip, IgbError> {
+        if data.len() < 8 {
+            return Ok(AnimationClip::new(name, 0.0, Vec::new()));
+        }
+        let duration = Self::read_f32(data, 0, endian);
+        let track_count = Self::read_u32(data, 4, endian) as usize;
+        let mut tracks = Vec::with_capacity(track_count);
+        let mut cur_offset = 8usize;
+
+        for _ in 0..track_count {
+            if cur_offset + 16 > data.len() {
+                break;
+            }
+            let bone_index = Self::read_u32(data, cur_offset, endian) as usize;
+            let pos_count = Self::read_u32(data, cur_offset + 4, endian) as usize;
+            let rot_count = Self::read_u32(data, cur_offset + 8, endian) as usize;
+            let scale_count = Self::read_u32(data, cur_offset + 12, endian) as usize;
+            cur_offset += 16;
+
+            let mut positions = Vec::with_capacity(pos_count);
+            for _ in 0..pos_count {
+                if cur_offset + 16 > data.len() {
+                    break;
+                }
+                let t = Self::read_f32(data, cur_offset, endian);
+                let x = Self::read_f32(data, cur_offset + 4, endian);
+                let y = Self::read_f32(data, cur_offset + 8, endian);
+                let z = Self::read_f32(data, cur_offset + 12, endian);
+                cur_offset += 16;
+                positions.push(Keyframe::new(t, [x, y, z]));
+            }
+
+            let mut rotations = Vec::with_capacity(rot_count);
+            for _ in 0..rot_count {
+                if cur_offset + 20 > data.len() {
+                    break;
+                }
+                let t = Self::read_f32(data, cur_offset, endian);
+                let x = Self::read_f32(data, cur_offset + 4, endian);
+                let y = Self::read_f32(data, cur_offset + 8, endian);
+                let z = Self::read_f32(data, cur_offset + 12, endian);
+                let w = Self::read_f32(data, cur_offset + 16, endian);
+                cur_offset += 20;
+                rotations.push(Keyframe::new(t, [x, y, z, w]));
+            }
+
+            let mut scales = Vec::with_capacity(scale_count);
+            for _ in 0..scale_count {
+                if cur_offset + 16 > data.len() {
+                    break;
+                }
+                let t = Self::read_f32(data, cur_offset, endian);
+                let x = Self::read_f32(data, cur_offset + 4, endian);
+                let y = Self::read_f32(data, cur_offset + 8, endian);
+                let z = Self::read_f32(data, cur_offset + 12, endian);
+                cur_offset += 16;
+                scales.push(Keyframe::new(t, [x, y, z]));
+            }
+
+            tracks.push(BoneTrack {
+                bone_index,
+                positions,
+                rotations,
+                scales,
+            });
+        }
+
+        Ok(AnimationClip::new(name, duration, tracks))
     }
 
     pub fn extract_level_markers(&self) -> Vec<LevelMarker> {
@@ -1351,6 +2064,8 @@ impl IgbModel {
                         normal: [0.0, 1.0, 0.0],
                         uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
                         color: [0.8, 0.8, 0.82, 1.0],
+                        bone_indices: [0, 0, 0, 0],
+                        bone_weights: [1.0, 0.0, 0.0, 0.0],
                     });
                     i += 12;
                     if extracted_verts.len() >= 4000 {
@@ -1441,6 +2156,8 @@ impl IgbModel {
             materials: Vec::new(),
             textures: Vec::new(),
             meshes,
+            skeletons: Vec::new(),
+            animations: Vec::new(),
         })
     }
 }
@@ -1885,6 +2602,8 @@ mod tests {
             materials: vec![],
             textures: vec![],
             meshes: vec![],
+            skeletons: vec![],
+            animations: vec![],
         };
 
         let instances = model.evaluate_scene_graph();
@@ -1985,6 +2704,8 @@ mod tests {
             materials: vec![],
             textures: vec![],
             meshes: vec![test_mesh],
+            skeletons: vec![],
+            animations: vec![],
         };
 
         let markers = model.extract_level_markers();
@@ -2095,5 +2816,155 @@ mod tests {
         assert!(markers.iter().any(|m| m.kind == MarkerKind::Spawn));
         assert!(markers.iter().any(|m| m.kind == MarkerKind::Collectible));
         assert!(markers.iter().any(|m| m.kind == MarkerKind::Prop));
+    }
+
+    #[test]
+    fn test_synthetic_skeleton_and_animation() {
+        let trans = |x: f32, y: f32, z: f32| -> [f32; 16] {
+            let mut m = mat4_identity();
+            m[12] = x;
+            m[13] = y;
+            m[14] = z;
+            m
+        };
+
+        let bone_root = Bone {
+            name: "root".to_string(),
+            parent: None,
+            inverse_bind_pose: mat4_identity(),
+            local_transform: mat4_identity(),
+        };
+
+        let bone_child = Bone {
+            name: "spine".to_string(),
+            parent: Some(0),
+            inverse_bind_pose: trans(0.0, -2.0, 0.0),
+            local_transform: trans(0.0, 2.0, 0.0),
+        };
+
+        let skeleton = Skeleton::new(vec![bone_root, bone_child], 0);
+        assert_eq!(skeleton.get_bone_index("root"), Some(0));
+        assert_eq!(skeleton.get_bone_index("spine"), Some(1));
+
+        let bytes = skeleton.serialize_binary(IgbEndian::Little);
+        let parsed_skel = IgbModel::parse_skeleton(&bytes, "test_skel", IgbEndian::Little)
+            .expect("Parse skeleton");
+        assert_eq!(parsed_skel.bones.len(), 2);
+        assert_eq!(parsed_skel.bones[0].name, "root");
+        assert_eq!(parsed_skel.bones[1].name, "spine");
+        assert_eq!(parsed_skel.bones[1].parent, Some(0));
+        assert_eq!(parsed_skel.bones[1].local_transform[13], 2.0);
+        assert_eq!(parsed_skel.bones[1].inverse_bind_pose[13], -2.0);
+
+        let clip = AnimationClip::new(
+            "walk",
+            2.0,
+            vec![
+                BoneTrack {
+                    bone_index: 0,
+                    positions: vec![
+                        Keyframe::new(0.0, [0.0, 0.0, 0.0]),
+                        Keyframe::new(2.0, [10.0, 0.0, 0.0]),
+                    ],
+                    rotations: vec![
+                        Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0]),
+                        Keyframe::new(
+                            2.0,
+                            [
+                                0.0,
+                                std::f32::consts::FRAC_1_SQRT_2,
+                                0.0,
+                                std::f32::consts::FRAC_1_SQRT_2,
+                            ],
+                        ),
+                    ],
+                    scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+                },
+                BoneTrack {
+                    bone_index: 1,
+                    positions: vec![
+                        Keyframe::new(0.0, [0.0, 2.0, 0.0]),
+                        Keyframe::new(2.0, [0.0, 4.0, 0.0]),
+                    ],
+                    rotations: vec![Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0])],
+                    scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+                },
+            ],
+        );
+
+        let anim_bytes = clip.serialize_binary(IgbEndian::Little);
+        let parsed_clip = IgbModel::parse_animation(&anim_bytes, "walk", IgbEndian::Little)
+            .expect("Parse animation");
+        assert_eq!(parsed_clip.name, "walk");
+        assert_eq!(parsed_clip.duration, 2.0);
+        assert_eq!(parsed_clip.tracks.len(), 2);
+        assert_eq!(parsed_clip.tracks[0].positions.len(), 2);
+
+        let sampled_pos = sample_vec3(&parsed_clip.tracks[0].positions, 1.0).unwrap();
+        assert!((sampled_pos[0] - 5.0).abs() < 1e-4);
+
+        let sampled_rot = sample_quat(&parsed_clip.tracks[0].rotations, 1.0).unwrap();
+        assert!((sampled_rot[1] - 0.3826834).abs() < 1e-3);
+        assert!((sampled_rot[3] - 0.9238795).abs() < 1e-3);
+
+        let skinning_matrices = clip.sample_pose(0.0, &skeleton);
+        assert_eq!(skinning_matrices.len(), 2);
+
+        for (i, &val) in skinning_matrices[0].iter().enumerate() {
+            let expected = if i % 5 == 0 { 1.0 } else { 0.0 };
+            assert!((val - expected).abs() < 1e-4);
+        }
+
+        for (i, &val) in skinning_matrices[1].iter().enumerate() {
+            let expected = if i % 5 == 0 { 1.0 } else { 0.0 };
+            assert!((val - expected).abs() < 1e-4);
+        }
+
+        let node0 = IgbSceneNode {
+            name: "node0".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![1],
+            geometry_index: None,
+            transform: mat4_identity(),
+        };
+        let node1 = IgbSceneNode {
+            name: "node1".to_string(),
+            type_id: IgbObjectType::IgNode,
+            children: vec![],
+            geometry_index: Some(0),
+            transform: trans(0.0, 2.0, 0.0),
+        };
+        let anim_model = IgbModel {
+            header: IgbHeader {
+                magic: *IGB_MAGIC,
+                version: 8,
+                object_count: 2,
+                string_table_offset: 0,
+                endian: IgbEndian::Little,
+            },
+            directory: vec![],
+            nodes: vec![node0, node1],
+            geometries: vec![IgbGeometryNode {
+                name: "geo0".to_string(),
+                vertex_buffer_index: None,
+                index_buffer_index: None,
+                attr_list_index: None,
+                material_index: None,
+                mesh: None,
+            }],
+            attr_lists: vec![],
+            vertex_buffers: vec![],
+            index_buffers: vec![],
+            materials: vec![],
+            textures: vec![],
+            meshes: vec![],
+            skeletons: vec![skeleton],
+            animations: vec![clip.clone()],
+        };
+
+        let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
+        assert_eq!(anim_instances.len(), 1);
+        assert_eq!(anim_instances[0].geometry_index, 0);
+        assert!((anim_instances[0].world_transform[12] - 5.0).abs() < 1e-4);
     }
 }

@@ -5,7 +5,7 @@ use skylands_core::{
     GameStateMachine, InputMapper, PortalGameplay, World, WorldAudioCue,
 };
 use skylands_extractor::Extractor;
-use skylands_formats::{decode_cmpr, AssetLoader};
+use skylands_formats::{decode_cmpr, AssetLoader, IgbModel};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
@@ -301,6 +301,7 @@ pub struct AppRuntime {
     pub dynamic_textures: HashMap<String, GpuTexture>,
     pub dynamic_meshes: HashMap<String, GpuMesh>,
     pub dynamic_models: HashMap<String, ModelInstance>,
+    pub dynamic_igb_models: HashMap<String, IgbModel>,
     pub environment: Option<EnvironmentScene>,
     pub last_active_hero_id: Option<u32>,
     pub anim_time: f32,
@@ -349,6 +350,7 @@ impl AppRuntime {
             dynamic_textures: HashMap::new(),
             dynamic_meshes: HashMap::new(),
             dynamic_models: HashMap::new(),
+            dynamic_igb_models: HashMap::new(),
             environment: None,
             last_active_hero_id: None,
             anim_time: 0.0,
@@ -421,6 +423,7 @@ impl AppRuntime {
                 }
                 self.dynamic_models
                     .insert(key.clone(), ModelInstance::new(submeshes));
+                self.dynamic_igb_models.insert(key.clone(), (*igb).clone());
             }
         }
         self.dynamic_models.get(&key)
@@ -1186,7 +1189,7 @@ impl RenderAppHandler for AppRuntime {
                 to_render.push((pedestal, None, pedestal_instances.as_slice()));
             }
 
-            let actor_instances: Vec<[InstanceRaw; 1]> = self
+            let actor_instances: Vec<Vec<InstanceRaw>> = self
                 .engine
                 .world
                 .actors
@@ -1201,9 +1204,38 @@ impl RenderAppHandler for AppRuntime {
                         }
                         _ => (a.position, a.rotation),
                     };
-                    [InstanceRaw {
-                        model: mat4::transform(pos, rot, [1.0, 1.0, 1.0]),
-                    }]
+                    let actor_mat = mat4::transform(pos, rot, [1.0, 1.0, 1.0]);
+
+                    let model_path = a.model_path.as_deref().unwrap_or("models/hero.igb");
+                    let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
+
+                    if let Some(igb) = self.dynamic_igb_models.get(&model_key) {
+                        let clip = a.current_anim.as_ref().and_then(|anim_name| {
+                            igb.animations
+                                .iter()
+                                .find(|c| c.name.eq_ignore_ascii_case(anim_name))
+                        });
+
+                        let scene_instances = if let Some(clip) = clip {
+                            igb.evaluate_animated_scene_graph(clip, a.animation_time)
+                        } else {
+                            igb.evaluate_scene_graph()
+                        };
+
+                        if !scene_instances.is_empty() {
+                            return scene_instances
+                                .into_iter()
+                                .map(|si| {
+                                    let node_mat =
+                                        InstanceRaw::from_flat_slice(&si.world_transform).model;
+                                    let combined = mat4::mul(&actor_mat, &node_mat);
+                                    InstanceRaw { model: combined }
+                                })
+                                .collect();
+                        }
+                    }
+
+                    vec![InstanceRaw { model: actor_mat }]
                 })
                 .collect();
 
@@ -1211,12 +1243,11 @@ impl RenderAppHandler for AppRuntime {
                 if !actor.active {
                     continue;
                 }
-                let inst_slice = actor_instances[idx].as_slice();
                 let model_path = actor.model_path.as_deref().unwrap_or("models/hero.igb");
                 let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
 
                 if let Some(model) = self.dynamic_models.get(&model_key) {
-                    for (gpu_mesh, submesh_tex) in &model.submeshes {
+                    for (sub_idx, (gpu_mesh, submesh_tex)) in model.submeshes.iter().enumerate() {
                         let tex = submesh_tex
                             .as_ref()
                             .or_else(|| {
@@ -1226,6 +1257,11 @@ impl RenderAppHandler for AppRuntime {
                                 })
                             })
                             .or(self.actor_texture.as_ref());
+                        let inst_slice = if sub_idx < actor_instances[idx].len() {
+                            &actor_instances[idx][sub_idx..sub_idx + 1]
+                        } else {
+                            actor_instances[idx].as_slice()
+                        };
                         to_render.push((gpu_mesh, tex, inst_slice));
                     }
                     continue;
@@ -1256,7 +1292,7 @@ impl RenderAppHandler for AppRuntime {
                     .or(self.actor_texture.as_ref());
 
                 if let Some(m) = actor_mesh {
-                    to_render.push((m, tex, inst_slice));
+                    to_render.push((m, tex, actor_instances[idx].as_slice()));
                 }
             }
 
@@ -2010,5 +2046,82 @@ mod tests {
         // Key presses now route back to hero input
         runtime.on_key(KeyCode::KeyW, true);
         assert_eq!(runtime.engine.input.state.stick, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_headless_actor_locomotion_switches_between_idle_and_walk_poses() {
+        let mock_portal = MockPortal::new();
+        let assets = Arc::new(AssetLoader::default());
+        let mut engine = GameEngine::new(ActivePortal::Mock(mock_portal), assets);
+
+        let hero_id = engine.world.spawn(
+            1,
+            0,
+            "Snapshot",
+            [0.0, 0.0, 0.0],
+            false,
+            Some("models/hero.igb".to_string()),
+            None,
+        );
+        engine.world.active_hero_id = Some(hero_id);
+
+        // Initial state: stationary -> Idle
+        let mut input = skylands_core::WiiInputState::default();
+        engine.world.update(0.016, &input);
+        let hero = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.current_anim.as_deref(), Some("idle"));
+        assert!(hero.animation_time > 0.0);
+
+        // Locomotion: slight stick -> Walk
+        input.stick = [0.3, 0.0];
+        engine.world.update(0.016, &input);
+        let hero = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.current_anim.as_deref(), Some("walk"));
+
+        // Locomotion: full stick -> Run
+        input.stick = [1.0, 0.0];
+        engine.world.update(0.016, &input);
+        let hero = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.current_anim.as_deref(), Some("run"));
+
+        // Combat: PrimaryMelee -> Attack combo
+        input.press(skylands_core::WiiButton::B);
+        engine.world.update(0.016, &input);
+        let hero = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.current_anim.as_deref(), Some("attack_combo_1"));
+
+        // Back to stationary: Idle
+        input.release(skylands_core::WiiButton::B);
+        input.stick = [0.0, 0.0];
+        for _ in 0..20 {
+            engine.world.update(0.016, &input);
+        }
+        let hero = engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == hero_id)
+            .unwrap();
+        assert_eq!(hero.current_anim.as_deref(), Some("idle"));
     }
 }

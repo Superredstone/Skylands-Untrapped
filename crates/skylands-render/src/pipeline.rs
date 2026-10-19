@@ -122,6 +122,74 @@ fn fs_skybox(in: SkyboxVertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+pub const SKINNING_SHADER_SRC: &str = r#"
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
+struct BoneUniform {
+    matrices: array<mat4x4<f32>, 64>,
+};
+
+@group(1) @binding(0)
+var<uniform> bones: BoneUniform;
+
+struct SkinnedVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) bone_indices: vec4<u32>,
+    @location(5) bone_weights: vec4<f32>,
+};
+
+struct InstanceInput {
+    @location(6) model_matrix_0: vec4<f32>,
+    @location(7) model_matrix_1: vec4<f32>,
+    @location(8) model_matrix_2: vec4<f32>,
+    @location(9) model_matrix_3: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+@vertex
+fn vs_skinned(model: SkinnedVertexInput, instance: InstanceInput) -> VertexOutput {
+    let model_matrix = mat4x4<f32>(
+        instance.model_matrix_0,
+        instance.model_matrix_1,
+        instance.model_matrix_2,
+        instance.model_matrix_3,
+    );
+
+    let skin_matrix =
+        model.bone_weights[0] * bones.matrices[model.bone_indices[0]] +
+        model.bone_weights[1] * bones.matrices[model.bone_indices[1]] +
+        model.bone_weights[2] * bones.matrices[model.bone_indices[2]] +
+        model.bone_weights[3] * bones.matrices[model.bone_indices[3]];
+
+    let world_pos = model_matrix * skin_matrix * vec4<f32>(model.position, 1.0);
+    var out: VertexOutput;
+    out.clip_position = camera.view_proj * world_pos;
+    out.uv = model.uv;
+    out.color = model.color;
+    out.world_normal = (model_matrix * skin_matrix * vec4<f32>(model.normal, 0.0)).xyz;
+    return out;
+}
+
+@fragment
+fn fs_skinned(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct CameraUniform {
@@ -292,5 +360,37 @@ mod tests {
         let light = LightUniform::default();
         assert_eq!(light.intensity, 1.0);
         assert_eq!(light.ambient_intensity, 0.6);
+    }
+
+    #[test]
+    fn test_skinned_vertex_stride_and_shader_compilation() {
+        use crate::mesh::SkinnedVertex;
+        assert_eq!(std::mem::size_of::<SkinnedVertex>(), 80);
+        let desc = SkinnedVertex::desc();
+        assert_eq!(desc.array_stride, 80);
+        assert_eq!(desc.attributes.len(), 6);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter =
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })) {
+                Some(a) => a,
+                None => return,
+            };
+
+        let (device, _) = match pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+        ) {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+
+        let _shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Skinned Vertex Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SKINNING_SHADER_SRC)),
+        });
     }
 }

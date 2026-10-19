@@ -91,6 +91,9 @@ pub struct Actor {
     pub active_attack: Option<ActiveAttack>,
     pub combo_step: u8,
     pub combo_cooldown_timer: f32,
+    pub animation_time: f32,
+    pub current_anim: Option<String>,
+    pub anim_speed: f32,
 }
 
 pub struct World {
@@ -165,6 +168,9 @@ impl World {
             active_attack: None,
             combo_step: 0,
             combo_cooldown_timer: 0.0,
+            animation_time: 0.0,
+            current_anim: Some("idle".to_string()),
+            anim_speed: 1.0,
         };
 
         if !is_villain && self.active_hero_id.is_none() {
@@ -210,6 +216,9 @@ impl World {
             active_attack: None,
             combo_step: 0,
             combo_cooldown_timer: 0.0,
+            animation_time: 0.0,
+            current_anim: Some("idle".to_string()),
+            anim_speed: 1.0,
         };
 
         self.actors.push(actor);
@@ -254,6 +263,9 @@ impl World {
             active_attack: None,
             combo_step: 0,
             combo_cooldown_timer: 0.0,
+            animation_time: 0.0,
+            current_anim: Some("idle".to_string()),
+            anim_speed: 1.0,
         };
 
         self.actors.push(actor);
@@ -690,6 +702,44 @@ impl World {
                 .push(WorldAudioCue::ZoneEntered(target_zone.clone()));
             self.transition_to_zone(&target_zone, target_spawn);
         }
+
+        // 7. Update actor animation state machine & time
+        if let Some(hero_id) = self.active_hero_id {
+            if let Some(hero) = self.actors.iter_mut().find(|a| a.id == hero_id) {
+                let stick_mag =
+                    (input.stick[0] * input.stick[0] + input.stick[1] * input.stick[1]).sqrt();
+                let next_anim = if let Some(ref attack) = hero.active_attack {
+                    match attack.kind {
+                        AttackKind::PrimaryMelee => {
+                            format!("attack_combo_{}", hero.combo_step.max(1))
+                        }
+                        AttackKind::SecondarySweep => "attack_sweep".to_string(),
+                        AttackKind::SpecialProjectile => "attack_projectile".to_string(),
+                    }
+                } else if stick_mag > 0.5 {
+                    "run".to_string()
+                } else if stick_mag > 0.1 {
+                    "walk".to_string()
+                } else {
+                    "idle".to_string()
+                };
+
+                if hero.current_anim.as_deref() != Some(&next_anim) {
+                    hero.current_anim = Some(next_anim);
+                    hero.animation_time = 0.0;
+                }
+            }
+        }
+
+        for actor in &mut self.actors {
+            if actor.active {
+                actor.animation_time += dt * actor.anim_speed;
+            }
+        }
+    }
+
+    pub fn tick(&mut self, dt: f32, input: &WiiInputState) {
+        self.update(dt, input);
     }
 
     pub fn apply_damage(&mut self, target_id: u32, damage: u32, hit_pos: [f32; 3]) {

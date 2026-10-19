@@ -560,6 +560,8 @@ mod tests {
             materials: Vec::new(),
             textures: Vec::new(),
             meshes: Vec::new(),
+            skeletons: Vec::new(),
+            animations: Vec::new(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {

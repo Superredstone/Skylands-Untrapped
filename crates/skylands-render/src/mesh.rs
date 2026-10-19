@@ -103,6 +103,55 @@ impl From<IgbVertex> for Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
+pub struct SkinnedVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+    pub bone_indices: [u32; 4],
+    pub bone_weights: [f32; 4],
+}
+
+impl SkinnedVertex {
+    pub const ATTRIBS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x3,
+        2 => Float32x2,
+        3 => Float32x4,
+        4 => Uint32x4,
+        5 => Float32x4
+    ];
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SkinnedVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBS,
+        }
+    }
+}
+
+impl From<&IgbVertex> for SkinnedVertex {
+    fn from(v: &IgbVertex) -> Self {
+        Self {
+            position: v.position,
+            normal: v.normal,
+            uv: v.uv,
+            color: v.color,
+            bone_indices: v.bone_indices,
+            bone_weights: v.bone_weights,
+        }
+    }
+}
+
+impl From<IgbVertex> for SkinnedVertex {
+    fn from(v: IgbVertex) -> Self {
+        Self::from(&v)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub name: String,
@@ -746,6 +795,7 @@ mod tests {
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.5, 0.5],
                 color: [1.0, 0.0, 0.0, 1.0],
+                ..Default::default()
             }],
             indices: vec![0, 0, 0],
             material_name: Some("test_mat".to_string()),
