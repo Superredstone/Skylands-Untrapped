@@ -393,4 +393,30 @@ mod tests {
             assert!(!models[0].meshes.is_empty());
         }
     }
+
+    #[test]
+    fn test_mount_dir_and_resolve_targets() {
+        let p1 = Path::new("assets/files");
+        let p2 = Path::new("../../assets/files");
+        let root = if p1.exists() { p1 } else { p2 };
+        if root.exists() {
+            let mut loader = AssetLoader::default();
+            let mounted = loader.mount_dir(root).expect("mount_dir assets/files");
+            assert!(mounted > 0);
+
+            assert!(loader.has_file("462_Water_Crocky.bld"));
+            let crocky = loader
+                .load_raw("462_Water_Crocky.bld")
+                .expect("load crocky");
+            assert_eq!(&crocky[0..4], b"IGZ\x01");
+
+            assert!(loader.has_file("1010_Kaos.bld"));
+            let kaos = loader.load_raw("1010_Kaos.bld").expect("load kaos");
+            assert_eq!(&kaos[0..4], b"IGZ\x01");
+
+            assert!(loader.has_file("Level_Hub_2014_01.bld"));
+            let hub = loader.load_raw("Level_Hub_2014_01.bld").expect("load hub");
+            assert_eq!(&hub[0..4], b"IGZ\x01");
+        }
+    }
 }

@@ -955,4 +955,51 @@ mod tests {
             assert_eq!(&file0[0..4], b"FSB5");
         }
     }
+
+    #[test]
+    fn test_inspect_extracted_targets() {
+        let targets = [
+            "assets/files/character/462_Water_Crocky.bld",
+            "assets/files/character/462_Water_Crocky.arc",
+            "assets/files/character/1010_Kaos.bld",
+            "assets/files/character/1010_Kaos.arc",
+            "assets/files/level/Level_Hub_2014_01.bld",
+        ];
+
+        for path_str in targets {
+            let p1 = Path::new(path_str);
+            let p2 = Path::new("../../").join(path_str);
+            let path = if p1.exists() {
+                p1
+            } else if p2.exists() {
+                &p2
+            } else {
+                continue;
+            };
+
+            let mut mount = ArchiveMount::new();
+            mount.mount(path).expect("mount target");
+            println!("INSPECT: {} (count={})", path_str, mount.count());
+            let files = mount.list_files();
+            println!("  Files count: {}", files.len());
+            for f in &files[..files.len().min(5)] {
+                let data = mount.read_file(f).ok();
+                let head = data
+                    .as_ref()
+                    .map(|d| if d.len() >= 4 { &d[..4] } else { &d[..] })
+                    .unwrap_or(&[]);
+                let igb_chunks = data
+                    .as_ref()
+                    .map(|d| ArchiveMount::scan_embedded_igb(d).len())
+                    .unwrap_or(0);
+                println!(
+                    "    file: {}, size: {}, magic: {:?}, igb_chunks: {}",
+                    f,
+                    data.as_ref().map(|d| d.len()).unwrap_or(0),
+                    String::from_utf8_lossy(head),
+                    igb_chunks
+                );
+            }
+        }
+    }
 }
