@@ -722,7 +722,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Window & Render Loop
     info!("Starting window lifecycle & wgpu rendering...");
-    let event_loop = EventLoop::new()?;
+    let event_loop = match EventLoop::new() {
+        Ok(el) => el,
+        Err(e) => {
+            warn!(
+                "Failed to initialize window event loop: {}. Run via `nix-shell --run \"cargo run\"` on NixOS to provide graphics libraries.",
+                e
+            );
+            return Err(e.into());
+        }
+    };
     let runtime = AppRuntime::new(engine, assets);
     let app = WindowApp::new(WindowConfig::default(), runtime);
     app.run(event_loop)?;

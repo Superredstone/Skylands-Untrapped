@@ -1,10 +1,13 @@
 # AGENTS.md
 
 ## Environment & Commands
-Host runs NixOS. Standard tools require `nix-shell`:
-- Build: `nix-shell -p cargo rustc pkg-config udev alsa-lib --run "cargo build"`
-- Test: `nix-shell -p cargo rustc pkg-config udev alsa-lib --run "cargo test"`
-- Single test: `nix-shell -p cargo rustc pkg-config udev alsa-lib --run "cargo test <test_name>"`
+Host runs NixOS. Standard tools require `nix-shell` (configured in `shell.nix` with dynamic graphics libs):
+- Run GUI: `nix-shell --run "cargo run -p skylands-app"`
+- Run Headless: `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
+- Build: `nix-shell --run "cargo build"`
+- Test: `nix-shell --run "cargo test"`
+- Single test: `nix-shell --run "cargo test <test_name>"`
+- Format & Lint: `nix-shell --run "cargo fmt --all && cargo clippy --all-targets --all-features"`
 - ISO extract tool: `nix-shell -p wiimms-iso-tools --run "wit extract <rom.wbfs> <dest>"`
 - Ghidra headless: `/run/current-system/sw/bin/ghidra` or REA CLI (`npx rea-agents@6.7.0`)
 
