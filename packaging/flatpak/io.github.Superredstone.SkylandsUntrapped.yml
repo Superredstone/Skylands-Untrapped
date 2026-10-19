@@ -17,8 +17,7 @@ finish-args:
   - --filesystem=xdg-data/skylands-untrapped:create
 
 build-options:
-  append-path:
-    - /usr/lib/sdk/rust-stable/bin
+  append-path: /usr/lib/sdk/rust-stable/bin
   env:
     CARGO_HOME: /run/build/skylands-untrapped/cargo
 
