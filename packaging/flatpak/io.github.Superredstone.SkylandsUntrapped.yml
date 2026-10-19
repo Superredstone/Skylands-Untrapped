@@ -1,0 +1,60 @@
+app-id: io.github.Superredstone.SkylandsUntrapped
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: skylands-untrapped
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --socket=pulseaudio
+  - --device=all
+  - --filesystem=home:ro
+  - --filesystem=xdg-data/skylands-untrapped:create
+
+build-options:
+  append-path:
+    - /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/skylands-untrapped/cargo
+
+modules:
+  - name: wiimms-iso-tools
+    buildsystem: simple
+    build-commands:
+      - make -C project wit
+      - install -Dm755 project/wit /app/bin/wit
+    sources:
+      - type: git
+        url: https://github.com/Wiimm/wiimms-iso-tools.git
+        commit: fc1c0b840cb3ac41ca6e4f1d5e16da12b47eab58
+
+  - name: skylands-untrapped
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release -p skylands-app
+      - install -Dm755 target/release/skylands-app /app/bin/skylands-app
+      - install -Dm755 skylands-untrapped-wrapper.sh /app/bin/skylands-untrapped
+      - install -Dm644 io.github.Superredstone.SkylandsUntrapped.desktop /app/share/applications/io.github.Superredstone.SkylandsUntrapped.desktop
+      - install -Dm644 io.github.Superredstone.SkylandsUntrapped.metainfo.xml /app/share/metainfo/io.github.Superredstone.SkylandsUntrapped.metainfo.xml
+      - install -Dm644 io.github.Superredstone.SkylandsUntrapped.svg /app/share/icons/hicolor/scalable/apps/io.github.Superredstone.SkylandsUntrapped.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - assets
+          - .git
+      - cargo-sources.json
+      - type: file
+        path: skylands-untrapped-wrapper.sh
+      - type: file
+        path: io.github.Superredstone.SkylandsUntrapped.desktop
+      - type: file
+        path: io.github.Superredstone.SkylandsUntrapped.metainfo.xml
+      - type: file
+        path: io.github.Superredstone.SkylandsUntrapped.svg

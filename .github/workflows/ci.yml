@@ -107,3 +107,33 @@ jobs:
         with:
           files: ${{ matrix.asset_name }}
           generate_release_notes: true
+
+  flatpak:
+    name: Flatpak
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: SkylandsUntrapped.flatpak
+          manifest-path: packaging/flatpak/io.github.Superredstone.SkylandsUntrapped.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkylandsUntrapped.flatpak
+          path: SkylandsUntrapped.flatpak
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SkylandsUntrapped.flatpak
+          generate_release_notes: true
+

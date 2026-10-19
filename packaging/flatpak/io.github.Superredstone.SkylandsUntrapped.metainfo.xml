@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Superredstone.SkylandsUntrapped</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Skylands Untrapped</name>
+  <summary>Native PC runtime for Skylanders Trap Team</summary>
+  <description>
+    <p>
+      Skylands Untrapped is a fan-made native PC port and reimplementation of
+      Skylanders Trap Team with support for hardware Traptanium portals,
+      software portal emulation, modern graphics, and input mappings.
+    </p>
+    <p>
+      Requires a legally acquired European Wii disc or WBFS image (rom.eu.wbfs)
+      to extract game assets on first run.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.Superredstone.SkylandsUntrapped.desktop</launchable>
+  <url type="homepage">https://github.com/Superredstone/Skylands-Untrapped</url>
+  <url type="bugtracker">https://github.com/Superredstone/Skylands-Untrapped/issues</url>
+  <developer_name>Superredstone</developer_name>
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-fantasy">moderate</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="0.1.0" date="2026-10-19" />
+  </releases>
+</component>

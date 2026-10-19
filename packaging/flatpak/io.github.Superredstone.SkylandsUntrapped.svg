@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <radialGradient id="portalGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="70%" stop-color="#4facfe" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2c3e50"/>
+      <stop offset="50%" stop-color="#4ca1af"/>
+      <stop offset="100%" stop-color="#2c3e50"/>
+    </linearGradient>
+    <linearGradient id="crystalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a8ff78"/>
+      <stop offset="100%" stop-color="#78ffd6"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#141923"/>
+  <circle cx="64" cy="64" r="50" fill="url(#portalGlow)"/>
+  <circle cx="64" cy="64" r="44" fill="none" stroke="url(#ringGrad)" stroke-width="8"/>
+  <circle cx="64" cy="64" r="32" fill="#1b2432" stroke="#00f2fe" stroke-width="2" stroke-dasharray="6,4"/>
+  <polygon points="64,28 82,54 75,94 53,94 46,54" fill="url(#crystalGrad)" opacity="0.9"/>
+  <polygon points="64,28 75,94 64,88 53,94" fill="#ffffff" opacity="0.4"/>
+</svg>
