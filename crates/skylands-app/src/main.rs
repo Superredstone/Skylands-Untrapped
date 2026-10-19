@@ -1,7 +1,8 @@
 use clap::Parser;
 use log::{info, warn};
 use skylands_core::{
-    AudioEngine, FixedTimestep, GameState, GameStateMachine, InputMapper, PortalGameplay, World,
+    AudioEngine, CollisionMesh, FixedTimestep, GameState, GameStateMachine, InputMapper,
+    PortalGameplay, World,
 };
 use skylands_extractor::Extractor;
 use skylands_formats::{decode_cmpr, AssetLoader};
@@ -159,6 +160,25 @@ impl GameEngine {
         }
 
         ticks
+    }
+
+    pub fn load_environment_collision(&mut self, path: &str) {
+        let candidates = [
+            path.to_string(),
+            format!("{}.igb", path),
+            "levels/hub.igb".to_string(),
+            "maps/courtyard.igb".to_string(),
+            "level_hub_2014_01.bld".to_string(),
+        ];
+        for cand in &candidates {
+            if self.assets.has_file(cand) {
+                if let Ok(igb) = self.assets.load_igb(cand) {
+                    self.world.environment.mesh = CollisionMesh::from_igb(&igb);
+                    return;
+                }
+            }
+        }
+        self.world.environment.mesh = CollisionMesh::synthetic_courtyard();
     }
 }
 
@@ -352,6 +372,7 @@ impl AppRuntime {
         }
 
         if let Some(igb) = resolved_igb {
+            self.engine.world.environment.mesh = CollisionMesh::from_igb(&igb);
             let instances = igb.evaluate_scene_graph();
             let mut submesh_defs = Vec::new();
 
@@ -391,6 +412,7 @@ impl AppRuntime {
 
             self.environment = Some(EnvironmentScene::new(loaded_name, submeshes));
         } else {
+            self.engine.world.environment.mesh = CollisionMesh::synthetic_courtyard();
             let renderer = self.renderer.as_ref()?;
             self.environment = Some(EnvironmentScene::synthetic_courtyard(&renderer.device));
         }
@@ -873,5 +895,50 @@ mod tests {
             }
             assert_eq!(to_render.len(), 2);
         }
+    }
+
+    #[test]
+    fn test_headless_environment_collision_and_jumping() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let mut engine = GameEngine::new(portal, assets);
+
+        assert_eq!(engine.world.environment.mesh.triangles.len(), 10);
+
+        let id = engine
+            .world
+            .spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+
+        // 1. Jump test
+        engine.input.state.press(skylands_core::WiiButton::A);
+        engine.tick();
+        engine.input.state.release(skylands_core::WiiButton::A);
+
+        let hero = engine.world.actors.iter().find(|a| a.id == id).unwrap();
+        assert!(hero.position[1] > 0.0, "Hero should be airborne after jump");
+        assert!(!hero.collider.grounded);
+
+        // 2. Fall & land back on floor
+        for _ in 0..60 {
+            engine.tick();
+        }
+        let hero = engine.world.actors.iter().find(|a| a.id == id).unwrap();
+        assert!(
+            (hero.position[1] - 0.0).abs() < 1e-4,
+            "Hero should land flush on courtyard floor"
+        );
+        assert!(hero.collider.grounded);
+
+        // 3. Move north towards wall at z = -20
+        engine.input.state.set_stick(0.0, 1.0); // -Z stick
+        for _ in 0..120 {
+            engine.tick();
+        }
+        let hero = engine.world.actors.iter().find(|a| a.id == id).unwrap();
+        assert!(
+            hero.position[2] >= -19.5,
+            "Hero cannot penetrate north wall boundary: z={}",
+            hero.position[2]
+        );
     }
 }

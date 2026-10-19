@@ -1,4 +1,5 @@
-use crate::input::WiiInputState;
+use crate::collision::{CharacterCollider, Environment};
+use crate::input::{WiiButton, WiiInputState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Actor {
@@ -13,12 +14,14 @@ pub struct Actor {
     pub active: bool,
     pub model_path: Option<String>,
     pub texture_path: Option<String>,
+    pub collider: CharacterCollider,
 }
 
 pub struct World {
     next_id: u32,
     pub actors: Vec<Actor>,
     pub active_hero_id: Option<u32>,
+    pub environment: Environment,
 }
 
 impl World {
@@ -27,6 +30,7 @@ impl World {
             next_id: 1,
             actors: Vec::new(),
             active_hero_id: None,
+            environment: Environment::default(),
         }
     }
 
@@ -56,6 +60,7 @@ impl World {
             active: true,
             model_path,
             texture_path,
+            collider: CharacterCollider::default(),
         };
 
         if !is_villain && self.active_hero_id.is_none() {
@@ -103,11 +108,81 @@ impl World {
                 hero.velocity[0] = input.stick[0] * SPEED;
                 hero.velocity[2] = -input.stick[1] * SPEED;
 
-                hero.position[0] += hero.velocity[0] * dt;
-                hero.position[2] += hero.velocity[2] * dt;
-
                 if input.stick[0].abs() > 0.1 || input.stick[1].abs() > 0.1 {
                     hero.rotation = input.stick[0].atan2(-input.stick[1]);
+                }
+
+                // Jump trigger
+                if hero.collider.grounded && input.is_down(WiiButton::A) {
+                    hero.velocity[1] = self.environment.jump_impulse;
+                    hero.collider.grounded = false;
+                }
+
+                // Apply gravity when airborne
+                if !hero.collider.grounded {
+                    hero.velocity[1] += self.environment.gravity * dt;
+                }
+
+                // Sub-stepping: step size bounded by half collider radius to prevent tunneling
+                const MAX_STEP: f32 = 0.2;
+                let h_speed = (hero.velocity[0] * hero.velocity[0]
+                    + hero.velocity[2] * hero.velocity[2])
+                    .sqrt();
+                let v_speed = hero.velocity[1].abs();
+                let total_move = (h_speed.max(v_speed) * dt).max(0.001);
+                let num_steps = ((total_move / MAX_STEP).ceil() as usize).max(1);
+                let sub_dt = dt / (num_steps as f32);
+
+                for _ in 0..num_steps {
+                    // Horizontal movement with obstacle pushout
+                    hero.position[0] += hero.velocity[0] * sub_dt;
+                    hero.position[2] += hero.velocity[2] * sub_dt;
+
+                    let sphere_center = [
+                        hero.position[0],
+                        hero.position[1] + hero.collider.radius,
+                        hero.position[2],
+                    ];
+                    if let Some(push) = self
+                        .environment
+                        .mesh
+                        .resolve_sphere(sphere_center, hero.collider.radius)
+                    {
+                        hero.position[0] += push[0];
+                        hero.position[2] += push[2];
+                    }
+
+                    // Vertical resolution and ground raycast
+                    if hero.velocity[1] > 0.0 {
+                        hero.position[1] += hero.velocity[1] * sub_dt;
+                        hero.collider.grounded = false;
+                    } else {
+                        let ray_start = [
+                            hero.position[0],
+                            hero.position[1] + hero.collider.step_height,
+                            hero.position[2],
+                        ];
+                        let max_ray_dist =
+                            hero.collider.step_height + (-hero.velocity[1] * sub_dt).max(0.2);
+                        if let Some((ground_y, _)) =
+                            self.environment.mesh.raycast_down(ray_start, max_ray_dist)
+                        {
+                            hero.position[1] = ground_y;
+                            hero.velocity[1] = 0.0;
+                            hero.collider.grounded = true;
+                        } else {
+                            hero.position[1] += hero.velocity[1] * sub_dt;
+                            hero.collider.grounded = false;
+                        }
+                    }
+
+                    // Kill plane safety
+                    if hero.position[1] < self.environment.kill_plane_y {
+                        hero.position = self.environment.spawn_point;
+                        hero.velocity = [0.0, 0.0, 0.0];
+                        hero.collider.grounded = true;
+                        break;
+                    }
                 }
             }
         }
@@ -143,10 +218,42 @@ mod tests {
 
         world.update(1.0, &input);
         let hero = world.actors.iter().find(|a| a.id == id).unwrap();
-        assert_eq!(hero.position[0], 5.0);
+        assert!((hero.position[0] - 5.0).abs() < 1e-4);
+        assert_eq!(hero.position[1], 0.0);
+        assert_eq!(hero.position[2], 0.0);
+        assert!(hero.collider.grounded);
 
         assert!(world.despawn_by_character_id(400));
         assert!(world.actors.is_empty());
         assert_eq!(world.active_hero_id, None);
+    }
+
+    #[test]
+    fn test_actor_wall_collision_and_jump() {
+        let mut world = World::new();
+        let id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, -19.0], false, None, None);
+
+        // Move north towards wall at z = -20
+        let mut input = WiiInputState::new();
+        input.set_stick(0.0, 1.0); // -Z movement
+        world.update(0.5, &input);
+
+        let hero = world.actors.iter().find(|a| a.id == id).unwrap();
+        // North wall is at z = -20. With radius = 0.5, z cannot penetrate past -19.5
+        assert!(
+            hero.position[2] >= -19.5,
+            "Hero penetrated wall: z={}",
+            hero.position[2]
+        );
+
+        // Jump test
+        input.press(WiiButton::A);
+        world.update(0.1, &input);
+        let hero_jumping = world.actors.iter().find(|a| a.id == id).unwrap();
+        assert!(
+            hero_jumping.position[1] > 0.0,
+            "Hero should be airborne after jump"
+        );
+        assert!(!hero_jumping.collider.grounded);
     }
 }
