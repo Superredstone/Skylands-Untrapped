@@ -4,10 +4,10 @@ use skylands_core::{
     AudioEngine, FixedTimestep, GameState, GameStateMachine, InputMapper, PortalGameplay, World,
 };
 use skylands_extractor::Extractor;
-use skylands_formats::ArchiveMount;
+use skylands_formats::{decode_cmpr, ArchiveMount};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
-use skylands_render::{GpuMesh, Mesh, RenderAppHandler, Renderer, WindowApp, WindowConfig};
+use skylands_render::{GpuMesh, GpuTexture, Mesh, RenderAppHandler, Renderer, WindowApp, WindowConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -164,6 +164,7 @@ pub struct AppRuntime {
     pub renderer: Option<Renderer>,
     pub pedestal_mesh: Option<GpuMesh>,
     pub actor_mesh: Option<GpuMesh>,
+    pub actor_texture: Option<GpuTexture>,
 }
 
 impl AppRuntime {
@@ -173,6 +174,7 @@ impl AppRuntime {
             renderer: None,
             pedestal_mesh: None,
             actor_mesh: None,
+            actor_texture: None,
         }
     }
 }
@@ -187,6 +189,26 @@ impl RenderAppHandler for AppRuntime {
 
                 let gpu_pedestal = GpuMesh::from_mesh(&renderer.device, &pedestal);
                 let gpu_hero = GpuMesh::from_mesh(&renderer.device, &hero_quad);
+
+                // Decode 8x8 CMPR demo texture (cyan / orange blocks)
+                let mut cmpr_data = vec![0u8; 32];
+                for (b, col) in [(0, 0x07FFu16), (1, 0xFD20u16), (2, 0xFD20u16), (3, 0x07FFu16)] {
+                    let base = b * 8;
+                    cmpr_data[base..base + 2].copy_from_slice(&col.to_be_bytes());
+                    cmpr_data[base + 2..base + 4].copy_from_slice(&0x0000u16.to_be_bytes());
+                }
+                if let Ok(rgba) = decode_cmpr(&cmpr_data, 8, 8) {
+                    if let Ok(tex) = GpuTexture::from_rgba(
+                        &renderer.device,
+                        &renderer.queue,
+                        &rgba,
+                        8,
+                        8,
+                        Some("Actor CMPR Texture"),
+                    ) {
+                        self.actor_texture = Some(tex);
+                    }
+                }
 
                 self.pedestal_mesh = Some(gpu_pedestal);
                 self.actor_mesh = Some(gpu_hero);
@@ -233,17 +255,17 @@ impl RenderAppHandler for AppRuntime {
                 [0.2, 0.5, 0.8, 1.0]
             };
 
-            let mut to_render = Vec::new();
+            let mut to_render: Vec<(&GpuMesh, Option<&GpuTexture>)> = Vec::new();
             if let Some(pedestal) = &self.pedestal_mesh {
-                to_render.push(pedestal);
+                to_render.push((pedestal, None));
             }
             if !self.engine.world.actors.is_empty() {
                 if let Some(actor) = &self.actor_mesh {
-                    to_render.push(actor);
+                    to_render.push((actor, self.actor_texture.as_ref()));
                 }
             }
 
-            if let Err(e) = r.render(&to_render, clear_color) {
+            if let Err(e) = r.render_textured(&to_render, clear_color) {
                 warn!("Render pass error: {:?}", e);
             }
         }

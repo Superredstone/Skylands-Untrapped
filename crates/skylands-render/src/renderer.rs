@@ -1,5 +1,6 @@
 use crate::mesh::GpuMesh;
 use crate::pipeline::{create_render_pipeline, CameraUniform};
+use crate::texture::GpuTexture;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -13,6 +14,8 @@ pub struct Renderer {
     pub render_pipeline: wgpu::RenderPipeline,
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
+    pub texture_bind_group_layout: wgpu::BindGroupLayout,
+    pub fallback_texture: GpuTexture,
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
 }
@@ -104,9 +107,12 @@ impl Renderer {
             label: Some("Camera Bind Group"),
         });
 
+        let texture_bind_group_layout = GpuTexture::bind_group_layout(&device);
+        let fallback_texture = GpuTexture::create_fallback(&device, &queue);
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Skylands Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -128,6 +134,8 @@ impl Renderer {
             render_pipeline,
             camera_buffer,
             camera_bind_group,
+            texture_bind_group_layout,
+            fallback_texture,
             depth_texture,
             depth_view,
         })
@@ -184,6 +192,16 @@ impl Renderer {
         meshes: &[&GpuMesh],
         clear_color: [f64; 4],
     ) -> Result<(), wgpu::SurfaceError> {
+        let items: Vec<(&GpuMesh, Option<&GpuTexture>)> =
+            meshes.iter().map(|m| (*m, None)).collect();
+        self.render_textured(&items, clear_color)
+    }
+
+    pub fn render_textured(
+        &mut self,
+        items: &[(&GpuMesh, Option<&GpuTexture>)],
+        clear_color: [f64; 4],
+    ) -> Result<(), wgpu::SurfaceError> {
         let surface = match &self.surface {
             Some(s) => s,
             None => return Ok(()),
@@ -231,7 +249,12 @@ impl Renderer {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            for mesh in meshes {
+            for (mesh, maybe_tex) in items {
+                let bind_group = match maybe_tex {
+                    Some(tex) => &tex.bind_group,
+                    None => &self.fallback_texture.bind_group,
+                };
+                render_pass.set_bind_group(1, bind_group, &[]);
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
