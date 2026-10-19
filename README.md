@@ -2,6 +2,7 @@
 Skylanders Trap Team PC static recompilation (AI assisted)
 
 ## Objectives
+- [ ] Support EU (en) version of the game
 - [ ] Support Linux and Windows
 - [ ] Support hardware and software portal
 - [ ] Reach a playable state from start to finish
