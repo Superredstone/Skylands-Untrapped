@@ -17,6 +17,7 @@ Host runs NixOS. Standard tools require `nix-shell` (configured in `shell.nix` w
 - Idiomatic, safe Rust for core logic. Unsafe limited to FFI / raw pointer interop where strictly required.
 - Cross-platform support: Linux (`udev`/`hidapi-rs`) and Windows (`hidapi-winapi`).
 - Always format code with `cargo fmt` and lint with `cargo clippy` at the end of a prompt.
+- The game must be deterministic.
 
 ## Architecture
 - `crates/skylands-formats`: Alchemy v8.1.0 file formats (`igArchive` `.arc`/`.bld`, `igIGBFile`, Big/Little Endian serialization).
