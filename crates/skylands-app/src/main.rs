@@ -296,15 +296,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Mount Alchemy v8.1.0 game archives
     let mut vfs = ArchiveMount::new();
-    let global_arc = args
-        .assets_dir
-        .join("files")
-        .join("permanent")
-        .join("global.arc");
-    if global_arc.exists() {
-        match vfs.mount(&global_arc) {
-            Ok(_) => info!("Successfully mounted global.arc (Alchemy IGA v11)"),
-            Err(e) => warn!("Failed to mount global.arc: {}", e),
+    let permanent_dir = args.assets_dir.join("files").join("permanent");
+    for arc_name in ["global.arc", "global.bld"] {
+        let arc_path = permanent_dir.join(arc_name);
+        if arc_path.exists() {
+            match vfs.mount(&arc_path) {
+                Ok(_) => info!("Successfully mounted {} (Alchemy IGA v11)", arc_name),
+                Err(e) => warn!("Failed to mount {}: {}", arc_name, e),
+            }
         }
     }
 

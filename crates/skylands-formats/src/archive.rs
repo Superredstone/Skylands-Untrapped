@@ -85,6 +85,8 @@ pub struct ArchiveReader<R: Read + Seek> {
     pub entries: HashMap<u32, FileEntry>,
     pub medium_file_blocks: Vec<u16>,
     pub small_file_blocks: Vec<u8>,
+    pub file_names: HashMap<u32, String>,
+    pub name_to_hash: HashMap<String, u32>,
 }
 
 pub fn hash_path(path: &str) -> u32 {
@@ -187,7 +189,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         // 2. _fileInfoTable: num_files entries (16 bytes each: offset: u32, v1: u32, uncompressed_size: u32, v3: u32)
         let mut entries = HashMap::with_capacity(num_files as usize);
-        for hash in file_ids {
+        for &hash in &file_ids {
             let (raw_offset, v1, uncompressed_size, v3) = match endian {
                 Endianness::Little => (
                     reader.read_u32::<LittleEndian>()?,
@@ -240,12 +242,48 @@ impl<R: Read + Seek> ArchiveReader<R> {
             reader.read_exact(&mut small_file_blocks)?;
         }
 
+        // 4. Name table: offsets [u32; num_files] followed by null-terminated strings
+        // ponytail: parse full name table if present; fallback to hash-only when stripped
+        let mut file_names = HashMap::new();
+        let mut name_to_hash = HashMap::new();
+        if header.name_table_offset > 0 && header.name_table_size >= (num_files as u64) * 4 {
+            reader.seek(SeekFrom::Start(header.name_table_offset))?;
+            let mut nt_buf = vec![0u8; header.name_table_size as usize];
+            reader.read_exact(&mut nt_buf)?;
+
+            let mut cur = Cursor::new(&nt_buf);
+            let mut offsets = Vec::with_capacity(num_files as usize);
+            for _ in 0..num_files {
+                let off = match endian {
+                    Endianness::Little => cur.read_u32::<LittleEndian>()?,
+                    Endianness::Big => cur.read_u32::<BigEndian>()?,
+                };
+                offsets.push(off as usize);
+            }
+
+            for (i, &off) in offsets.iter().enumerate() {
+                if off < nt_buf.len() && i < file_ids.len() {
+                    let hash = file_ids[i];
+                    let rest = &nt_buf[off..];
+                    let len = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                    if let Ok(name_str) = std::str::from_utf8(&rest[..len]) {
+                        let normalized = name_str.replace('\\', "/");
+                        file_names.insert(hash, normalized.clone());
+                        name_to_hash.insert(normalized.to_ascii_lowercase(), hash);
+                        name_to_hash.insert(normalized, hash);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             reader: Mutex::new(reader),
             header,
             entries,
             medium_file_blocks,
             small_file_blocks,
+            file_names,
+            name_to_hash,
         })
     }
 
@@ -392,8 +430,33 @@ impl<R: Read + Seek> ArchiveReader<R> {
     }
 
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, ArchiveError> {
+        let normalized = path.replace('\\', "/");
+        if let Some(&hash) = self.name_to_hash.get(&normalized) {
+            return self.read_file_by_hash(hash);
+        }
+        let lower = normalized.to_ascii_lowercase();
+        if let Some(&hash) = self.name_to_hash.get(&lower) {
+            return self.read_file_by_hash(hash);
+        }
         let hash = hash_path(path);
         self.read_file_by_hash(hash)
+    }
+
+    pub fn contains_path(&self, path: &str) -> bool {
+        let normalized = path.replace('\\', "/");
+        let lower = normalized.to_ascii_lowercase();
+        let hash = hash_path(path);
+        self.name_to_hash.contains_key(&normalized)
+            || self.name_to_hash.contains_key(&lower)
+            || self.entries.contains_key(&hash)
+    }
+
+    pub fn list_files(&self) -> Vec<&str> {
+        self.file_names.values().map(|s| s.as_str()).collect()
+    }
+
+    pub fn file_name_by_hash(&self, hash: u32) -> Option<&str> {
+        self.file_names.get(&hash).map(|s| s.as_str())
     }
 }
 
@@ -429,8 +492,41 @@ impl ArchiveMount {
     }
 
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, ArchiveError> {
+        let normalized = path.replace('\\', "/");
+        let lower = normalized.to_ascii_lowercase();
+        for archive in &self.archives {
+            if let Some(&hash) = archive.name_to_hash.get(&normalized) {
+                return archive.read_file_by_hash(hash);
+            }
+            if let Some(&hash) = archive.name_to_hash.get(&lower) {
+                return archive.read_file_by_hash(hash);
+            }
+        }
         let hash = hash_path(path);
         self.read_file_by_hash(hash)
+    }
+
+    pub fn contains_path(&self, path: &str) -> bool {
+        let normalized = path.replace('\\', "/");
+        let lower = normalized.to_ascii_lowercase();
+        let hash = hash_path(path);
+        for archive in &self.archives {
+            if archive.name_to_hash.contains_key(&normalized)
+                || archive.name_to_hash.contains_key(&lower)
+                || archive.entries.contains_key(&hash)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn list_files(&self) -> Vec<&str> {
+        let mut files = Vec::new();
+        for archive in &self.archives {
+            files.extend(archive.list_files());
+        }
+        files
     }
 }
 
@@ -569,6 +665,106 @@ mod tests {
         let reader = ArchiveReader::new(Cursor::new(data)).expect("Valid archive");
         let content = reader.read_file("archive/deflate.dat").expect("Read file");
         assert_eq!(content, original_data);
+    }
+
+    #[test]
+    fn test_synthetic_name_table_roundtrip() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IGA\x1a");
+        data.extend_from_slice(&11u32.to_le_bytes()); // version
+        data.extend_from_slice(&100u32.to_le_bytes()); // toc_size
+        data.extend_from_slice(&2u32.to_le_bytes()); // num_files = 2
+        data.extend_from_slice(&2048u32.to_le_bytes()); // sector_size
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // 0 small blocks
+
+        let name0 = b"models/hero.igb\0";
+        let name1 = b"textures/hero.png\0";
+        let nt_off0 = 8u32;
+        let nt_off1 = nt_off0 + name0.len() as u32;
+        let nt_size = (nt_off1 + name1.len() as u32) as u64;
+        let nt_offset = 4096u64;
+
+        data.extend_from_slice(&nt_offset.to_le_bytes());
+        data.extend_from_slice(&nt_size.to_le_bytes());
+
+        // File IDs (sorted)
+        data.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        data.extend_from_slice(&0x2222_2222u32.to_le_bytes());
+
+        // File 0 info: offset 2048, uncomp 13, uncompressed (v3 = 0xffffffff)
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&13u32.to_le_bytes());
+        data.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+
+        // File 1 info: offset 2048 + 16, uncomp 15, uncompressed
+        data.extend_from_slice(&2064u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&15u32.to_le_bytes());
+        data.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+
+        // Payload at sector 1 (offset 2048)
+        data.resize(2048, 0);
+        data.extend_from_slice(b"HeroModelIGBF");
+        data.resize(2064, 0);
+        data.extend_from_slice(b"HeroTextureRGBA");
+
+        // Name table at offset 4096
+        data.resize(4096, 0);
+        data.extend_from_slice(&nt_off0.to_le_bytes());
+        data.extend_from_slice(&nt_off1.to_le_bytes());
+        data.extend_from_slice(name0);
+        data.extend_from_slice(name1);
+
+        let reader = ArchiveReader::new(Cursor::new(data)).expect("Valid archive");
+        assert_eq!(reader.list_files().len(), 2);
+        assert!(reader.contains_path("models/hero.igb"));
+        assert!(reader.contains_path("MODELS/HERO.IGB"));
+        assert!(reader.contains_path("textures/hero.png"));
+        assert_eq!(
+            reader.file_name_by_hash(0x1111_1111),
+            Some("models/hero.igb")
+        );
+
+        let hero = reader.read_file("models/hero.igb").expect("read hero");
+        assert_eq!(hero, b"HeroModelIGBF");
+        let tex = reader.read_file("textures/hero.png").expect("read tex");
+        assert_eq!(tex, b"HeroTextureRGBA");
+    }
+
+    #[test]
+    fn test_real_kaos_archive_name_resolution() {
+        let bld_path = Path::new("assets/files/character/1010_Kaos.bld");
+        if bld_path.exists() {
+            let mut mount = ArchiveMount::new();
+            mount.mount(bld_path).expect("mount Kaos.bld");
+            assert!(mount.contains_path("level.bld"));
+            assert!(mount.contains_path("ENGLISH.pak"));
+            assert!(mount.contains_path("GERMAN.pak"));
+
+            let files = mount.list_files();
+            assert_eq!(files.len(), 3);
+            assert!(files.contains(&"level.bld"));
+
+            let english_pak = mount.read_file("ENGLISH.pak").expect("read ENGLISH.pak");
+            assert_eq!(english_pak.len(), 148836);
+            assert_eq!(&english_pak[0..4], b"IGZ\x01");
+        }
+
+        let arc_path = Path::new("assets/files/character/1010_Kaos.arc");
+        if arc_path.exists() {
+            let mut mount = ArchiveMount::new();
+            mount.mount(arc_path).expect("mount Kaos.arc");
+            let files = mount.list_files();
+            assert_eq!(files.len(), 269);
+            assert!(mount.contains_path(
+                "c:/tfb/build/wii/levels/criminal_audio_sky4/kaos/vo_kaos_transform_004a.wav/0x9beb0991.wav.hz.wav.enc"
+            ));
+        }
     }
 
     #[test]

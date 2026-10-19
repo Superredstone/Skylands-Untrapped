@@ -23,17 +23,17 @@ impl UsbPortal {
 
         let mut target_device = None;
         for dev in api.device_list() {
-            if dev.vendor_id() == TRAPTANIUM_VID {
-                if dev.product_id() == TRAPTANIUM_PID || dev.product_id() == SWAPFORCE_PID {
-                    info!(
-                        "Found Portal: VID 0x{:04x} PID 0x{:04x} ({:?})",
-                        dev.vendor_id(),
-                        dev.product_id(),
-                        dev.product_string()
-                    );
-                    target_device = Some(dev.clone());
-                    break;
-                }
+            if dev.vendor_id() == TRAPTANIUM_VID
+                && (dev.product_id() == TRAPTANIUM_PID || dev.product_id() == SWAPFORCE_PID)
+            {
+                info!(
+                    "Found Portal: VID 0x{:04x} PID 0x{:04x} ({:?})",
+                    dev.vendor_id(),
+                    dev.product_id(),
+                    dev.product_string()
+                );
+                target_device = Some(dev.clone());
+                break;
             }
         }
 
@@ -72,7 +72,7 @@ impl UsbPortal {
         #[cfg(not(target_os = "windows"))]
         {
             // On Linux, try direct 32-byte write, fallback to 33-byte if rejected
-            if let Err(_) = self.device.write(pkt) {
+            if self.device.write(pkt).is_err() {
                 let mut out = [0u8; REPORT_SIZE + 1];
                 out[0] = 0;
                 out[1..].copy_from_slice(pkt);
