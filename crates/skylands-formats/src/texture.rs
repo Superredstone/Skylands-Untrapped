@@ -118,7 +118,8 @@ pub fn decode_dxt1(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Text
                         continue;
                     }
                     let dst_idx = ((y * width + x) * 4) as usize;
-                    rgba[dst_idx..dst_idx + 4].copy_from_slice(&block_pixels[(py * 4 + px) as usize]);
+                    rgba[dst_idx..dst_idx + 4]
+                        .copy_from_slice(&block_pixels[(py * 4 + px) as usize]);
                 }
             }
         }

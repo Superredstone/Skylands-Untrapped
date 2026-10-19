@@ -8,3 +8,5 @@ byteorder = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 crc32fast = { workspace = true }
+lzma-rs = "0.3"
+miniz_oxide = "0.8"

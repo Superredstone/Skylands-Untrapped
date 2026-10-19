@@ -171,19 +171,19 @@ mod tests {
     #[test]
     fn test_gpu_texture_init() {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })) {
-            Some(a) => a,
-            None => return,
-        };
+        let adapter =
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })) {
+                Some(a) => a,
+                None => return,
+            };
 
-        let (device, queue) = match pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor::default(),
-            None,
-        )) {
+        let (device, queue) = match pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+        ) {
             Ok(pair) => pair,
             Err(_) => return,
         };
@@ -192,7 +192,9 @@ mod tests {
         assert_eq!(fallback.texture.width(), 1);
         assert_eq!(fallback.texture.height(), 1);
 
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
         let tex = GpuTexture::from_rgba(&device, &queue, &rgba, 2, 2, Some("Test2x2"))
             .expect("Valid texture");
         assert_eq!(tex.texture.width(), 2);

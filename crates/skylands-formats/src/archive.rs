@@ -1,11 +1,15 @@
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use crc32fast::Hasher;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 use thiserror::Error;
 
 pub const IGA_MAGIC: &[u8; 4] = b"IGA\x1a";
+pub const CHUNK_SIZE: usize = 32768;
+pub const MEDIUM_BLOCK_THRESHOLD: u32 = 256 * 1024;
 
 #[derive(Error, Debug)]
 pub enum ArchiveError {
@@ -15,8 +19,8 @@ pub enum ArchiveError {
     InvalidMagic([u8; 4]),
     #[error("Unsupported version: {0}")]
     UnsupportedVersion(u32),
-    #[error("File not found in archive: {0}")]
-    FileNotFound(String),
+    #[error("File not found in archive: hash 0x{0:08x}")]
+    FileNotFound(u32),
     #[error("Decompression failed: {0}")]
     DecompressionFailed(String),
 }
@@ -27,14 +31,39 @@ pub enum Endianness {
     Little,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionFormat {
+    Uncompressed,
+    Deflate,
+    Lzma,
+    Unknown(u32),
+}
+
+impl From<u32> for CompressionFormat {
+    fn from(val: u32) -> Self {
+        match val {
+            0 => CompressionFormat::Uncompressed,
+            1 => CompressionFormat::Deflate,
+            2 => CompressionFormat::Lzma,
+            other => CompressionFormat::Unknown(other),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ArchiveHeader {
     pub magic: [u8; 4],
     pub version: u32,
-    pub entry_count: u32,
-    pub aux_count: u32,
-    pub block_align: u32,
-    pub data_offset: u32,
+    pub toc_size: u32,
+    pub num_files: u32,
+    pub sector_size: u32,
+    pub hash_search_divider: u32,
+    pub hash_search_slop: u32,
+    pub num_large_file_blocks: u32,
+    pub num_medium_file_blocks: u32,
+    pub num_small_file_blocks: u32,
+    pub name_table_offset: u64,
+    pub name_table_size: u64,
     pub endian: Endianness,
 }
 
@@ -42,15 +71,27 @@ pub struct ArchiveHeader {
 pub struct FileEntry {
     pub hash: u32,
     pub offset: u64,
-    pub compressed_size: u32,
+    pub v1: u32,
     pub uncompressed_size: u32,
+    pub v3: u32,
+    pub format: CompressionFormat,
+    pub first_block: u32,
     pub is_compressed: bool,
 }
 
 pub struct ArchiveReader<R: Read + Seek> {
-    reader: R,
+    reader: Mutex<R>,
     pub header: ArchiveHeader,
     pub entries: HashMap<u32, FileEntry>,
+    pub medium_file_blocks: Vec<u16>,
+    pub small_file_blocks: Vec<u8>,
+}
+
+pub fn hash_path(path: &str) -> u32 {
+    let normalized = path.replace('\\', "/");
+    let mut hasher = Hasher::new();
+    hasher.update(normalized.as_bytes());
+    hasher.finalize()
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -61,7 +102,6 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(ArchiveError::InvalidMagic(magic));
         }
 
-        // Test endianness via version field (expected 11)
         let mut ver_buf = [0u8; 4];
         reader.read_exact(&mut ver_buf)?;
         let ver_le = u32::from_le_bytes(ver_buf);
@@ -75,51 +115,285 @@ impl<R: Read + Seek> ArchiveReader<R> {
             return Err(ArchiveError::UnsupportedVersion(ver_le));
         };
 
-        let mut rest_header = [0u8; 16];
+        let mut rest_header = [0u8; 48];
         reader.read_exact(&mut rest_header)?;
         let mut cur = Cursor::new(&rest_header);
 
-        let (entry_count, aux_count, block_align, data_offset) = match endian {
+        let (
+            toc_size,
+            num_files,
+            sector_size,
+            hash_search_divider,
+            hash_search_slop,
+            num_large_file_blocks,
+            num_medium_file_blocks,
+            num_small_file_blocks,
+            name_table_offset,
+            name_table_size,
+        ) = match endian {
             Endianness::Little => (
                 cur.read_u32::<LittleEndian>()?,
                 cur.read_u32::<LittleEndian>()?,
                 cur.read_u32::<LittleEndian>()?,
                 cur.read_u32::<LittleEndian>()?,
+                cur.read_u32::<LittleEndian>()?,
+                cur.read_u32::<LittleEndian>()?,
+                cur.read_u32::<LittleEndian>()?,
+                cur.read_u32::<LittleEndian>()?,
+                cur.read_u64::<LittleEndian>()?,
+                cur.read_u64::<LittleEndian>()?,
             ),
             Endianness::Big => (
                 cur.read_u32::<BigEndian>()?,
                 cur.read_u32::<BigEndian>()?,
                 cur.read_u32::<BigEndian>()?,
                 cur.read_u32::<BigEndian>()?,
+                cur.read_u32::<BigEndian>()?,
+                cur.read_u32::<BigEndian>()?,
+                cur.read_u32::<BigEndian>()?,
+                cur.read_u32::<BigEndian>()?,
+                cur.read_u64::<BigEndian>()?,
+                cur.read_u64::<BigEndian>()?,
             ),
         };
 
-        let align = if block_align == 0 { 2048 } else { block_align };
+        let sector_size = if sector_size == 0 { 2048 } else { sector_size };
+
         let header = ArchiveHeader {
             magic,
             version,
-            entry_count,
-            aux_count,
-            block_align: align,
-            data_offset,
+            toc_size,
+            num_files,
+            sector_size,
+            hash_search_divider,
+            hash_search_slop,
+            num_large_file_blocks,
+            num_medium_file_blocks,
+            num_small_file_blocks,
+            name_table_offset,
+            name_table_size,
             endian,
         };
 
-        // ponytail: parse basic TOC entries; full hierarchy parsing deferred until engine tree mount
-        let entries = HashMap::new();
+        // 1. _fileIdTable: [u32; num_files]
+        let mut file_ids = Vec::with_capacity(num_files as usize);
+        for _ in 0..num_files {
+            let hash = match endian {
+                Endianness::Little => reader.read_u32::<LittleEndian>()?,
+                Endianness::Big => reader.read_u32::<BigEndian>()?,
+            };
+            file_ids.push(hash);
+        }
+
+        // 2. _fileInfoTable: num_files entries (16 bytes each: offset: u32, v1: u32, uncompressed_size: u32, v3: u32)
+        let mut entries = HashMap::with_capacity(num_files as usize);
+        for hash in file_ids {
+            let (raw_offset, v1, uncompressed_size, v3) = match endian {
+                Endianness::Little => (
+                    reader.read_u32::<LittleEndian>()?,
+                    reader.read_u32::<LittleEndian>()?,
+                    reader.read_u32::<LittleEndian>()?,
+                    reader.read_u32::<LittleEndian>()?,
+                ),
+                Endianness::Big => (
+                    reader.read_u32::<BigEndian>()?,
+                    reader.read_u32::<BigEndian>()?,
+                    reader.read_u32::<BigEndian>()?,
+                    reader.read_u32::<BigEndian>()?,
+                ),
+            };
+
+            let format_val = v3 >> 28;
+            let first_block = v3 & 0x0fff_ffff;
+            let format = CompressionFormat::from(format_val);
+            let is_compressed = (v3 != 0xffff_ffff) && (format != CompressionFormat::Uncompressed);
+
+            entries.insert(
+                hash,
+                FileEntry {
+                    hash,
+                    offset: raw_offset as u64,
+                    v1,
+                    uncompressed_size,
+                    v3,
+                    format,
+                    first_block,
+                    is_compressed,
+                },
+            );
+        }
+
+        // 3. Block tables:
+        // _mediumFileBlockTable: [u16; num_medium_file_blocks]
+        let mut medium_file_blocks = Vec::with_capacity(num_medium_file_blocks as usize);
+        for _ in 0..num_medium_file_blocks {
+            let val = match endian {
+                Endianness::Little => reader.read_u16::<LittleEndian>()?,
+                Endianness::Big => reader.read_u16::<BigEndian>()?,
+            };
+            medium_file_blocks.push(val);
+        }
+
+        // _smallFileBlockTable: [u8; num_small_file_blocks]
+        let mut small_file_blocks = vec![0u8; num_small_file_blocks as usize];
+        if num_small_file_blocks > 0 {
+            reader.read_exact(&mut small_file_blocks)?;
+        }
 
         Ok(Self {
-            reader,
+            reader: Mutex::new(reader),
             header,
             entries,
+            medium_file_blocks,
+            small_file_blocks,
         })
     }
 
-    pub fn read_bytes_at(&mut self, offset: u64, size: usize) -> Result<Vec<u8>, ArchiveError> {
-        self.reader.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; size];
-        self.reader.read_exact(&mut buf)?;
-        Ok(buf)
+    pub fn read_file_by_hash(&self, hash: u32) -> Result<Vec<u8>, ArchiveError> {
+        let entry = self
+            .entries
+            .get(&hash)
+            .ok_or(ArchiveError::FileNotFound(hash))?;
+
+        if entry.uncompressed_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        if !entry.is_compressed {
+            let mut r = self.reader.lock().unwrap();
+            r.seek(SeekFrom::Start(entry.offset))?;
+            let mut buf = vec![0u8; entry.uncompressed_size as usize];
+            r.read_exact(&mut buf)?;
+            return Ok(buf);
+        }
+
+        let num_blocks = (entry.uncompressed_size as usize).div_ceil(CHUNK_SIZE);
+        let use_medium = entry.uncompressed_size > MEDIUM_BLOCK_THRESHOLD;
+        let start_idx = entry.first_block as usize;
+
+        let mut decompressed = Vec::with_capacity(entry.uncompressed_size as usize);
+        let mut remaining = entry.uncompressed_size as usize;
+
+        let mut r = self.reader.lock().unwrap();
+
+        for i in 0..num_blocks {
+            let chunk_expected = remaining.min(CHUNK_SIZE);
+            let idx = start_idx + i;
+
+            let (is_block_compressed, sec_start, sec_end) = if use_medium {
+                if idx + 1 >= self.medium_file_blocks.len() {
+                    return Err(ArchiveError::DecompressionFailed(format!(
+                        "Medium block index {} out of bounds (len {})",
+                        idx,
+                        self.medium_file_blocks.len()
+                    )));
+                }
+                let cur = self.medium_file_blocks[idx];
+                let next = self.medium_file_blocks[idx + 1];
+                (
+                    (cur & 0x8000) != 0,
+                    (cur & 0x7fff) as u64,
+                    (next & 0x7fff) as u64,
+                )
+            } else {
+                if idx + 1 >= self.small_file_blocks.len() {
+                    return Err(ArchiveError::DecompressionFailed(format!(
+                        "Small block index {} out of bounds (len {})",
+                        idx,
+                        self.small_file_blocks.len()
+                    )));
+                }
+                let cur = self.small_file_blocks[idx];
+                let next = self.small_file_blocks[idx + 1];
+                ((cur & 0x80) != 0, (cur & 0x7f) as u64, (next & 0x7f) as u64)
+            };
+
+            let chunk_offset = entry.offset + sec_start * self.header.sector_size as u64;
+            let compressed_sec_bytes =
+                (sec_end.saturating_sub(sec_start) * self.header.sector_size as u64) as usize;
+
+            r.seek(SeekFrom::Start(chunk_offset))?;
+
+            if !is_block_compressed {
+                let mut raw = vec![0u8; chunk_expected];
+                r.read_exact(&mut raw)?;
+                decompressed.extend_from_slice(&raw);
+            } else {
+                match entry.format {
+                    CompressionFormat::Lzma => {
+                        let c_size = match self.header.endian {
+                            Endianness::Little => r.read_u16::<LittleEndian>()?,
+                            Endianness::Big => r.read_u16::<BigEndian>()?,
+                        };
+                        let mut props = [0u8; 5];
+                        r.read_exact(&mut props)?;
+
+                        let mut compressed_stream = vec![0u8; c_size as usize];
+                        r.read_exact(&mut compressed_stream)?;
+
+                        let mut lzma_header = Vec::with_capacity(13 + compressed_stream.len());
+                        lzma_header.extend_from_slice(&props);
+                        lzma_header.extend_from_slice(&(chunk_expected as u64).to_le_bytes());
+                        lzma_header.extend_from_slice(&compressed_stream);
+
+                        let mut output = Vec::with_capacity(chunk_expected);
+                        lzma_rs::lzma_decompress(&mut Cursor::new(&lzma_header), &mut output)
+                            .map_err(|e| {
+                                ArchiveError::DecompressionFailed(format!("LZMA error: {e:?}"))
+                            })?;
+
+                        if output.len() != chunk_expected {
+                            return Err(ArchiveError::DecompressionFailed(format!(
+                                "LZMA size mismatch: expected {chunk_expected}, got {}",
+                                output.len()
+                            )));
+                        }
+                        decompressed.extend_from_slice(&output);
+                    }
+                    CompressionFormat::Deflate => {
+                        let mut compressed_data = vec![0u8; compressed_sec_bytes];
+                        r.read_exact(&mut compressed_data)?;
+
+                        let decompressed_chunk =
+                            miniz_oxide::inflate::decompress_to_vec_zlib(&compressed_data)
+                                .map_err(|e| {
+                                    ArchiveError::DecompressionFailed(format!(
+                                        "Deflate error: {e:?}"
+                                    ))
+                                })?;
+
+                        let chunk_slice = if decompressed_chunk.len() > chunk_expected {
+                            &decompressed_chunk[..chunk_expected]
+                        } else {
+                            &decompressed_chunk
+                        };
+
+                        if chunk_slice.len() != chunk_expected {
+                            return Err(ArchiveError::DecompressionFailed(format!(
+                                "Deflate size mismatch: expected {chunk_expected}, got {}",
+                                chunk_slice.len()
+                            )));
+                        }
+                        decompressed.extend_from_slice(chunk_slice);
+                    }
+                    _ => {
+                        return Err(ArchiveError::DecompressionFailed(format!(
+                            "Unsupported compression format: {:?}",
+                            entry.format
+                        )));
+                    }
+                }
+            }
+
+            remaining -= chunk_expected;
+        }
+
+        Ok(decompressed)
+    }
+
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, ArchiveError> {
+        let hash = hash_path(path);
+        self.read_file_by_hash(hash)
     }
 }
 
@@ -144,6 +418,20 @@ impl ArchiveMount {
     pub fn count(&self) -> usize {
         self.archives.len()
     }
+
+    pub fn read_file_by_hash(&self, hash: u32) -> Result<Vec<u8>, ArchiveError> {
+        for archive in &self.archives {
+            if archive.entries.contains_key(&hash) {
+                return archive.read_file_by_hash(hash);
+            }
+        }
+        Err(ArchiveError::FileNotFound(hash))
+    }
+
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, ArchiveError> {
+        let hash = hash_path(path);
+        self.read_file_by_hash(hash)
+    }
 }
 
 impl Default for ArchiveMount {
@@ -161,15 +449,161 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(b"IGA\x1a");
         data.extend_from_slice(&11u32.to_le_bytes()); // ver 11 LE
-        data.extend_from_slice(&100u32.to_le_bytes()); // count
-        data.extend_from_slice(&2u32.to_le_bytes()); // aux
-        data.extend_from_slice(&2048u32.to_le_bytes()); // align
-        data.extend_from_slice(&4096u32.to_le_bytes()); // data_offset
+        data.extend_from_slice(&100u32.to_le_bytes()); // toc_size
+        data.extend_from_slice(&1u32.to_le_bytes()); // num_files = 1
+        data.extend_from_slice(&2048u32.to_le_bytes()); // sector_size
+        data.extend_from_slice(&1431655765u32.to_le_bytes()); // hash_search_divider
+        data.extend_from_slice(&2u32.to_le_bytes()); // hash_search_slop
+        data.extend_from_slice(&0u32.to_le_bytes()); // num_large_file_blocks
+        data.extend_from_slice(&0u32.to_le_bytes()); // num_medium_file_blocks
+        data.extend_from_slice(&0u32.to_le_bytes()); // num_small_file_blocks
+        data.extend_from_slice(&0u64.to_le_bytes()); // name_table_offset
+        data.extend_from_slice(&0u64.to_le_bytes()); // name_table_size
+
+        // 1 file hash
+        data.extend_from_slice(&0x12345678u32.to_le_bytes());
+        // 1 file info: offset: 2048, v1: 0, uncomp_size: 4, v3: 0xffffffff (uncompressed)
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+
+        // Pad up to offset 2048
+        data.resize(2048, 0);
+        data.extend_from_slice(b"test");
 
         let reader = ArchiveReader::new(Cursor::new(data)).expect("Valid archive");
         assert_eq!(reader.header.endian, Endianness::Little);
         assert_eq!(reader.header.version, 11);
-        assert_eq!(reader.header.entry_count, 100);
-        assert_eq!(reader.header.block_align, 2048);
+        assert_eq!(reader.header.num_files, 1);
+        assert_eq!(reader.header.sector_size, 2048);
+
+        let content = reader.read_file_by_hash(0x12345678).expect("Read file");
+        assert_eq!(content, b"test");
+    }
+
+    #[test]
+    fn test_synthetic_lzma_roundtrip() {
+        let original_data = b"Hello from Skylands compressed block test! Repeat Repeat Repeat";
+        let mut lzma_header_and_stream = Vec::new();
+        lzma_rs::lzma_compress(&mut Cursor::new(original_data), &mut lzma_header_and_stream)
+            .expect("compress");
+
+        let props = &lzma_header_and_stream[0..5];
+        let stream = &lzma_header_and_stream[13..];
+        let c_size = stream.len() as u16;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IGA\x1a");
+        data.extend_from_slice(&11u32.to_le_bytes());
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes()); // num_files = 1
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes()); // 2 small blocks
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+
+        let file_hash = hash_path("data/test.bin");
+        data.extend_from_slice(&file_hash.to_le_bytes());
+
+        // File info: offset: 2048, v1: 0, uncomp: len, v3: (2 << 28) | 0
+        let v3 = 2u32 << 28;
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&(original_data.len() as u32).to_le_bytes());
+        data.extend_from_slice(&v3.to_le_bytes());
+
+        // Small blocks: [0x80, 1] (compressed block at sector 0 to sector 1)
+        data.push(0x80);
+        data.push(1);
+
+        data.resize(2048, 0);
+        data.extend_from_slice(&c_size.to_le_bytes());
+        data.extend_from_slice(props);
+        data.extend_from_slice(stream);
+
+        let reader = ArchiveReader::new(Cursor::new(data)).expect("Valid archive");
+        let content = reader.read_file("data/test.bin").expect("Read file");
+        assert_eq!(content, original_data);
+    }
+
+    #[test]
+    fn test_synthetic_deflate_roundtrip() {
+        let original_data = b"Deflate test payload! Skylands Untrapped VFS Decompression Test.";
+        let compressed = miniz_oxide::deflate::compress_to_vec_zlib(original_data, 6);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IGA\x1a");
+        data.extend_from_slice(&11u32.to_le_bytes());
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+
+        let file_hash = hash_path("archive/deflate.dat");
+        data.extend_from_slice(&file_hash.to_le_bytes());
+
+        let v3 = 1u32 << 28; // Deflate = 1
+        data.extend_from_slice(&2048u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&(original_data.len() as u32).to_le_bytes());
+        data.extend_from_slice(&v3.to_le_bytes());
+
+        data.push(0x80);
+        data.push(1);
+
+        data.resize(2048, 0);
+        data.extend_from_slice(&compressed);
+        data.resize(2048 + 2048, 0);
+
+        let reader = ArchiveReader::new(Cursor::new(data)).expect("Valid archive");
+        let content = reader.read_file("archive/deflate.dat").expect("Read file");
+        assert_eq!(content, original_data);
+    }
+
+    #[test]
+    fn test_real_global_bld_and_arc() {
+        let bld_path = Path::new("assets/files/permanent/global.bld");
+        if bld_path.exists() {
+            let mut mount = ArchiveMount::new();
+            mount.mount(bld_path).expect("mount global.bld");
+            assert_eq!(mount.count(), 1);
+
+            // Hash 0xe115e6dd is ENGLISH.pak (148836 bytes)
+            let english_pak = mount
+                .read_file_by_hash(0xe115e6dd)
+                .expect("read ENGLISH.pak");
+            assert_eq!(english_pak.len(), 148836);
+            assert_eq!(&english_pak[0..4], b"IGZ\x01");
+
+            // Hash 0xba91d879 is level.bld (9624560 bytes)
+            let level_bld = mount.read_file_by_hash(0xba91d879).expect("read level.bld");
+            assert_eq!(level_bld.len(), 9624560);
+            assert_eq!(&level_bld[0..4], b"IGZ\x01");
+        }
+
+        let arc_path = Path::new("assets/files/permanent/global.arc");
+        if arc_path.exists() {
+            let mut mount = ArchiveMount::new();
+            mount.mount(arc_path).expect("mount global.arc");
+            assert_eq!(mount.count(), 1);
+
+            // Hash 0x728cb8 is first uncompressed file (137312 bytes)
+            let file0 = mount
+                .read_file_by_hash(0x728cb8)
+                .expect("read file 0x728cb8");
+            assert_eq!(file0.len(), 137312);
+            assert_eq!(&file0[0..4], b"FSB5");
+        }
     }
 }

@@ -5,13 +5,13 @@ pub const SWAPFORCE_PID: u16 = 0x01ec;
 pub const REPORT_SIZE: usize = 32;
 
 // Protocol Commands
-pub const CMD_READY: u8 = b'R';       // 0x52
-pub const CMD_ANTENNA: u8 = b'A';     // 0x41
-pub const CMD_COLOR: u8 = b'C';       // 0x43
-pub const CMD_QUERY: u8 = b'Q';       // 0x51
-pub const CMD_WRITE: u8 = b'W';       // 0x57
-pub const CMD_AUDIO: u8 = b'V';       // 0x56 - Villain speaker audio stream
-pub const CMD_TRAP_LIGHT: u8 = b'J';  // 0x4A - Trap slot light
+pub const CMD_READY: u8 = b'R'; // 0x52
+pub const CMD_ANTENNA: u8 = b'A'; // 0x41
+pub const CMD_COLOR: u8 = b'C'; // 0x43
+pub const CMD_QUERY: u8 = b'Q'; // 0x51
+pub const CMD_WRITE: u8 = b'W'; // 0x57
+pub const CMD_AUDIO: u8 = b'V'; // 0x56 - Villain speaker audio stream
+pub const CMD_TRAP_LIGHT: u8 = b'J'; // 0x4A - Trap slot light
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortalZone {
@@ -23,11 +23,27 @@ pub enum PortalZone {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortalEvent {
-    Ready { firmware_major: u8, firmware_minor: u8 },
-    TagArrived { tag_index: u8, zone: PortalZone },
-    TagRemoved { tag_index: u8 },
-    TagData { tag_index: u8, block: u8, data: [u8; 16] },
-    WriteAck { tag_index: u8, block: u8, success: bool },
+    Ready {
+        firmware_major: u8,
+        firmware_minor: u8,
+    },
+    TagArrived {
+        tag_index: u8,
+        zone: PortalZone,
+    },
+    TagRemoved {
+        tag_index: u8,
+    },
+    TagData {
+        tag_index: u8,
+        block: u8,
+        data: [u8; 16],
+    },
+    WriteAck {
+        tag_index: u8,
+        block: u8,
+        success: bool,
+    },
 }
 
 pub fn encode_ready_packet() -> [u8; REPORT_SIZE] {
@@ -141,13 +157,16 @@ mod tests {
         assert_eq!(pkt[4], 128);
 
         let query_resp = [
-            CMD_QUERY, 0x01, 0x02,
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            CMD_QUERY, 0x01, 0x02, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let event = decode_portal_response(&query_resp).expect("Parsed event");
         match event {
-            PortalEvent::TagData { tag_index, block, data } => {
+            PortalEvent::TagData {
+                tag_index,
+                block,
+                data,
+            } => {
                 assert_eq!(tag_index, 1);
                 assert_eq!(block, 2);
                 assert_eq!(data[0], 1);

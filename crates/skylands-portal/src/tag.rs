@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn test_trap_tag_detection() {
-        let block0 = [0x11, 0x22, 0x33, 0x44, 0,0,0,0,0,0,0,0,0,0,0,0];
+        let block0 = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut block1 = [0u8; 16];
         block1[0..2].copy_from_slice(&3010u16.to_le_bytes()); // Kaos Trap
         block1[2..4].copy_from_slice(&1010u16.to_le_bytes()); // Kaos Villain ID

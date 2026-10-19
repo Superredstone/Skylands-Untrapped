@@ -101,14 +101,8 @@ impl PortalGameplay {
                     is_trap,
                     villain_id: if is_trap { Some(1010) } else { None },
                 };
-                let cmds = self.on_tag_identified(
-                    tag_index,
-                    zone,
-                    default_tag,
-                    world,
-                    state,
-                    audio,
-                );
+                let cmds =
+                    self.on_tag_identified(tag_index, zone, default_tag, world, state, audio);
                 outgoing.extend(cmds);
             }
             PortalEvent::TagData {
@@ -118,7 +112,8 @@ impl PortalGameplay {
             } => {
                 if let Some(blocks) = self.pending_blocks.get_mut(&tag_index) {
                     blocks.insert(block, data);
-                    if blocks.contains_key(&0) && blocks.contains_key(&1) && blocks.contains_key(&8) {
+                    if blocks.contains_key(&0) && blocks.contains_key(&1) && blocks.contains_key(&8)
+                    {
                         let b0 = blocks[&0];
                         let b1 = blocks[&1];
                         let b8 = blocks[&8];
@@ -128,14 +123,8 @@ impl PortalGameplay {
                         } else {
                             PortalZone::LeftRing
                         };
-                        let cmds = self.on_tag_identified(
-                            tag_index,
-                            zone,
-                            parsed,
-                            world,
-                            state,
-                            audio,
-                        );
+                        let cmds =
+                            self.on_tag_identified(tag_index, zone, parsed, world, state, audio);
                         outgoing.extend(cmds);
                     }
                 }
@@ -172,13 +161,7 @@ impl PortalGameplay {
             let (r, g, b) = elem.rgb();
             cmds.push(encode_trap_light_packet(r, g, b));
         } else {
-            world.spawn(
-                tag.character_id,
-                tag.variant,
-                name,
-                [0.0, 0.2, 0.0],
-                false,
-            );
+            world.spawn(tag.character_id, tag.variant, name, [0.0, 0.2, 0.0], false);
             audio.on_hero_summoned();
 
             let (r, g, b) = elem.rgb();

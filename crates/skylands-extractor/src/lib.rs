@@ -33,8 +33,16 @@ impl Extractor {
 
     pub fn is_extracted(&self) -> bool {
         let main_dol = self.dest_path.join("sys").join("main.dol");
-        let global_arc = self.dest_path.join("files").join("permanent").join("global.arc");
-        let global_bld = self.dest_path.join("files").join("permanent").join("global.bld");
+        let global_arc = self
+            .dest_path
+            .join("files")
+            .join("permanent")
+            .join("global.arc");
+        let global_bld = self
+            .dest_path
+            .join("files")
+            .join("permanent")
+            .join("global.bld");
         main_dol.exists() && global_arc.exists() && global_bld.exists()
     }
 
@@ -49,7 +57,10 @@ impl Extractor {
             return Err(ExtractorError::RomNotFound(self.rom_path.clone()));
         }
 
-        info!("Starting initial extraction from {:?} to {:?}", self.rom_path, self.dest_path);
+        info!(
+            "Starting initial extraction from {:?} to {:?}",
+            self.rom_path, self.dest_path
+        );
         fs::create_dir_all(&self.dest_path)?;
 
         let status = Command::new("wit")
@@ -70,7 +81,10 @@ impl Extractor {
             }
             Err(e) => {
                 // If direct wit invocation failed (e.g. NixOS PATH), attempt nix-shell fallback
-                info!("Direct 'wit' not found in PATH, attempting nix-shell fallback: {}", e);
+                info!(
+                    "Direct 'wit' not found in PATH, attempting nix-shell fallback: {}",
+                    e
+                );
                 let nix_cmd = format!(
                     "wit extract \"{}\" \"{}\" --overwrite",
                     self.rom_path.display(),
@@ -80,7 +94,9 @@ impl Extractor {
                     .args(["-p", "wiimms-iso-tools", "--run", &nix_cmd])
                     .status()?;
                 if !nix_status.success() {
-                    return Err(ExtractorError::WitFailed("nix-shell wit extraction failed".into()));
+                    return Err(ExtractorError::WitFailed(
+                        "nix-shell wit extraction failed".into(),
+                    ));
                 }
             }
         }
@@ -99,7 +115,10 @@ impl Extractor {
         for (rel, min_size) in req_files {
             let path = self.dest_path.join(rel);
             if !path.exists() {
-                return Err(ExtractorError::ValidationMissingFile(rel.into(), self.dest_path.clone()));
+                return Err(ExtractorError::ValidationMissingFile(
+                    rel.into(),
+                    self.dest_path.clone(),
+                ));
             }
             let meta = fs::metadata(&path)?;
             if meta.len() < min_size {

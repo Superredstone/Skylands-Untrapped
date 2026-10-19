@@ -42,12 +42,9 @@ impl GameStateMachine {
             *progress = (*progress + dt * 0.5).min(1.0);
             if *progress >= 1.0 {
                 // Restore state prior to capture, or default to Hub
-                let next = self
-                    .previous
-                    .take()
-                    .unwrap_or_else(|| GameState::Hub {
-                        academy_area: "Courtyard".into(),
-                    });
+                let next = self.previous.take().unwrap_or_else(|| GameState::Hub {
+                    academy_area: "Courtyard".into(),
+                });
                 self.current = next;
             }
         }

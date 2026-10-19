@@ -143,7 +143,10 @@ impl IgbModel {
         if data.len() < expected_bytes {
             return Err(IgbError::CorruptVertexData(format!(
                 "Expected {} bytes for {} verts and {} indices, got {}",
-                expected_bytes, vert_count, index_count, data.len()
+                expected_bytes,
+                vert_count,
+                index_count,
+                data.len()
             )));
         }
 
@@ -183,10 +186,7 @@ impl IgbModel {
                         cur.read_f32::<BigEndian>()?,
                         cur.read_f32::<BigEndian>()?,
                     ],
-                    uv: [
-                        cur.read_f32::<BigEndian>()?,
-                        cur.read_f32::<BigEndian>()?,
-                    ],
+                    uv: [cur.read_f32::<BigEndian>()?, cur.read_f32::<BigEndian>()?],
                     color: [
                         cur.read_f32::<BigEndian>()?,
                         cur.read_f32::<BigEndian>()?,

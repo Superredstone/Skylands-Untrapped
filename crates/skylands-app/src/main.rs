@@ -7,7 +7,9 @@ use skylands_extractor::Extractor;
 use skylands_formats::{decode_cmpr, ArchiveMount};
 use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone, REPORT_SIZE};
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
-use skylands_render::{GpuMesh, GpuTexture, Mesh, RenderAppHandler, Renderer, WindowApp, WindowConfig};
+use skylands_render::{
+    GpuMesh, GpuTexture, Mesh, RenderAppHandler, Renderer, WindowApp, WindowConfig,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -116,12 +118,9 @@ impl GameEngine {
         // 1. Poll portal hardware / mock events
         let events = self.portal.poll_events();
         for ev in events {
-            let outgoing = self.gameplay.handle_event(
-                ev,
-                &mut self.world,
-                &mut self.state,
-                &mut self.audio,
-            );
+            let outgoing =
+                self.gameplay
+                    .handle_event(ev, &mut self.world, &mut self.state, &mut self.audio);
             for pkt in outgoing {
                 self.portal.send_packet(&pkt);
             }
@@ -192,7 +191,12 @@ impl RenderAppHandler for AppRuntime {
 
                 // Decode 8x8 CMPR demo texture (cyan / orange blocks)
                 let mut cmpr_data = vec![0u8; 32];
-                for (b, col) in [(0, 0x07FFu16), (1, 0xFD20u16), (2, 0xFD20u16), (3, 0x07FFu16)] {
+                for (b, col) in [
+                    (0, 0x07FFu16),
+                    (1, 0xFD20u16),
+                    (2, 0xFD20u16),
+                    (3, 0x07FFu16),
+                ] {
                     let base = b * 8;
                     cmpr_data[base..base + 2].copy_from_slice(&col.to_be_bytes());
                     cmpr_data[base + 2..base + 4].copy_from_slice(&0x0000u16.to_be_bytes());
@@ -292,7 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Mount Alchemy v8.1.0 game archives
     let mut vfs = ArchiveMount::new();
-    let global_arc = args.assets_dir.join("files").join("permanent").join("global.arc");
+    let global_arc = args
+        .assets_dir
+        .join("files")
+        .join("permanent")
+        .join("global.arc");
     if global_arc.exists() {
         match vfs.mount(&global_arc) {
             Ok(_) => info!("Successfully mounted global.arc (Alchemy IGA v11)"),

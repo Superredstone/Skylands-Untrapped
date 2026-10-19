@@ -1,6 +1,4 @@
-use crate::protocol::{
-    PortalEvent, PortalZone, CMD_QUERY, CMD_READY, REPORT_SIZE,
-};
+use crate::protocol::{PortalEvent, PortalZone, CMD_QUERY, CMD_READY, REPORT_SIZE};
 use std::collections::HashMap;
 
 pub struct MockPortal {
@@ -37,7 +35,8 @@ impl MockPortal {
 
     pub fn remove_tag(&mut self, slot: u8) {
         self.loaded_tags.remove(&slot);
-        self.pending_events.push(PortalEvent::TagRemoved { tag_index: slot });
+        self.pending_events
+            .push(PortalEvent::TagRemoved { tag_index: slot });
     }
 
     pub fn send_command(&mut self, pkt: &[u8; REPORT_SIZE]) -> Option<[u8; REPORT_SIZE]> {

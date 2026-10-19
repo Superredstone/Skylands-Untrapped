@@ -20,7 +20,7 @@ pub struct UsbPortal {
 impl UsbPortal {
     pub fn open_first() -> Result<Self, UsbPortalError> {
         let api = HidApi::new()?;
-        
+
         let mut target_device = None;
         for dev in api.device_list() {
             if dev.vendor_id() == TRAPTANIUM_VID {
@@ -101,7 +101,13 @@ impl UsbPortal {
         }
     }
 
-    pub fn set_led_color(&mut self, zone: PortalZone, r: u8, g: u8, b: u8) -> Result<(), UsbPortalError> {
+    pub fn set_led_color(
+        &mut self,
+        zone: PortalZone,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) -> Result<(), UsbPortalError> {
         self.send_packet(&encode_color_packet(zone, r, g, b))
     }
 
@@ -113,7 +119,12 @@ impl UsbPortal {
         self.send_packet(&encode_query_packet(tag_index, block))
     }
 
-    pub fn write_tag_block(&mut self, tag_index: u8, block: u8, data: &[u8; 16]) -> Result<(), UsbPortalError> {
+    pub fn write_tag_block(
+        &mut self,
+        tag_index: u8,
+        block: u8,
+        data: &[u8; 16],
+    ) -> Result<(), UsbPortalError> {
         self.send_packet(&encode_write_packet(tag_index, block, data))
     }
 }

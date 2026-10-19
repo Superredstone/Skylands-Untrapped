@@ -153,7 +153,11 @@ impl Mesh {
 
         for i in 1..=segments {
             let curr = bottom_center + i;
-            let next = if i == segments { bottom_center + 1 } else { bottom_center + i + 1 };
+            let next = if i == segments {
+                bottom_center + 1
+            } else {
+                bottom_center + i + 1
+            };
             indices.push(bottom_center);
             indices.push(next);
             indices.push(curr);
