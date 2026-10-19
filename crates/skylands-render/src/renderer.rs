@@ -3,6 +3,7 @@ use crate::pipeline::{
     create_render_pipeline, create_skybox_pipeline, CameraUniform, LightUniform,
 };
 use crate::texture::GpuTexture;
+use crate::ui::{UiBatch, UiPipeline};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -15,6 +16,7 @@ pub struct Renderer {
     pub size: (u32, u32),
     pub render_pipeline: wgpu::RenderPipeline,
     pub skybox_pipeline: wgpu::RenderPipeline,
+    pub ui_pipeline: UiPipeline,
     pub camera_buffer: wgpu::Buffer,
     pub light_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
@@ -200,6 +202,8 @@ impl Renderer {
             Some(Self::DEPTH_FORMAT),
         );
 
+        let ui_pipeline = UiPipeline::new(&device, &queue, config.format, width, height);
+
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, width, height);
 
         Ok(Self {
@@ -210,6 +214,7 @@ impl Renderer {
             size: (width, height),
             render_pipeline,
             skybox_pipeline,
+            ui_pipeline,
             camera_buffer,
             light_buffer,
             camera_bind_group,
@@ -377,6 +382,8 @@ impl Renderer {
             Some(Self::DEPTH_FORMAT),
         );
 
+        let ui_pipeline = UiPipeline::new(&device, &queue, config.format, width, height);
+
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, width, height);
 
         Ok(Self {
@@ -387,6 +394,7 @@ impl Renderer {
             size: (width, height),
             render_pipeline,
             skybox_pipeline,
+            ui_pipeline,
             camera_buffer,
             light_buffer,
             camera_bind_group,
@@ -436,6 +444,7 @@ impl Renderer {
                 Self::create_depth_texture(&self.device, width, height);
             self.depth_texture = depth_texture;
             self.depth_view = depth_view;
+            self.ui_pipeline.resize(&self.queue, width, height);
         }
     }
 
@@ -485,6 +494,16 @@ impl Renderer {
         &mut self,
         skybox: Option<&GpuMesh>,
         items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        clear_color: [f64; 4],
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.render_scene_with_ui(skybox, items, None, clear_color)
+    }
+
+    pub fn render_scene_with_ui(
+        &mut self,
+        skybox: Option<&GpuMesh>,
+        items: &[(&GpuMesh, Option<&GpuTexture>, &[InstanceRaw])],
+        ui_batch: Option<&mut UiBatch>,
         clear_color: [f64; 4],
     ) -> Result<(), wgpu::SurfaceError> {
         let surface = match &self.surface {
@@ -574,6 +593,65 @@ impl Renderer {
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..mesh.num_elements, 0, 0..count);
+            }
+        }
+
+        // 3. UI Pass if batch provided and not empty
+        if let Some(batch) = ui_batch {
+            batch.finish_draw_calls();
+            if !batch.is_empty() {
+                let v_buf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("UI Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&batch.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                let i_buf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("UI Index Buffer"),
+                        contents: bytemuck::cast_slice(&batch.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+                let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Skylands UI Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                ui_pass.set_pipeline(&self.ui_pipeline.pipeline);
+                ui_pass.set_bind_group(0, &self.ui_pipeline.uniform_bind_group, &[]);
+                ui_pass.set_vertex_buffer(0, v_buf.slice(..));
+                ui_pass.set_index_buffer(i_buf.slice(..), wgpu::IndexFormat::Uint32);
+
+                for call in &batch.draw_calls {
+                    let tex_bind_group = if call.texture_id == 1 {
+                        &self.ui_pipeline.font_atlas.texture.bind_group
+                    } else {
+                        &self.ui_pipeline.white_texture.bind_group
+                    };
+                    ui_pass.set_bind_group(1, tex_bind_group, &[]);
+                    let end_idx = call.index_offset + call.index_count;
+                    ui_pass.draw_indexed(call.index_offset..end_idx, 0, 0..1);
+                }
             }
         }
 

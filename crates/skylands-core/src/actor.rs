@@ -30,6 +30,8 @@ pub struct Actor {
     pub model_path: Option<String>,
     pub texture_path: Option<String>,
     pub collider: CharacterCollider,
+    pub health: u32,
+    pub max_health: u32,
 }
 
 pub struct World {
@@ -38,6 +40,7 @@ pub struct World {
     pub active_hero_id: Option<u32>,
     pub environment: Environment,
     pub pending_audio_cues: Vec<WorldAudioCue>,
+    pub coins: u32,
 }
 
 impl World {
@@ -48,6 +51,7 @@ impl World {
             active_hero_id: None,
             environment: Environment::default(),
             pending_audio_cues: Vec::new(),
+            coins: 0,
         }
     }
 
@@ -85,6 +89,8 @@ impl World {
             model_path,
             texture_path,
             collider: CharacterCollider::default(),
+            health: 500,
+            max_health: 500,
         };
 
         if !is_villain && self.active_hero_id.is_none() {
@@ -125,6 +131,8 @@ impl World {
                 step_height: 0.0,
                 grounded: true,
             },
+            health: 500,
+            max_health: 500,
         };
 
         self.actors.push(actor);
@@ -164,6 +172,8 @@ impl World {
                 step_height: 0.0,
                 grounded: true,
             },
+            health: 500,
+            max_health: 500,
         };
 
         self.actors.push(actor);
@@ -338,7 +348,8 @@ impl World {
         if let Some(h_pos) = hero_pos {
             for actor in &mut self.actors {
                 if let ActorKind::Collectible {
-                    ref mut collected, ..
+                    value,
+                    ref mut collected,
                 } = actor.kind
                 {
                     if !*collected && actor.active {
@@ -350,6 +361,7 @@ impl World {
                         if dist_sq <= pickup_radius * pickup_radius {
                             *collected = true;
                             actor.active = false;
+                            self.coins += value;
                             self.pending_audio_cues.push(WorldAudioCue::PickupCollected);
                         }
                     }
@@ -357,6 +369,53 @@ impl World {
             }
         }
     }
+
+    pub fn hud_state(&self, state: &crate::state::GameStateMachine) -> HudState {
+        let (hero_name, hero_element, health, max_health) = if let Some(hero) = self
+            .active_hero_id
+            .and_then(|id| self.actors.iter().find(|a| a.id == id))
+        {
+            let (name, elem) = crate::portal_gameplay::get_character_info(hero.character_id);
+            let display_name = if hero.name.is_empty() {
+                name.to_string()
+            } else {
+                hero.name.clone()
+            };
+            (Some(display_name), Some(elem), hero.health, hero.max_health)
+        } else {
+            (None, None, 0, 0)
+        };
+
+        let villain_capture = match state.current() {
+            crate::state::GameState::VillainCapture {
+                villain_id,
+                progress,
+            } => {
+                let (vname, _) = crate::portal_gameplay::get_character_info(*villain_id);
+                Some((vname.to_string(), *progress))
+            }
+            _ => None,
+        };
+
+        HudState {
+            hero_name,
+            hero_element,
+            health,
+            max_health,
+            coins: self.coins,
+            villain_capture,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HudState {
+    pub hero_name: Option<String>,
+    pub hero_element: Option<crate::portal_gameplay::Element>,
+    pub health: u32,
+    pub max_health: u32,
+    pub coins: u32,
+    pub villain_capture: Option<(String, f32)>,
 }
 
 impl Default for World {
@@ -464,6 +523,19 @@ mod tests {
             }
         );
         assert!(!gem_after.active);
+        assert_eq!(world.coins, 5);
+
+        let sm = crate::state::GameStateMachine::new();
+        let hud = world.hud_state(&sm);
+        assert_eq!(hud.hero_name.as_deref(), Some("Snap Shot"));
+        assert_eq!(
+            hud.hero_element,
+            Some(crate::portal_gameplay::Element::Water)
+        );
+        assert_eq!(hud.health, 500);
+        assert_eq!(hud.max_health, 500);
+        assert_eq!(hud.coins, 5);
+        assert!(hud.villain_capture.is_none());
     }
 
     #[test]

@@ -75,6 +75,23 @@ pub mod mat4 {
         ]
     }
 
+    pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
+        let r_l = right - left;
+        let t_b = top - bottom;
+        let f_n = far - near;
+        [
+            [2.0 / r_l, 0.0, 0.0, 0.0],
+            [0.0, 2.0 / t_b, 0.0, 0.0],
+            [0.0, 0.0, 1.0 / f_n, 0.0],
+            [
+                -(right + left) / r_l,
+                -(top + bottom) / t_b,
+                -near / f_n,
+                1.0,
+            ],
+        ]
+    }
+
     fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
         a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     }

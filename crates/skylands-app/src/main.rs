@@ -10,7 +10,8 @@ use skylands_portal::protocol::{decode_portal_response, PortalEvent, PortalZone,
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use skylands_render::{
     mat4, Camera, EnvironmentScene, EnvironmentSubmesh, GpuMesh, GpuTexture, InstanceRaw,
-    LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer, WindowApp, WindowConfig,
+    LightUniform, Mesh, ModelInstance, RenderAppHandler, Renderer, UiBatch, WindowApp,
+    WindowConfig,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -245,6 +246,7 @@ pub struct AppRuntime {
     pub environment: Option<EnvironmentScene>,
     pub last_active_hero_id: Option<u32>,
     pub anim_time: f32,
+    pub ui_batch: UiBatch,
 }
 
 impl AppRuntime {
@@ -267,6 +269,7 @@ impl AppRuntime {
             environment: None,
             last_active_hero_id: None,
             anim_time: 0.0,
+            ui_batch: UiBatch::new(),
         }
     }
 
@@ -542,6 +545,135 @@ impl AppRuntime {
 
         self.environment.as_ref()
     }
+
+    pub fn build_hud_overlay(
+        engine: &GameEngine,
+        width: f32,
+        _height: f32,
+        ui_batch: &mut UiBatch,
+    ) {
+        ui_batch.clear();
+        let hud = engine.world.hud_state(&engine.state);
+
+        // 1. Top-Left: Hero Status
+        if let Some(name) = &hud.hero_name {
+            // Element badge diamond
+            let elem_color = if let Some(elem) = hud.hero_element {
+                let (r, g, b) = elem.rgb();
+                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+            } else {
+                [0.5, 0.5, 0.5, 1.0]
+            };
+            ui_batch.draw_diamond(36.0, 36.0, 16.0, [0.1, 0.1, 0.1, 0.85]);
+            ui_batch.draw_diamond(36.0, 36.0, 12.0, elem_color);
+
+            // Hero Name Label
+            ui_batch.draw_text(1, name, 60.0, 20.0, 14.0, [1.0, 1.0, 1.0, 1.0]);
+
+            // Health bar container (200x16 px)
+            ui_batch.draw_rect([60.0, 38.0, 204.0, 18.0], [0.1, 0.1, 0.1, 0.9]);
+            ui_batch.draw_rect([62.0, 40.0, 200.0, 14.0], [0.25, 0.25, 0.25, 1.0]);
+
+            // Health fill
+            let health_ratio = if hud.max_health > 0 {
+                (hud.health as f32 / hud.max_health as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let fill_w = 200.0 * health_ratio;
+            let fill_color = if health_ratio > 0.5 {
+                [0.1, 0.85, 0.2, 1.0] // Green
+            } else if health_ratio > 0.2 {
+                [0.95, 0.75, 0.1, 1.0] // Yellow
+            } else {
+                [0.9, 0.15, 0.15, 1.0] // Red
+            };
+            if fill_w > 0.0 {
+                ui_batch.draw_rect([62.0, 40.0, fill_w, 14.0], fill_color);
+            }
+
+            // Health text
+            let hp_str = format!("{}/{}", hud.health, hud.max_health);
+            ui_batch.draw_text(1, &hp_str, 66.0, 42.0, 10.0, [1.0, 1.0, 1.0, 1.0]);
+        }
+
+        // 2. Top-Right: Coin Counter
+        let coin_x = (width - 160.0).max(280.0);
+        // Background pill
+        ui_batch.draw_rect([coin_x - 10.0, 18.0, 150.0, 32.0], [0.1, 0.1, 0.1, 0.85]);
+        // Coin icon (gold diamond)
+        ui_batch.draw_diamond(coin_x + 6.0, 34.0, 9.0, [1.0, 0.85, 0.1, 1.0]);
+        // Coin tally text
+        let coin_str = format!("{} COINS", hud.coins);
+        ui_batch.draw_text(
+            1,
+            &coin_str,
+            coin_x + 22.0,
+            26.0,
+            14.0,
+            [1.0, 0.9, 0.2, 1.0],
+        );
+
+        // 3. Center / Bottom: Villain Capture Banner
+        if let Some((vname, progress)) = hud.villain_capture {
+            let banner_w = 420.0_f32.min(width - 40.0);
+            let banner_h = 70.0;
+            let banner_x = (width - banner_w) * 0.5;
+            let banner_y = 90.0;
+
+            // Purple / dark backdrop panel
+            ui_batch.draw_rect(
+                [banner_x, banner_y, banner_w, banner_h],
+                [0.18, 0.05, 0.28, 0.92],
+            );
+            ui_batch.draw_rect(
+                [
+                    banner_x + 2.0,
+                    banner_y + 2.0,
+                    banner_w - 4.0,
+                    banner_h - 4.0,
+                ],
+                [0.08, 0.02, 0.15, 0.95],
+            );
+
+            // Title: "TRAPPING VILLAIN: <NAME>"
+            let banner_title = format!("TRAPPING VILLAIN: {}", vname.to_uppercase());
+            ui_batch.draw_text(
+                1,
+                &banner_title,
+                banner_x + 16.0,
+                banner_y + 14.0,
+                13.0,
+                [0.9, 0.6, 1.0, 1.0],
+            );
+
+            // Animated progress bar
+            let bar_x = banner_x + 16.0;
+            let bar_y = banner_y + 38.0;
+            let bar_w = banner_w - 32.0;
+            let bar_h = 16.0;
+
+            ui_batch.draw_rect([bar_x, bar_y, bar_w, bar_h], [0.2, 0.1, 0.3, 1.0]);
+
+            let fill_w = bar_w * progress.clamp(0.0, 1.0);
+            if fill_w > 0.0 {
+                ui_batch.draw_rect(
+                    [bar_x, bar_y, fill_w, bar_h],
+                    [0.85, 0.2, 0.95, 1.0], // Magic/Trap magenta glow
+                );
+            }
+
+            let pct_str = format!("{}%", (progress * 100.0) as u32);
+            ui_batch.draw_text(
+                1,
+                &pct_str,
+                bar_x + bar_w * 0.5 - 12.0,
+                bar_y + 2.0,
+                11.0,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+    }
 }
 
 impl RenderAppHandler for AppRuntime {
@@ -787,9 +919,19 @@ impl RenderAppHandler for AppRuntime {
                 }
             }
 
-            if let Err(e) = r.render_scene(self.skybox_mesh.as_ref(), &to_render, clear_color) {
+            let (screen_w, screen_h) = (r.config.width as f32, r.config.height as f32);
+            let mut ui = std::mem::take(&mut self.ui_batch);
+            Self::build_hud_overlay(&self.engine, screen_w, screen_h, &mut ui);
+
+            if let Err(e) = r.render_scene_with_ui(
+                self.skybox_mesh.as_ref(),
+                &to_render,
+                Some(&mut ui),
+                clear_color,
+            ) {
                 warn!("Render pass error: {:?}", e);
             }
+            self.ui_batch = ui;
         }
     }
 }
@@ -1220,5 +1362,45 @@ mod tests {
             .find(|a| a.name == "prop_wooden_barrel")
             .unwrap();
         assert!(prop.active);
+        assert_eq!(engine.world.coins, 1);
+
+        // Verify HUD snapshot overlay batching
+        let mut ui_batch = UiBatch::new();
+        AppRuntime::build_hud_overlay(&engine, 800.0, 600.0, &mut ui_batch);
+        assert!(!ui_batch.is_empty());
+        assert!(!ui_batch.vertices.is_empty());
+        assert!(!ui_batch.indices.is_empty());
+    }
+
+    #[test]
+    fn test_headless_hud_overlay_render_pass() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        if let Ok(mut renderer) = Renderer::new_headless(800, 600) {
+            let hero_id =
+                runtime
+                    .engine
+                    .world
+                    .spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+            assert_eq!(runtime.engine.world.active_hero_id, Some(hero_id));
+            runtime.engine.world.coins = 42;
+
+            runtime.engine.state.set_state(GameState::VillainCapture {
+                villain_id: 1010,
+                progress: 0.5,
+            });
+
+            let (w, h) = (renderer.config.width as f32, renderer.config.height as f32);
+            let mut ui = UiBatch::new();
+            AppRuntime::build_hud_overlay(&runtime.engine, w, h, &mut ui);
+            assert!(!ui.is_empty());
+
+            let clear_color = [0.1, 0.1, 0.2, 1.0];
+            let res = renderer.render_scene_with_ui(None, &[], Some(&mut ui), clear_color);
+            assert!(res.is_ok());
+        }
     }
 }
