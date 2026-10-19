@@ -1,0 +1,10 @@
+/target/
+rom*.wbfs
+*.iso
+*.wbfs
+assets/
+extracted/
+ghidra_project/
+.rea/
+*.elf
+*.dol

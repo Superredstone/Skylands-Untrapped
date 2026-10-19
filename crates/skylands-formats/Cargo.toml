@@ -1,0 +1,10 @@
+[package]
+name = "skylands-formats"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+crc32fast = { workspace = true }

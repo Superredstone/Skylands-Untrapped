@@ -1,0 +1,10 @@
+[package]
+name = "skylands-portal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+hidapi = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "skylands-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skylands-formats = { path = "../skylands-formats" }
+skylands-portal = { path = "../skylands-portal" }
+skylands-extractor = { path = "../skylands-extractor" }
+clap = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+thiserror = { workspace = true }

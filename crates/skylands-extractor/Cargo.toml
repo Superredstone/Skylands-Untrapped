@@ -1,0 +1,9 @@
+[package]
+name = "skylands-extractor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = { workspace = true }
+log = { workspace = true }
+skylands-formats = { path = "../skylands-formats" }
