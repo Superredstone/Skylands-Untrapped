@@ -1,5 +1,5 @@
 # Skylands Untrapped
-Skylanders Trap Team PC static recompilation (AI assisted)
+Skylanders Trap Team PC reimplementation (AI assisted)
 
 ## Objectives
 - [ ] Support EU (en) version of the game
