@@ -142,6 +142,32 @@ impl Camera {
         let proj = mat4::perspective(self.fov_y, self.aspect, self.near, self.far);
         mat4::mul(&proj, &view)
     }
+
+    pub fn project_to_screen(
+        &self,
+        world_pos: [f32; 3],
+        screen_size: (f32, f32),
+    ) -> Option<[f32; 2]> {
+        let vp = self.build_view_projection_matrix();
+        let clip_x =
+            vp[0][0] * world_pos[0] + vp[1][0] * world_pos[1] + vp[2][0] * world_pos[2] + vp[3][0];
+        let clip_y =
+            vp[0][1] * world_pos[0] + vp[1][1] * world_pos[1] + vp[2][1] * world_pos[2] + vp[3][1];
+        let clip_w =
+            vp[0][3] * world_pos[0] + vp[1][3] * world_pos[1] + vp[2][3] * world_pos[2] + vp[3][3];
+
+        if clip_w <= 0.001 {
+            return None;
+        }
+
+        let ndc_x = clip_x / clip_w;
+        let ndc_y = clip_y / clip_w;
+
+        let screen_x = (ndc_x + 1.0) * 0.5 * screen_size.0;
+        let screen_y = (1.0 - ndc_y) * 0.5 * screen_size.1;
+
+        Some([screen_x, screen_y])
+    }
 }
 
 #[cfg(test)]
@@ -157,14 +183,18 @@ mod tests {
     }
 
     #[test]
-    fn test_camera_view_proj() {
-        let cam = Camera::new(16.0 / 9.0);
-        let vp = cam.build_view_projection_matrix();
-        assert_ne!(vp, mat4::IDENTITY);
-        // Target is at origin (0, 0, 0); projected x and y clip coordinates should be zero
-        assert!(vp[3][0].abs() < 1e-5);
-        assert!(vp[3][1].abs() < 1e-5);
-        // W component is positive depth along viewing direction
-        assert!(vp[3][3] > 0.0);
+    fn test_camera_world_to_screen_projection() {
+        let mut cam = Camera::new(800.0 / 600.0);
+        cam.eye = [0.0, 4.0, 7.0];
+        cam.target = [0.0, 0.0, 0.0];
+        let screen = cam.project_to_screen([0.0, 0.0, 0.0], (800.0, 600.0));
+        assert!(screen.is_some());
+        let [sx, sy] = screen.unwrap();
+        assert!((sx - 400.0).abs() < 1.0);
+        assert!((sy - 300.0).abs() < 1.0);
+
+        // Point behind camera should return None
+        let behind = cam.project_to_screen([0.0, 10.0, 20.0], (800.0, 600.0));
+        assert!(behind.is_none());
     }
 }

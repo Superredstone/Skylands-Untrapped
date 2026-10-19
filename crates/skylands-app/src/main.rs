@@ -164,6 +164,9 @@ impl GameEngine {
         for cue in self.world.drain_audio_cues() {
             match cue {
                 WorldAudioCue::PickupCollected => self.audio.on_pickup_collected(),
+                WorldAudioCue::HeroAttack(kind) => self.audio.on_hero_attack(kind),
+                WorldAudioCue::AttackHit => self.audio.on_attack_hit(),
+                WorldAudioCue::PropDestroyed => self.audio.on_prop_destroyed(),
             }
         }
 
@@ -548,8 +551,9 @@ impl AppRuntime {
 
     pub fn build_hud_overlay(
         engine: &GameEngine,
+        camera: &Camera,
         width: f32,
-        _height: f32,
+        height: f32,
         ui_batch: &mut UiBatch,
     ) {
         ui_batch.clear();
@@ -672,6 +676,21 @@ impl AppRuntime {
                 11.0,
                 [1.0, 1.0, 1.0, 1.0],
             );
+        }
+
+        // 4. Floating Damage Popups
+        for popup in &engine.world.damage_popups {
+            if let Some([sx, sy]) = camera.project_to_screen(popup.world_pos, (width, height)) {
+                let y_offset = popup.timer * 40.0;
+                let alpha = (1.0 - (popup.timer / popup.max_lifetime)).clamp(0.0, 1.0);
+                let color = [
+                    popup.color[0],
+                    popup.color[1],
+                    popup.color[2],
+                    popup.color[3] * alpha,
+                ];
+                ui_batch.draw_text(1, &popup.text, sx, sy - y_offset, 14.0, color);
+            }
         }
     }
 }
@@ -921,7 +940,7 @@ impl RenderAppHandler for AppRuntime {
 
             let (screen_w, screen_h) = (r.config.width as f32, r.config.height as f32);
             let mut ui = std::mem::take(&mut self.ui_batch);
-            Self::build_hud_overlay(&self.engine, screen_w, screen_h, &mut ui);
+            Self::build_hud_overlay(&self.engine, &self.camera, screen_w, screen_h, &mut ui);
 
             if let Err(e) = r.render_scene_with_ui(
                 self.skybox_mesh.as_ref(),
@@ -1366,7 +1385,8 @@ mod tests {
 
         // Verify HUD snapshot overlay batching
         let mut ui_batch = UiBatch::new();
-        AppRuntime::build_hud_overlay(&engine, 800.0, 600.0, &mut ui_batch);
+        let camera = Camera::new(800.0 / 600.0);
+        AppRuntime::build_hud_overlay(&engine, &camera, 800.0, 600.0, &mut ui_batch);
         assert!(!ui_batch.is_empty());
         assert!(!ui_batch.vertices.is_empty());
         assert!(!ui_batch.indices.is_empty());
@@ -1395,12 +1415,71 @@ mod tests {
 
             let (w, h) = (renderer.config.width as f32, renderer.config.height as f32);
             let mut ui = UiBatch::new();
-            AppRuntime::build_hud_overlay(&runtime.engine, w, h, &mut ui);
+            AppRuntime::build_hud_overlay(&runtime.engine, &runtime.camera, w, h, &mut ui);
             assert!(!ui.is_empty());
 
             let clear_color = [0.1, 0.1, 0.2, 1.0];
             let res = renderer.render_scene_with_ui(None, &[], Some(&mut ui), clear_color);
             assert!(res.is_ok());
         }
+    }
+
+    #[test]
+    fn test_headless_hero_attack_and_damage_popup_hud() {
+        let portal = create_mock_portal();
+        let assets = Arc::new(AssetLoader::default());
+        let engine = GameEngine::new(portal, assets.clone());
+        let mut runtime = AppRuntime::new(engine, assets);
+
+        let hero_id =
+            runtime
+                .engine
+                .world
+                .spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+        assert_eq!(runtime.engine.world.active_hero_id, Some(hero_id));
+
+        // Spawn destructible barrel directly in front of hero
+        let prop_id = runtime.engine.world.spawn_prop(
+            "prop_destruct_barrel",
+            [0.0, 0.0, -1.0],
+            true,
+            None,
+            None,
+        );
+        if let Some(prop) = runtime
+            .engine
+            .world
+            .actors
+            .iter_mut()
+            .find(|a| a.id == prop_id)
+        {
+            prop.health = 50;
+        }
+
+        // Simulate 10 ticks: tick 0 triggers primary attack (Key J -> WiiButton::B)
+        runtime.engine.input.handle_key_code(36, true);
+        for tick in 0..10 {
+            if tick == 1 {
+                runtime.engine.input.handle_key_code(36, false);
+            }
+            runtime.engine.tick();
+        }
+
+        // Barrel destroyed, damage popup created
+        assert!(runtime
+            .engine
+            .world
+            .actors
+            .iter()
+            .find(|a| a.id == prop_id)
+            .is_none());
+        assert!(!runtime.engine.world.damage_popups.is_empty());
+
+        // Verify HUD pass projects damage popup and generates valid vertices
+        let mut ui = UiBatch::new();
+        let camera = Camera::new(800.0 / 600.0);
+        AppRuntime::build_hud_overlay(&runtime.engine, &camera, 800.0, 600.0, &mut ui);
+        assert!(!ui.vertices.is_empty());
+        assert!(!ui.indices.is_empty());
     }
 }

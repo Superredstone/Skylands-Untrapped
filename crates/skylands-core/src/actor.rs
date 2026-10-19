@@ -2,6 +2,41 @@ use crate::collision::{CharacterCollider, Environment};
 use crate::input::{WiiButton, WiiInputState};
 use skylands_formats::{LevelMarker, MarkerKind};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackKind {
+    PrimaryMelee,
+    SecondarySweep,
+    SpecialProjectile,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveAttack {
+    pub timer: f32,
+    pub duration: f32,
+    pub kind: AttackKind,
+    pub has_hit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DamagePopup {
+    pub text: String,
+    pub world_pos: [f32; 3],
+    pub timer: f32,
+    pub max_lifetime: f32,
+    pub color: [f32; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projectile {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub damage: u32,
+    pub radius: f32,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActorKind {
     Hero,
@@ -13,6 +48,9 @@ pub enum ActorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldAudioCue {
     PickupCollected,
+    HeroAttack(AttackKind),
+    AttackHit,
+    PropDestroyed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +70,9 @@ pub struct Actor {
     pub collider: CharacterCollider,
     pub health: u32,
     pub max_health: u32,
+    pub active_attack: Option<ActiveAttack>,
+    pub combo_step: u8,
+    pub combo_cooldown_timer: f32,
 }
 
 pub struct World {
@@ -41,6 +82,8 @@ pub struct World {
     pub environment: Environment,
     pub pending_audio_cues: Vec<WorldAudioCue>,
     pub coins: u32,
+    pub damage_popups: Vec<DamagePopup>,
+    pub projectiles: Vec<Projectile>,
 }
 
 impl World {
@@ -52,6 +95,8 @@ impl World {
             environment: Environment::default(),
             pending_audio_cues: Vec::new(),
             coins: 0,
+            damage_popups: Vec::new(),
+            projectiles: Vec::new(),
         }
     }
 
@@ -91,6 +136,9 @@ impl World {
             collider: CharacterCollider::default(),
             health: 500,
             max_health: 500,
+            active_attack: None,
+            combo_step: 0,
+            combo_cooldown_timer: 0.0,
         };
 
         if !is_villain && self.active_hero_id.is_none() {
@@ -133,6 +181,9 @@ impl World {
             },
             health: 500,
             max_health: 500,
+            active_attack: None,
+            combo_step: 0,
+            combo_cooldown_timer: 0.0,
         };
 
         self.actors.push(actor);
@@ -174,6 +225,9 @@ impl World {
             },
             health: 500,
             max_health: 500,
+            active_attack: None,
+            combo_step: 0,
+            combo_cooldown_timer: 0.0,
         };
 
         self.actors.push(actor);
@@ -254,8 +308,69 @@ impl World {
     }
 
     pub fn update(&mut self, dt: f32, input: &WiiInputState) {
+        // 1. Hero input, movement, combo timers, and attack triggering
+        let mut triggered_attack: Option<AttackKind> = None;
+        let mut hero_pos = [0.0f32; 3];
+        let mut hero_rot = 0.0f32;
+        let mut has_hero = false;
+
         if let Some(hero_id) = self.active_hero_id {
             if let Some(hero) = self.actors.iter_mut().find(|a| a.id == hero_id) {
+                has_hero = true;
+
+                // Combo cooldown timer
+                if hero.combo_cooldown_timer > 0.0 {
+                    hero.combo_cooldown_timer -= dt;
+                    if hero.combo_cooldown_timer <= 0.0 {
+                        hero.combo_cooldown_timer = 0.0;
+                        hero.combo_step = 0;
+                    }
+                }
+
+                // Advance active attack timer
+                if let Some(ref mut attack) = hero.active_attack {
+                    attack.timer += dt;
+                    if attack.timer >= attack.duration {
+                        hero.active_attack = None;
+                    }
+                }
+
+                // Attack input check when not currently mid-attack
+                if hero.active_attack.is_none() {
+                    if input.is_down(WiiButton::B) {
+                        let next_step = (hero.combo_step % 3) + 1;
+                        hero.combo_step = next_step;
+                        hero.combo_cooldown_timer = 0.6;
+                        hero.active_attack = Some(ActiveAttack {
+                            timer: 0.0,
+                            duration: 0.25,
+                            kind: AttackKind::PrimaryMelee,
+                            has_hit: false,
+                        });
+                        triggered_attack = Some(AttackKind::PrimaryMelee);
+                    } else if input.is_down(WiiButton::Z) {
+                        hero.combo_step = 0;
+                        hero.combo_cooldown_timer = 0.0;
+                        hero.active_attack = Some(ActiveAttack {
+                            timer: 0.0,
+                            duration: 0.45,
+                            kind: AttackKind::SecondarySweep,
+                            has_hit: false,
+                        });
+                        triggered_attack = Some(AttackKind::SecondarySweep);
+                    } else if input.is_down(WiiButton::One) || input.is_down(WiiButton::Two) {
+                        hero.combo_step = 0;
+                        hero.combo_cooldown_timer = 0.0;
+                        hero.active_attack = Some(ActiveAttack {
+                            timer: 0.0,
+                            duration: 0.35,
+                            kind: AttackKind::SpecialProjectile,
+                            has_hit: false,
+                        });
+                        triggered_attack = Some(AttackKind::SpecialProjectile);
+                    }
+                }
+
                 const SPEED: f32 = 5.0;
                 hero.velocity[0] = input.stick[0] * SPEED;
                 hero.velocity[2] = -input.stick[1] * SPEED;
@@ -336,16 +451,140 @@ impl World {
                         break;
                     }
                 }
+
+                hero_pos = hero.position;
+                hero_rot = hero.rotation;
             }
         }
 
-        // Proximity collection for active collectibles
-        let hero_pos = self
-            .active_hero_id
-            .and_then(|id| self.actors.iter().find(|a| a.id == id))
-            .map(|h| h.position);
+        // 2. Attack Execution
+        if let Some(kind) = triggered_attack {
+            self.pending_audio_cues
+                .push(WorldAudioCue::HeroAttack(kind));
+            let fwd_x = hero_rot.sin();
+            let fwd_z = -hero_rot.cos();
 
-        if let Some(h_pos) = hero_pos {
+            match kind {
+                AttackKind::SpecialProjectile => {
+                    const PROJ_SPEED: f32 = 12.0;
+                    self.projectiles.push(Projectile {
+                        position: [hero_pos[0], hero_pos[1] + 0.8, hero_pos[2]],
+                        velocity: [fwd_x * PROJ_SPEED, 0.0, fwd_z * PROJ_SPEED],
+                        lifetime: 0.0,
+                        max_lifetime: 1.5,
+                        damage: 75,
+                        radius: 0.5,
+                        active: true,
+                    });
+                }
+                AttackKind::PrimaryMelee | AttackKind::SecondarySweep => {
+                    let (range, cos_half_angle, damage) = if kind == AttackKind::PrimaryMelee {
+                        (1.8f32, (45.0f32.to_radians()).cos(), 50u32)
+                    } else {
+                        (2.8f32, -1.0f32, 100u32) // 360-degree sweep: all angles pass
+                    };
+
+                    let mut hits = Vec::new();
+                    for target in &self.actors {
+                        if !target.active {
+                            continue;
+                        }
+                        let is_target = match target.kind {
+                            ActorKind::Prop { destructible } => destructible,
+                            ActorKind::Villain => true,
+                            _ => false,
+                        };
+                        if !is_target {
+                            continue;
+                        }
+
+                        let dx = target.position[0] - hero_pos[0];
+                        let dz = target.position[2] - hero_pos[2];
+                        let dist = (dx * dx + dz * dz).sqrt();
+                        if dist <= range + target.collider.radius {
+                            let in_cone = if dist > 0.001 && cos_half_angle > -0.999 {
+                                let dir_x = dx / dist;
+                                let dir_z = dz / dist;
+                                let dot = dir_x * fwd_x + dir_z * fwd_z;
+                                dot >= cos_half_angle
+                            } else {
+                                true
+                            };
+
+                            if in_cone {
+                                hits.push((target.id, target.position, damage));
+                            }
+                        }
+                    }
+
+                    if !hits.is_empty() {
+                        self.pending_audio_cues.push(WorldAudioCue::AttackHit);
+                        for (tid, tpos, dmg) in hits {
+                            self.apply_damage(tid, dmg, tpos);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Projectile Updates & Collision Resolution
+        let mut proj_hits = Vec::new();
+        for proj in &mut self.projectiles {
+            if !proj.active {
+                continue;
+            }
+            proj.lifetime += dt;
+            if proj.lifetime >= proj.max_lifetime {
+                proj.active = false;
+                continue;
+            }
+            proj.position[0] += proj.velocity[0] * dt;
+            proj.position[1] += proj.velocity[1] * dt;
+            proj.position[2] += proj.velocity[2] * dt;
+
+            // Check collision against destructible props and villains
+            for target in &self.actors {
+                if !target.active {
+                    continue;
+                }
+                let is_target = match target.kind {
+                    ActorKind::Prop { destructible } => destructible,
+                    ActorKind::Villain => true,
+                    _ => false,
+                };
+                if !is_target {
+                    continue;
+                }
+
+                let dx = target.position[0] - proj.position[0];
+                let dy = target.position[1] - proj.position[1];
+                let dz = target.position[2] - proj.position[2];
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                let hit_radius = proj.radius + target.collider.radius;
+                if dist_sq <= hit_radius * hit_radius {
+                    proj.active = false;
+                    proj_hits.push((target.id, proj.damage, target.position));
+                    break;
+                }
+            }
+        }
+        self.projectiles.retain(|p| p.active);
+
+        if !proj_hits.is_empty() {
+            self.pending_audio_cues.push(WorldAudioCue::AttackHit);
+            for (target_id, dmg, hit_pos) in proj_hits {
+                self.apply_damage(target_id, dmg, hit_pos);
+            }
+        }
+
+        // 4. Update Damage Popups
+        for popup in &mut self.damage_popups {
+            popup.timer += dt;
+        }
+        self.damage_popups.retain(|p| p.timer < p.max_lifetime);
+
+        // 5. Proximity collection for active collectibles
+        if has_hero {
             for actor in &mut self.actors {
                 if let ActorKind::Collectible {
                     value,
@@ -353,9 +592,9 @@ impl World {
                 } = actor.kind
                 {
                     if !*collected && actor.active {
-                        let dx = actor.position[0] - h_pos[0];
-                        let dy = actor.position[1] - h_pos[1];
-                        let dz = actor.position[2] - h_pos[2];
+                        let dx = actor.position[0] - hero_pos[0];
+                        let dy = actor.position[1] - hero_pos[1];
+                        let dz = actor.position[2] - hero_pos[2];
                         let dist_sq = dx * dx + dy * dy + dz * dz;
                         let pickup_radius = actor.collider.radius + 0.5;
                         if dist_sq <= pickup_radius * pickup_radius {
@@ -365,6 +604,80 @@ impl World {
                             self.pending_audio_cues.push(WorldAudioCue::PickupCollected);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    pub fn apply_damage(&mut self, target_id: u32, damage: u32, hit_pos: [f32; 3]) {
+        self.damage_popups.push(DamagePopup {
+            text: format!("-{}", damage),
+            world_pos: [hit_pos[0], hit_pos[1] + 1.0, hit_pos[2]],
+            timer: 0.0,
+            max_lifetime: 1.0,
+            color: [1.0, 0.2, 0.2, 1.0],
+        });
+
+        let mut target_died = false;
+        let mut target_kind = None;
+        let mut target_pos = [0.0f32; 3];
+
+        if let Some(target) = self.actors.iter_mut().find(|a| a.id == target_id) {
+            target.health = target.health.saturating_sub(damage);
+            if target.health == 0 {
+                target_died = true;
+                target_kind = Some(target.kind.clone());
+                target_pos = target.position;
+            }
+        }
+
+        if target_died {
+            if let Some(kind) = target_kind {
+                match kind {
+                    ActorKind::Prop { destructible: true } => {
+                        self.pending_audio_cues.push(WorldAudioCue::PropDestroyed);
+                        // Spawn 1-3 collectible coins/gems
+                        self.spawn_collectible(
+                            "coin_drop_1",
+                            [target_pos[0], target_pos[1], target_pos[2]],
+                            1,
+                            None,
+                            None,
+                        );
+                        self.spawn_collectible(
+                            "coin_drop_2",
+                            [target_pos[0] + 0.4, target_pos[1], target_pos[2] + 0.2],
+                            1,
+                            None,
+                            None,
+                        );
+                        self.spawn_collectible(
+                            "gem_drop_3",
+                            [target_pos[0] - 0.3, target_pos[1], target_pos[2] - 0.3],
+                            5,
+                            None,
+                            None,
+                        );
+                        self.despawn(target_id);
+                    }
+                    ActorKind::Villain => {
+                        self.spawn_collectible(
+                            "villain_loot_1",
+                            [target_pos[0] + 0.3, target_pos[1], target_pos[2]],
+                            5,
+                            None,
+                            None,
+                        );
+                        self.spawn_collectible(
+                            "villain_loot_2",
+                            [target_pos[0] - 0.3, target_pos[1], target_pos[2]],
+                            5,
+                            None,
+                            None,
+                        );
+                        self.despawn(target_id);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -594,5 +907,116 @@ mod tests {
             "Hero should be airborne after jump"
         );
         assert!(!hero_jumping.collider.grounded);
+    }
+
+    #[test]
+    fn test_hero_primary_attack_destroys_prop_and_drops_loot() {
+        let mut world = World::new();
+        let hero_id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+        assert_eq!(world.active_hero_id, Some(hero_id));
+
+        // Spawn a destructible barrel 1 meter directly in front (facing along -Z)
+        let prop_id = world.spawn_prop("barrel", [0.0, 0.0, -1.0], true, None, None);
+        // Set health to 50 so 1 primary attack (50 dmg) destroys it
+        if let Some(prop) = world.actors.iter_mut().find(|a| a.id == prop_id) {
+            prop.health = 50;
+        }
+
+        // Trigger primary melee attack (WiiButton::B)
+        let mut input = WiiInputState::new();
+        input.press(WiiButton::B);
+        world.update(0.016, &input);
+
+        // Prop should be despawned and replaced by 3 collectible drops
+        assert!(world.actors.iter().find(|a| a.id == prop_id).is_none());
+        let collectibles: Vec<_> = world
+            .actors
+            .iter()
+            .filter(|a| matches!(a.kind, ActorKind::Collectible { .. }))
+            .collect();
+        assert_eq!(collectibles.len(), 3);
+
+        // Damage popup should exist
+        assert_eq!(world.damage_popups.len(), 1);
+        assert_eq!(world.damage_popups[0].text, "-50");
+
+        // Audio cues should have HeroAttack, AttackHit, PropDestroyed
+        let cues = world.drain_audio_cues();
+        assert!(cues.contains(&WorldAudioCue::HeroAttack(AttackKind::PrimaryMelee)));
+        assert!(cues.contains(&WorldAudioCue::AttackHit));
+        assert!(cues.contains(&WorldAudioCue::PropDestroyed));
+
+        // Now collect drops by stepping close
+        let mut move_input = WiiInputState::new();
+        move_input.set_stick(0.0, 0.5); // move north towards drops
+        world.update(0.5, &move_input);
+        assert!(world.coins > 0);
+    }
+
+    #[test]
+    fn test_hero_attack_combo_chain() {
+        let mut world = World::new();
+        let hero_id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+
+        let mut input = WiiInputState::new();
+        input.press(WiiButton::B);
+
+        // Attack 1
+        world.update(0.016, &input);
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert_eq!(hero.combo_step, 1);
+        assert!(hero.active_attack.is_some());
+
+        // Wait out attack duration (0.25s) without letting combo cooldown (0.6s) expire
+        let neutral = WiiInputState::new();
+        world.update(0.26, &neutral);
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert!(hero.active_attack.is_none());
+        assert_eq!(hero.combo_step, 1);
+
+        // Attack 2
+        world.update(0.016, &input);
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert_eq!(hero.combo_step, 2);
+
+        world.update(0.26, &neutral);
+
+        // Attack 3
+        world.update(0.016, &input);
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert_eq!(hero.combo_step, 3);
+
+        // Wait longer than 0.6s cooldown -> combo resets to 0
+        world.update(0.7, &neutral);
+        let hero = world.actors.iter().find(|a| a.id == hero_id).unwrap();
+        assert_eq!(hero.combo_step, 0);
+    }
+
+    #[test]
+    fn test_projectile_flight_and_hit() {
+        let mut world = World::new();
+        let _hero_id = world.spawn(400, 0, "Snap Shot", [0.0, 0.0, 0.0], false, None, None);
+
+        // Spawn villain enemy 6 meters forward along -Z
+        let enemy_id = world.spawn(1010, 0, "Gulper", [0.0, 0.0, -6.0], true, None, None);
+        if let Some(enemy) = world.actors.iter_mut().find(|a| a.id == enemy_id) {
+            enemy.health = 75;
+        }
+
+        // Hero fires special projectile (WiiButton::One)
+        let mut input = WiiInputState::new();
+        input.press(WiiButton::One);
+        world.update(0.016, &input);
+        assert_eq!(world.projectiles.len(), 1);
+
+        // Advance 0.5s: at 12m/s forward, travels 6m reaching enemy
+        let neutral = WiiInputState::new();
+        world.update(0.5, &neutral);
+
+        // Enemy took 75 damage, dropped loot and despawned
+        assert!(world.actors.iter().find(|a| a.id == enemy_id).is_none());
+        assert!(world.projectiles.is_empty());
+        assert!(!world.damage_popups.is_empty());
+        assert_eq!(world.damage_popups[0].text, "-75");
     }
 }

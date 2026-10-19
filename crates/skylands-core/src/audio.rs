@@ -207,6 +207,22 @@ impl AudioEngine {
     pub fn on_pickup_collected(&mut self) {
         self.system.play_sfx_tone(1320.0, 0.12);
     }
+
+    pub fn on_hero_attack(&mut self, kind: crate::actor::AttackKind) {
+        match kind {
+            crate::actor::AttackKind::PrimaryMelee => self.system.play_sfx_tone(520.0, 0.08),
+            crate::actor::AttackKind::SecondarySweep => self.system.play_sfx_tone(380.0, 0.15),
+            crate::actor::AttackKind::SpecialProjectile => self.system.play_sfx_tone(740.0, 0.12),
+        }
+    }
+
+    pub fn on_attack_hit(&mut self) {
+        self.system.play_sfx_tone(240.0, 0.1);
+    }
+
+    pub fn on_prop_destroyed(&mut self) {
+        self.system.play_sfx_tone(180.0, 0.2);
+    }
 }
 
 impl Default for AudioEngine {

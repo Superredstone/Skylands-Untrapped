@@ -113,6 +113,8 @@ impl InputMapper {
             36 | 44 => self.state.set_button(WiiButton::B, pressed),
             37 | 45 => self.state.set_button(WiiButton::Z, pressed),
             46 => self.state.set_button(WiiButton::C, pressed),
+            22 => self.state.set_button(WiiButton::One, pressed),
+            23 => self.state.set_button(WiiButton::Two, pressed),
             28 => self.state.set_button(WiiButton::Plus, pressed),
             1 | 14 => self.state.set_button(WiiButton::Minus, pressed),
             _ => {}
@@ -162,6 +164,10 @@ impl InputMapper {
             Button::West => state.set_button(WiiButton::B, pressed),
             Button::East => state.set_button(WiiButton::C, pressed),
             Button::North => state.set_button(WiiButton::Z, pressed),
+            Button::LeftTrigger | Button::LeftTrigger2 => state.set_button(WiiButton::One, pressed),
+            Button::RightTrigger | Button::RightTrigger2 => {
+                state.set_button(WiiButton::Two, pressed)
+            }
             Button::Start => state.set_button(WiiButton::Plus, pressed),
             Button::Select => state.set_button(WiiButton::Minus, pressed),
             Button::DPadUp => state.set_button(WiiButton::DpadUp, pressed),
@@ -201,5 +207,10 @@ mod tests {
 
         mapper.handle_key_code(32, true);
         assert_eq!(mapper.state().stick, [1.0, 1.0]);
+
+        mapper.handle_key_code(22, true);
+        assert!(mapper.state().is_down(WiiButton::One));
+        mapper.handle_key_code(23, true);
+        assert!(mapper.state().is_down(WiiButton::Two));
     }
 }
