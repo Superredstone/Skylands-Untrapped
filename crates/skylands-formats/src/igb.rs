@@ -2703,13 +2703,228 @@ impl IgbModel {
                     }
                     Some("igWiiGeometry") => {
                         let geo_name = format!("igWiiGeometry_{}", idx);
+                        let slice = if obj.offset + 120 <= data.len() {
+                            &data[obj.offset..]
+                        } else {
+                            &[]
+                        };
+
+                        let mut decoded_mesh: Option<IgbMesh> = None;
+                        if !slice.is_empty() && sections.len() > 2 {
+                            let sec2 = &sections[2];
+                            let sec2_data = if sec2.offset < data.len() {
+                                let end = (sec2.offset + sec2.size).min(data.len());
+                                &data[sec2.offset..end]
+                            } else {
+                                &[]
+                            };
+
+                            let buf_a_sz =
+                                (Self::read_u32(slice, 2 * 4, endian) & 0x00FF_FFFF) as usize;
+                            let buf_a_off =
+                                (Self::read_u32(slice, 3 * 4, endian) & 0x07FF_FFFF) as usize;
+                            let buf_b_sz =
+                                (Self::read_u32(slice, 4 * 4, endian) & 0x00FF_FFFF) as usize;
+                            let buf_b_off =
+                                (Self::read_u32(slice, 5 * 4, endian) & 0x07FF_FFFF) as usize;
+                            let vtx_cnt = Self::read_u32(slice, 12 * 4, endian) as usize;
+
+                            let min_pt = [
+                                f32::from_bits(Self::read_u32(slice, 24 * 4, endian)),
+                                f32::from_bits(Self::read_u32(slice, 25 * 4, endian)),
+                                f32::from_bits(Self::read_u32(slice, 26 * 4, endian)),
+                            ];
+                            let max_pt = [
+                                f32::from_bits(Self::read_u32(slice, 27 * 4, endian)),
+                                f32::from_bits(Self::read_u32(slice, 28 * 4, endian)),
+                                f32::from_bits(Self::read_u32(slice, 29 * 4, endian)),
+                            ];
+
+                            if vtx_cnt >= 3
+                                && buf_a_off + buf_a_sz <= sec2_data.len()
+                                && min_pt.iter().chain(max_pt.iter()).all(|f| f.is_finite())
+                            {
+                                let a_data = &sec2_data[buf_a_off..buf_a_off + buf_a_sz];
+                                let b_data = if buf_b_off + buf_b_sz <= sec2_data.len() {
+                                    &sec2_data[buf_b_off..buf_b_off + buf_b_sz]
+                                } else {
+                                    &[]
+                                };
+
+                                let count = vtx_cnt.min(a_data.len() / 6);
+                                if count >= 3 {
+                                    let mut raw_min = [i16::MAX; 3];
+                                    let mut raw_max = [i16::MIN; 3];
+                                    for k in 0..count {
+                                        let off = k * 6;
+                                        let rx = match endian {
+                                            IgbEndian::Big => {
+                                                i16::from_be_bytes([a_data[off], a_data[off + 1]])
+                                            }
+                                            IgbEndian::Little => {
+                                                i16::from_le_bytes([a_data[off], a_data[off + 1]])
+                                            }
+                                        };
+                                        let ry = match endian {
+                                            IgbEndian::Big => i16::from_be_bytes([
+                                                a_data[off + 2],
+                                                a_data[off + 3],
+                                            ]),
+                                            IgbEndian::Little => i16::from_le_bytes([
+                                                a_data[off + 2],
+                                                a_data[off + 3],
+                                            ]),
+                                        };
+                                        let rz = match endian {
+                                            IgbEndian::Big => i16::from_be_bytes([
+                                                a_data[off + 4],
+                                                a_data[off + 5],
+                                            ]),
+                                            IgbEndian::Little => i16::from_le_bytes([
+                                                a_data[off + 4],
+                                                a_data[off + 5],
+                                            ]),
+                                        };
+                                        raw_min[0] = raw_min[0].min(rx);
+                                        raw_max[0] = raw_max[0].max(rx);
+                                        raw_min[1] = raw_min[1].min(ry);
+                                        raw_max[1] = raw_max[1].max(ry);
+                                        raw_min[2] = raw_min[2].min(rz);
+                                        raw_max[2] = raw_max[2].max(rz);
+                                    }
+
+                                    let mut vertices = Vec::with_capacity(count);
+                                    for k in 0..count {
+                                        let off = k * 6;
+                                        let rx = match endian {
+                                            IgbEndian::Big => {
+                                                i16::from_be_bytes([a_data[off], a_data[off + 1]])
+                                            }
+                                            IgbEndian::Little => {
+                                                i16::from_le_bytes([a_data[off], a_data[off + 1]])
+                                            }
+                                        };
+                                        let ry = match endian {
+                                            IgbEndian::Big => i16::from_be_bytes([
+                                                a_data[off + 2],
+                                                a_data[off + 3],
+                                            ]),
+                                            IgbEndian::Little => i16::from_le_bytes([
+                                                a_data[off + 2],
+                                                a_data[off + 3],
+                                            ]),
+                                        };
+                                        let rz = match endian {
+                                            IgbEndian::Big => i16::from_be_bytes([
+                                                a_data[off + 4],
+                                                a_data[off + 5],
+                                            ]),
+                                            IgbEndian::Little => i16::from_le_bytes([
+                                                a_data[off + 4],
+                                                a_data[off + 5],
+                                            ]),
+                                        };
+
+                                        let map_c = |c: usize, val: i16| -> f32 {
+                                            let span_raw =
+                                                (raw_max[c] as f32 - raw_min[c] as f32).max(1.0);
+                                            min_pt[c]
+                                                + ((val as f32 - raw_min[c] as f32) / span_raw)
+                                                    * (max_pt[c] - min_pt[c])
+                                        };
+
+                                        let pos = [map_c(0, rx), map_c(1, ry), map_c(2, rz)];
+
+                                        let uv = if k * 4 + 4 <= b_data.len() {
+                                            let tu = match endian {
+                                                IgbEndian::Big => u16::from_be_bytes([
+                                                    b_data[k * 4],
+                                                    b_data[k * 4 + 1],
+                                                ]),
+                                                IgbEndian::Little => u16::from_le_bytes([
+                                                    b_data[k * 4],
+                                                    b_data[k * 4 + 1],
+                                                ]),
+                                            };
+                                            let tv = match endian {
+                                                IgbEndian::Big => u16::from_be_bytes([
+                                                    b_data[k * 4 + 2],
+                                                    b_data[k * 4 + 3],
+                                                ]),
+                                                IgbEndian::Little => u16::from_le_bytes([
+                                                    b_data[k * 4 + 2],
+                                                    b_data[k * 4 + 3],
+                                                ]),
+                                            };
+                                            [tu as f32 / 1024.0, tv as f32 / 1024.0]
+                                        } else {
+                                            [0.0, 0.0]
+                                        };
+
+                                        vertices.push(IgbVertex {
+                                            position: pos,
+                                            normal: [0.0, 1.0, 0.0],
+                                            uv,
+                                            color: [0.8, 0.8, 0.82, 1.0],
+                                            bone_indices: [0, 0, 0, 0],
+                                            bone_weights: [1.0, 0.0, 0.0, 0.0],
+                                        });
+                                    }
+
+                                    let mut indices = Vec::with_capacity((count - 2) * 3);
+                                    for t in 0..count.saturating_sub(2) {
+                                        if (t % 2) == 0 {
+                                            indices.push(t as u32);
+                                            indices.push((t + 1) as u32);
+                                            indices.push((t + 2) as u32);
+                                        } else {
+                                            indices.push((t + 1) as u32);
+                                            indices.push(t as u32);
+                                            indices.push((t + 2) as u32);
+                                        }
+                                    }
+
+                                    for tri in indices.as_chunks::<3>().0 {
+                                        let i0 = tri[0] as usize;
+                                        let i1 = tri[1] as usize;
+                                        let i2 = tri[2] as usize;
+                                        let p0 = vertices[i0].position;
+                                        let p1 = vertices[i1].position;
+                                        let p2 = vertices[i2].position;
+                                        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+                                        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+                                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                                        let len_sq = nx * nx + ny * ny + nz * nz;
+                                        if len_sq > 1e-8 {
+                                            let len = len_sq.sqrt();
+                                            let norm = [nx / len, ny / len, nz / len];
+                                            if vertices[i0].normal == [0.0, 1.0, 0.0] {
+                                                vertices[i0].normal = norm;
+                                                vertices[i1].normal = norm;
+                                                vertices[i2].normal = norm;
+                                            }
+                                        }
+                                    }
+
+                                    decoded_mesh = Some(IgbMesh {
+                                        name: geo_name.clone(),
+                                        vertices,
+                                        indices,
+                                        material_name: Some(format!("mat_{}", geo_name)),
+                                    });
+                                }
+                            }
+                        }
+
                         geometries.push(IgbGeometryNode {
                             name: geo_name,
                             vertex_buffer_index: Some(vertex_buffers.len().saturating_sub(1)),
                             index_buffer_index: Some(index_buffers.len().saturating_sub(1)),
                             attr_list_index: Some(attr_lists.len().saturating_sub(1)),
                             material_index: Some(0),
-                            mesh: None,
+                            mesh: decoded_mesh,
                         });
                     }
                     _ => {}
@@ -2773,10 +2988,24 @@ impl IgbModel {
             }
         }
 
-        // Extract 3D geometry from Section 3 (Wii GX FIFO command stream)
+        // Collect meshes from extracted geometries
         let mut meshes = Vec::new();
+        for (geo_idx, geo) in geometries.iter().enumerate() {
+            if let Some(ref m) = geo.mesh {
+                meshes.push(m.clone());
+                nodes.push(IgbSceneNode {
+                    name: format!("node_{}", geo.name),
+                    type_id: IgbObjectType::IgNode,
+                    children: Vec::new(),
+                    geometry_index: Some(geo_idx),
+                    transform: mat4_identity(),
+                });
+            }
+        }
 
-        if sections.len() > 3 {
+        // Only decode GX display list from Section 3 if no submesh geometry exists
+        // and Section 3 starts with valid GX commands (avoid false positives on sound/particle data)
+        if meshes.is_empty() && sections.len() > 3 {
             let sec3 = &sections[3];
             if sec3.offset < data.len() && sec3.size > 0 {
                 let end = (sec3.offset + sec3.size).min(data.len());
@@ -4965,11 +5194,7 @@ mod tests {
         assert!(!model.meshes.is_empty(), "Spyro has extracted meshes");
         assert!(!model.textures.is_empty(), "Spyro has extracted textures");
         assert_eq!(model.images.len(), 77, "Spyro has 77 igImage2 textures");
-        assert_eq!(
-            model.geometries.len(),
-            18,
-            "Spyro has 17 Wii geometries + 1 GX mesh geometry"
-        );
+        assert_eq!(model.geometries.len(), 17, "Spyro has 17 Wii geometries");
         assert_eq!(model.vertex_buffers.len(), 6, "Spyro has 6 vertex buffers");
         assert_eq!(model.index_buffers.len(), 6, "Spyro has 6 index buffers");
         assert_eq!(
@@ -4977,6 +5202,16 @@ mod tests {
             18,
             "Spyro has 18 vertex format/attr lists"
         );
+        // Verify all 16 extracted character submeshes are present
+        assert_eq!(
+            model.meshes.len(),
+            16,
+            "Spyro has 16 submeshes with geometry"
+        );
+        for mesh in &model.meshes {
+            assert!(mesh.vertices.len() >= 3);
+            assert!(!mesh.indices.is_empty());
+        }
     }
 
     #[test]
