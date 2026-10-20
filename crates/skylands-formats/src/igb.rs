@@ -3603,7 +3603,12 @@ mod tests {
 
         let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse crocky");
         let (min_pt, max_pt) = model.vertex_bounds();
-        println!("Crocky bounds: min={:?}, max={:?}, height={}", min_pt, max_pt, max_pt[1] - min_pt[1]);
+        println!(
+            "Crocky bounds: min={:?}, max={:?}, height={}",
+            min_pt,
+            max_pt,
+            max_pt[1] - min_pt[1]
+        );
         assert!(!model.skeletons.is_empty(), "Skeleton must be extracted");
         let skel = &model.skeletons[0];
         assert!(!skel.bones.is_empty(), "Bones must be non-empty");
@@ -3639,7 +3644,12 @@ mod tests {
 
         let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
         let (min_pt, max_pt) = model.vertex_bounds();
-        println!("Kaos bounds: min={:?}, max={:?}, height={}", min_pt, max_pt, max_pt[1] - min_pt[1]);
+        println!(
+            "Kaos bounds: min={:?}, max={:?}, height={}",
+            min_pt,
+            max_pt,
+            max_pt[1] - min_pt[1]
+        );
         assert!(!model.skeletons.is_empty(), "Kaos skeleton extracted");
         assert!(!model.meshes.is_empty(), "Kaos meshes present");
         for mesh in &model.meshes {

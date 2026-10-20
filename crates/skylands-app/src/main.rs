@@ -391,6 +391,8 @@ impl AppRuntime {
             format!("textures/{}.cmpr", key),
             format!("textures/characters/{}.png", key),
             format!("textures/characters/{}.cmpr", key),
+            "462_Water_Crocky.bld".to_string(),
+            "1010_Kaos.bld".to_string(),
             key.clone(),
         ];
 
@@ -1274,6 +1276,9 @@ impl RenderAppHandler for AppRuntime {
                         }
                         _ => (a.position, a.rotation),
                     };
+                    let model_path = a.model_path.as_deref().unwrap_or("models/hero.igb");
+                    let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
+
                     let actor_scale = match a.kind {
                         ActorKind::Hero | ActorKind::Villain => {
                             if let Some(igb) = self.dynamic_igb_models.get(&model_key) {
@@ -1292,9 +1297,6 @@ impl RenderAppHandler for AppRuntime {
                         _ => [1.0, 1.0, 1.0],
                     };
                     let actor_mat = mat4::transform(pos, rot, actor_scale);
-
-                    let model_path = a.model_path.as_deref().unwrap_or("models/hero.igb");
-                    let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
 
                     if let Some(igb) = self.dynamic_igb_models.get(&model_key) {
                         let clip = a.current_anim.as_ref().and_then(|anim_name| {
@@ -2304,5 +2306,102 @@ mod tests {
         }
         assert!(runtime.engine.world.find_by_character_id(401).is_none());
         assert!(runtime.engine.world.find_by_character_id(400).is_some());
+    }
+
+    #[test]
+    fn test_headless_skinned_character_render() {
+        let p1 = std::path::Path::new("assets/files/character/462_Water_Crocky.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/462_Water_Crocky.bld");
+        let path = if p1.exists() { p1 } else { p2 };
+        if !path.exists() {
+            return;
+        }
+
+        let mut loader = AssetLoader::default();
+        loader.mount(path).expect("mount 462_Water_Crocky.bld");
+        let assets = Arc::new(loader);
+        let portal = create_mock_portal();
+        let mut engine = GameEngine::new(portal, assets.clone());
+
+        let hero_id = engine.world.spawn(
+            400,
+            0,
+            "Snap Shot",
+            [0.0, 0.2, 0.0],
+            false,
+            Some("462_Water_Crocky.bld".to_string()),
+            Some("textures/characters/snapshot.png".to_string()),
+        );
+        engine.world.active_hero_id = Some(hero_id);
+
+        let mut runtime = AppRuntime::new(engine, assets);
+        let renderer = match Renderer::new_headless(640, 480) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        runtime.renderer = Some(renderer);
+
+        assert!(runtime.load_model("462_Water_Crocky.bld").is_some());
+        assert!(
+            !runtime
+                .dynamic_models
+                .get("462_water_crocky.bld")
+                .unwrap()
+                .skinned_submeshes
+                .is_empty(),
+            "Must have skinned submeshes"
+        );
+
+        runtime.engine.tick();
+
+        let actor = runtime
+            .engine
+            .world
+            .find_by_character_id(400)
+            .expect("Hero exists");
+        let igb = runtime
+            .dynamic_igb_models
+            .get("462_water_crocky.bld")
+            .expect("dynamic igb loaded");
+        let skeleton = igb.skeletons.first().expect("skeleton exists");
+        let clip = actor.current_anim.as_ref().and_then(|anim_name| {
+            igb.animations
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(anim_name))
+        });
+        let skin_matrices = if let Some(clip) = clip {
+            clip.sample_pose(actor.animation_time, skeleton)
+        } else if let Some(first_clip) = igb.animations.first() {
+            first_clip.sample_pose(actor.animation_time, skeleton)
+        } else {
+            vec![skylands_formats::mat4_identity(); skeleton.bones.len()]
+        };
+
+        assert!(
+            !skin_matrices.is_empty(),
+            "Bone transform matrices non-empty"
+        );
+        for mat in &skin_matrices {
+            for val in mat {
+                assert!(val.is_finite(), "Bone matrix component must be finite");
+            }
+        }
+
+        let model = runtime.dynamic_models.get("462_water_crocky.bld").unwrap();
+        let (skinned_mesh, tex) = &model.skinned_submeshes[0];
+        let r = runtime.renderer.as_mut().unwrap();
+        r.update_bones(&skin_matrices);
+        r.begin_frame().expect("begin_frame");
+
+        let actor_instances = [InstanceRaw::default()];
+        let render_res = r.render_skinned(
+            &[(skinned_mesh, tex.as_ref(), &actor_instances)],
+            Some([0.1, 0.1, 0.2, 1.0]),
+        );
+        assert!(
+            render_res.is_ok(),
+            "render_skinned must succeed without errors"
+        );
+        r.finish_frame();
     }
 }

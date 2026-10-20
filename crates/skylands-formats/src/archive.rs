@@ -647,7 +647,11 @@ impl ArchiveMount {
             .any(|a| a.source_name.to_ascii_lowercase().contains(&lower))
     }
 
-    pub fn read_from_archive(&self, archive_pattern: &str, file_name: &str) -> Result<Vec<u8>, ArchiveError> {
+    pub fn read_from_archive(
+        &self,
+        archive_pattern: &str,
+        file_name: &str,
+    ) -> Result<Vec<u8>, ArchiveError> {
         let arch_pat = archive_pattern.to_ascii_lowercase();
         for archive in &self.archives {
             if archive.source_name.to_ascii_lowercase().contains(&arch_pat) {

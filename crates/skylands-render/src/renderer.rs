@@ -243,33 +243,24 @@ impl Renderer {
             label: Some("Bone Bind Group"),
         });
 
-        let skinned_camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("Skinned Camera Bind Group Layout"),
-            });
-
         let skinned_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &skinned_camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+            ],
             label: Some("Skinned Camera Bind Group"),
         });
 
         let skinned_pipeline = create_skinned_render_pipeline(
             &device,
-            &skinned_camera_bind_group_layout,
+            &camera_bind_group_layout,
             &bone_bind_group_layout,
             &texture_bind_group_layout,
             config.format,
@@ -294,7 +285,7 @@ impl Renderer {
             light_buffer,
             camera_bind_group,
             skybox_bind_group,
-            skinned_camera_bind_group_layout,
+            skinned_camera_bind_group_layout: camera_bind_group_layout,
             skinned_camera_bind_group,
             bone_buffer,
             bone_bind_group_layout,
@@ -496,33 +487,24 @@ impl Renderer {
             label: Some("Bone Bind Group"),
         });
 
-        let skinned_camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("Skinned Camera Bind Group Layout"),
-            });
-
         let skinned_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &skinned_camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+            ],
             label: Some("Skinned Camera Bind Group"),
         });
 
         let skinned_pipeline = create_skinned_render_pipeline(
             &device,
-            &skinned_camera_bind_group_layout,
+            &camera_bind_group_layout,
             &bone_bind_group_layout,
             &texture_bind_group_layout,
             config.format,
@@ -565,7 +547,7 @@ impl Renderer {
             light_buffer,
             camera_bind_group,
             skybox_bind_group,
-            skinned_camera_bind_group_layout,
+            skinned_camera_bind_group_layout: camera_bind_group_layout,
             skinned_camera_bind_group,
             bone_buffer,
             bone_bind_group_layout,

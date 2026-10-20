@@ -54,7 +54,7 @@ impl AssetLoader {
     }
 
     pub fn has_file(&self, path: &str) -> bool {
-        self.vfs.contains_path(path)
+        self.vfs.contains_path(path) || self.vfs.has_archive(path)
     }
 
     pub fn load_raw(&self, path: &str) -> Result<Arc<Vec<u8>>, AssetError> {

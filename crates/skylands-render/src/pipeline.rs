@@ -127,8 +127,20 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
 };
 
+struct LightUniform {
+    direction: vec3<f32>,
+    _pad0: f32,
+    color: vec3<f32>,
+    intensity: f32,
+    ambient_color: vec3<f32>,
+    ambient_intensity: f32,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+
+@group(0) @binding(1)
+var<uniform> light: LightUniform;
 
 struct BoneUniform {
     matrices: array<mat4x4<f32>, 64>,
@@ -192,7 +204,14 @@ var s_diffuse: sampler;
 @fragment
 fn fs_skinned(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
-    return in.color * tex_color;
+    let base_color = in.color * tex_color;
+
+    let normal = normalize(in.world_normal);
+    let ambient = light.ambient_color * light.ambient_intensity;
+    let diff = max(dot(normal, -normalize(light.direction)), 0.0) * light.color * light.intensity;
+    let final_rgb = (ambient + diff) * base_color.rgb;
+
+    return vec4<f32>(final_rgb, base_color.a);
 }
 "#;
 
