@@ -1,335 +1,230 @@
-// ponytail: minimal column-major mat4 without external math crates; upgrade to glam if SIMD needed
-pub mod mat4 {
-    pub type Mat4 = [[f32; 4]; 4];
+use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::prelude::*;
+use skylands_core::{GameState, Hero};
 
-    pub const IDENTITY: Mat4 = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct MainCamera;
 
-    pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
-        let mut out = [[0.0; 4]; 4];
-        for col in 0..4 {
-            for row in 0..4 {
-                out[col][row] = a[0][row] * b[col][0]
-                    + a[1][row] * b[col][1]
-                    + a[2][row] * b[col][2]
-                    + a[3][row] * b[col][3];
-            }
-        }
-        out
-    }
-
-    pub fn translation(pos: [f32; 3]) -> Mat4 {
-        [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [pos[0], pos[1], pos[2], 1.0],
-        ]
-    }
-
-    pub fn rotation_y(angle: f32) -> Mat4 {
-        let (sin, cos) = angle.sin_cos();
-        [
-            [cos, 0.0, -sin, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [sin, 0.0, cos, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    }
-
-    pub fn transform(pos: [f32; 3], rotation_y_rad: f32, scale: [f32; 3]) -> Mat4 {
-        let (sin, cos) = rotation_y_rad.sin_cos();
-        [
-            [cos * scale[0], 0.0, -sin * scale[0], 0.0],
-            [0.0, scale[1], 0.0, 0.0],
-            [sin * scale[2], 0.0, cos * scale[2], 0.0],
-            [pos[0], pos[1], pos[2], 1.0],
-        ]
-    }
-
-    pub fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> Mat4 {
-        let f = normalize([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
-        let r = normalize(cross(f, up));
-        let u = cross(r, f);
-
-        [
-            [r[0], u[0], -f[0], 0.0],
-            [r[1], u[1], -f[1], 0.0],
-            [r[2], u[2], -f[2], 0.0],
-            [-dot(r, eye), -dot(u, eye), dot(f, eye), 1.0],
-        ]
-    }
-
-    pub fn perspective(fov_y_rad: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-        let f = 1.0 / (fov_y_rad * 0.5).tan();
-        let range = near - far;
-        [
-            [f / aspect, 0.0, 0.0, 0.0],
-            [0.0, f, 0.0, 0.0],
-            [0.0, 0.0, far / range, -1.0],
-            [0.0, 0.0, (near * far) / range, 0.0],
-        ]
-    }
-
-    pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
-        let r_l = right - left;
-        let t_b = top - bottom;
-        let f_n = far - near;
-        [
-            [2.0 / r_l, 0.0, 0.0, 0.0],
-            [0.0, 2.0 / t_b, 0.0, 0.0],
-            [0.0, 0.0, 1.0 / f_n, 0.0],
-            [
-                -(right + left) / r_l,
-                -(top + bottom) / t_b,
-                -near / f_n,
-                1.0,
-            ],
-        ]
-    }
-
-    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-    }
-
-    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    }
-
-    fn normalize(v: [f32; 3]) -> [f32; 3] {
-        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if len > 0.00001 {
-            [v[0] / len, v[1] / len, v[2] / len]
-        } else {
-            [0.0, 0.0, 0.0]
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CameraVolumeMode {
-    FixedOverhead { height: f32, distance: f32 },
-    FollowingChase { height: f32, distance: f32 },
-    FixedCinematic { eye: [f32; 3], target: [f32; 3] },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CameraVolume {
-    pub name: String,
-    pub bounds_min: [f32; 3],
-    pub bounds_max: [f32; 3],
-    pub mode: CameraVolumeMode,
-}
-
-impl CameraVolume {
-    pub fn contains(&self, p: [f32; 3]) -> bool {
-        p[0] >= self.bounds_min[0]
-            && p[0] <= self.bounds_max[0]
-            && p[1] >= self.bounds_min[1]
-            && p[1] <= self.bounds_max[1]
-            && p[2] >= self.bounds_min[2]
-            && p[2] <= self.bounds_max[2]
-    }
-}
-
-pub struct Camera {
-    pub eye: [f32; 3],
-    pub target: [f32; 3],
-    pub up: [f32; 3],
-    pub fov_y: f32,
-    pub aspect: f32,
-    pub near: f32,
-    pub far: f32,
-    pub target_eye: [f32; 3],
-    pub target_target: [f32; 3],
-    pub volumes: Vec<CameraVolume>,
-}
-
-impl Camera {
-    pub fn new(aspect: f32) -> Self {
-        let eye = [0.0, 4.0, 7.0];
-        let target = [0.0, 0.0, 0.0];
-        Self {
-            eye,
-            target,
-            up: [0.0, 1.0, 0.0],
-            fov_y: 60.0f32.to_radians(),
-            aspect,
-            near: 0.1,
-            far: 100.0,
-            target_eye: eye,
-            target_target: target,
-            volumes: Vec::new(),
-        }
-    }
-
-    pub fn update_interpolation(&mut self, dt: f32) {
-        let t = (dt * 5.0).clamp(0.0, 1.0);
-        for i in 0..3 {
-            self.eye[i] += (self.target_eye[i] - self.eye[i]) * t;
-            self.target[i] += (self.target_target[i] - self.target[i]) * t;
-        }
-    }
-
-    pub fn set_immediate(&mut self, eye: [f32; 3], target: [f32; 3]) {
-        self.eye = eye;
-        self.target = target;
-        self.target_eye = eye;
-        self.target_target = target;
-    }
-
-    pub fn update_target_for_hero(&mut self, hero_pos: [f32; 3]) {
-        if let Some(vol) = self.volumes.iter().find(|v| v.contains(hero_pos)) {
-            match vol.mode {
-                CameraVolumeMode::FixedOverhead { height, distance } => {
-                    self.target_target = hero_pos;
-                    self.target_eye = [hero_pos[0], hero_pos[1] + height, hero_pos[2] + distance];
-                }
-                CameraVolumeMode::FollowingChase { height, distance } => {
-                    self.target_target = hero_pos;
-                    self.target_eye = [hero_pos[0], hero_pos[1] + height, hero_pos[2] + distance];
-                }
-                CameraVolumeMode::FixedCinematic { eye, target } => {
-                    self.target_eye = eye;
-                    self.target_target = target;
-                }
-            }
-        } else {
-            // Default following chase camera
-            self.target_target = hero_pos;
-            self.target_eye = [hero_pos[0], hero_pos[1] + 4.5, hero_pos[2] + 7.5];
-        }
-    }
-
-    pub fn build_view_projection_matrix(&self) -> mat4::Mat4 {
-        let view = mat4::look_at(self.eye, self.target, self.up);
-        let proj = mat4::perspective(self.fov_y, self.aspect, self.near, self.far);
-        mat4::mul(&proj, &view)
-    }
-
-    pub fn project_to_screen(
-        &self,
-        world_pos: [f32; 3],
-        screen_size: (f32, f32),
-    ) -> Option<[f32; 2]> {
-        let vp = self.build_view_projection_matrix();
-        let clip_x =
-            vp[0][0] * world_pos[0] + vp[1][0] * world_pos[1] + vp[2][0] * world_pos[2] + vp[3][0];
-        let clip_y =
-            vp[0][1] * world_pos[0] + vp[1][1] * world_pos[1] + vp[2][1] * world_pos[2] + vp[3][1];
-        let clip_w =
-            vp[0][3] * world_pos[0] + vp[1][3] * world_pos[1] + vp[2][3] * world_pos[2] + vp[3][3];
-
-        if clip_w <= 0.001 {
-            return None;
-        }
-
-        let ndc_x = clip_x / clip_w;
-        let ndc_y = clip_y / clip_w;
-
-        let screen_x = (ndc_x + 1.0) * 0.5 * screen_size.0;
-        let screen_y = (1.0 - ndc_y) * 0.5 * screen_size.1;
-
-        Some([screen_x, screen_y])
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FreeCam {
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct FreeCamState {
     pub enabled: bool,
-    pub eye: [f32; 3],
-    pub yaw: f32,
-    pub pitch: f32,
     pub speed: f32,
     pub sensitivity: f32,
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
-impl Default for FreeCam {
+impl Default for FreeCamState {
     fn default() -> Self {
         Self {
             enabled: false,
-            eye: [0.0, 4.0, 7.0],
-            yaw: -std::f32::consts::FRAC_PI_2,
-            pitch: 0.0,
-            speed: 10.0,
+            speed: 15.0,
             sensitivity: 0.003,
+            yaw: 0.0,
+            pitch: -0.4,
         }
     }
 }
 
-impl FreeCam {
-    pub fn from_camera(eye: [f32; 3], target: [f32; 3]) -> Self {
-        let f = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
-        let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
-        let (yaw, pitch) = if len > 0.00001 {
-            let norm = [f[0] / len, f[1] / len, f[2] / len];
-            let pitch = norm[1].clamp(-1.0, 1.0).asin().clamp(-1.5, 1.5);
-            let yaw = norm[2].atan2(norm[0]);
-            (yaw, pitch)
-        } else {
-            (-std::f32::consts::FRAC_PI_2, 0.0)
-        };
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct OrbitCameraState {
+    pub target: Vec3,
+    pub distance: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub min_distance: f32,
+    pub max_distance: f32,
+    pub active: bool,
+}
 
+impl Default for OrbitCameraState {
+    fn default() -> Self {
         Self {
-            enabled: true,
-            eye,
-            yaw,
-            pitch,
-            speed: 10.0,
-            sensitivity: 0.003,
+            target: Vec3::new(0.0, 0.8, 0.0),
+            distance: 4.0,
+            yaw: 0.0,
+            pitch: 0.25,
+            min_distance: 1.0,
+            max_distance: 15.0,
+            active: false,
+        }
+    }
+}
+
+impl OrbitCameraState {
+    pub fn orbit(&mut self, delta_yaw: f32, delta_pitch: f32) {
+        self.yaw += delta_yaw;
+        self.pitch = (self.pitch + delta_pitch).clamp(-1.4, 1.4);
+    }
+
+    pub fn zoom(&mut self, delta: f32) {
+        self.distance = (self.distance + delta).clamp(self.min_distance, self.max_distance);
+    }
+}
+
+pub fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        MainCamera,
+    ));
+}
+
+pub fn setup_lighting(mut commands: Commands) {
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.95, 0.85),
+            illuminance: 12000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.6, 0.0)),
+    ));
+
+    commands.insert_resource(AmbientLight {
+        color: Color::srgb(0.7, 0.8, 1.0),
+        brightness: 400.0,
+    });
+}
+
+pub fn camera_follow_system(
+    time: Res<Time>,
+    state: Option<Res<State<GameState>>>,
+    free_cam: Res<FreeCamState>,
+    orbit_cam: Res<OrbitCameraState>,
+    hero_query: Query<&Transform, (With<Hero>, Without<MainCamera>)>,
+    mut cam_query: Query<&mut Transform, With<MainCamera>>,
+) {
+    if free_cam.enabled || orbit_cam.active {
+        return;
+    }
+
+    let Ok(mut cam_tf) = cam_query.get_single_mut() else {
+        return;
+    };
+    let dt = time.delta_secs();
+
+    let is_capture = state.is_some_and(|s| *s.get() == GameState::VillainCapture);
+
+    if is_capture {
+        // Portal Cinematic camera volume: close up on pedestal
+        let target_eye = Vec3::new(2.5, 2.0, 3.5);
+        let look_at = Vec3::new(2.5, 0.8, 0.0);
+        let target_tf = Transform::from_translation(target_eye).looking_at(look_at, Vec3::Y);
+        let factor = (dt * 5.0).clamp(0.0, 1.0);
+        cam_tf.translation = cam_tf.translation.lerp(target_tf.translation, factor);
+        cam_tf.rotation = cam_tf.rotation.slerp(target_tf.rotation, factor);
+    } else if let Ok(hero_tf) = hero_query.get_single() {
+        // Courtyard Overhead camera volume
+        let target_eye = hero_tf.translation + Vec3::new(0.0, 12.0, 16.0);
+        let look_at = hero_tf.translation + Vec3::new(0.0, 1.0, 0.0);
+        let target_tf = Transform::from_translation(target_eye).looking_at(look_at, Vec3::Y);
+        let factor = (dt * 4.0).clamp(0.0, 1.0);
+        cam_tf.translation = cam_tf.translation.lerp(target_tf.translation, factor);
+        cam_tf.rotation = cam_tf.rotation.slerp(target_tf.rotation, factor);
+    }
+}
+
+pub fn free_cam_system(
+    time: Res<Time>,
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
+    mut free_cam: ResMut<FreeCamState>,
+    mut mouse_motion: EventReader<MouseMotion>,
+    mut cam_query: Query<&mut Transform, With<MainCamera>>,
+) {
+    let Some(keyboard) = keyboard else {
+        return;
+    };
+
+    if keyboard.just_pressed(KeyCode::F12) {
+        free_cam.enabled = !free_cam.enabled;
+    }
+
+    if !free_cam.enabled {
+        return;
+    }
+
+    let Ok(mut cam_tf) = cam_query.get_single_mut() else {
+        return;
+    };
+    let dt = time.delta_secs();
+
+    for ev in mouse_motion.read() {
+        free_cam.yaw -= ev.delta.x * free_cam.sensitivity;
+        free_cam.pitch = (free_cam.pitch - ev.delta.y * free_cam.sensitivity).clamp(-1.5, 1.5);
+    }
+
+    cam_tf.rotation = Quat::from_euler(EulerRot::YXZ, free_cam.yaw, free_cam.pitch, 0.0);
+
+    let mut move_dir = Vec3::ZERO;
+    let forward = cam_tf.forward();
+    let right = cam_tf.right();
+    let up = Vec3::Y;
+
+    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+        move_dir += *forward;
+    }
+    if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+        move_dir -= *forward;
+    }
+    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+        move_dir -= *right;
+    }
+    if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+        move_dir += *right;
+    }
+    if keyboard.pressed(KeyCode::Space) {
+        move_dir += up;
+    }
+    if keyboard.pressed(KeyCode::ShiftLeft) {
+        move_dir -= up;
+    }
+
+    if move_dir.length_squared() > 1e-4 {
+        cam_tf.translation += move_dir.normalize() * free_cam.speed * dt;
+    }
+}
+
+pub fn orbit_cam_system(
+    mut orbit_cam: ResMut<OrbitCameraState>,
+    mouse_buttons: Option<Res<ButtonInput<MouseButton>>>,
+    mut mouse_motion: EventReader<MouseMotion>,
+    mut mouse_wheel: EventReader<MouseWheel>,
+    mut cam_query: Query<&mut Transform, With<MainCamera>>,
+) {
+    if !orbit_cam.active {
+        return;
+    }
+
+    if let Some(buttons) = mouse_buttons {
+        if buttons.pressed(MouseButton::Left) {
+            for ev in mouse_motion.read() {
+                orbit_cam.orbit(ev.delta.x * 0.008, ev.delta.y * 0.008);
+            }
         }
     }
 
-    pub fn forward_vector(&self) -> [f32; 3] {
-        let cos_p = self.pitch.cos();
-        [
-            cos_p * self.yaw.cos(),
-            self.pitch.sin(),
-            cos_p * self.yaw.sin(),
-        ]
+    for ev in mouse_wheel.read() {
+        orbit_cam.zoom(-ev.y * 0.5);
     }
 
-    pub fn right_vector(&self) -> [f32; 3] {
-        // forward x up(0, 1, 0)
-        // [f1*u2 - f2*u1, f2*u0 - f0*u2, f0*u1 - f1*u0] = [-sin(yaw), 0, cos(yaw)]
-        [-self.yaw.sin(), 0.0, self.yaw.cos()]
-    }
+    let Ok(mut cam_tf) = cam_query.get_single_mut() else {
+        return;
+    };
 
-    pub fn up_vector(&self) -> [f32; 3] {
-        [0.0, 1.0, 0.0]
-    }
+    let cos_p = orbit_cam.pitch.cos();
+    let sin_p = orbit_cam.pitch.sin();
+    let cos_y = orbit_cam.yaw.cos();
+    let sin_y = orbit_cam.yaw.sin();
 
-    pub fn apply_to_camera(&self, camera: &mut Camera) {
-        let f = self.forward_vector();
-        camera.eye = self.eye;
-        camera.target = [self.eye[0] + f[0], self.eye[1] + f[1], self.eye[2] + f[2]];
-        camera.target_eye = camera.eye;
-        camera.target_target = camera.target;
-    }
+    let eye = orbit_cam.target
+        + Vec3::new(
+            orbit_cam.distance * cos_p * sin_y,
+            orbit_cam.distance * sin_p,
+            orbit_cam.distance * cos_p * cos_y,
+        );
 
-    pub fn rotate(&mut self, yaw_delta: f32, pitch_delta: f32) {
-        self.yaw += yaw_delta;
-        self.pitch = (self.pitch + pitch_delta).clamp(-1.5, 1.5);
-    }
-
-    pub fn translate(&mut self, move_vec: [f32; 3], dt: f32) {
-        let f = self.forward_vector();
-        let r = self.right_vector();
-        let u = self.up_vector();
-
-        let dist = self.speed * dt;
-        for i in 0..3 {
-            self.eye[i] += (f[i] * move_vec[2] + r[i] * move_vec[0] + u[i] * move_vec[1]) * dist;
-        }
-    }
+    *cam_tf = Transform::from_translation(eye).looking_at(orbit_cam.target, Vec3::Y);
 }
 
 #[cfg(test)]
@@ -337,90 +232,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_mat4_identity_mul() {
-        let a = mat4::IDENTITY;
-        let trans = mat4::translation([1.0, 2.0, 3.0]);
-        let res = mat4::mul(&a, &trans);
-        assert_eq!(res, trans);
+    fn test_orbit_camera_state() {
+        let mut orbit = OrbitCameraState::default();
+        orbit.orbit(0.5, 0.2);
+        assert!((orbit.yaw - 0.5).abs() < 1e-4);
+        assert!((orbit.pitch - (0.25 + 0.2)).abs() < 1e-4);
+
+        let initial_dist = orbit.distance;
+        orbit.zoom(-1.0);
+        assert_eq!(orbit.distance, initial_dist - 1.0);
+
+        orbit.zoom(-50.0);
+        assert_eq!(orbit.distance, orbit.min_distance);
     }
 
     #[test]
-    fn test_camera_world_to_screen_projection() {
-        let mut cam = Camera::new(800.0 / 600.0);
-        cam.eye = [0.0, 4.0, 7.0];
-        cam.target = [0.0, 0.0, 0.0];
-        let screen = cam.project_to_screen([0.0, 0.0, 0.0], (800.0, 600.0));
-        assert!(screen.is_some());
-        let [sx, sy] = screen.unwrap();
-        assert!((sx - 400.0).abs() < 1.0);
-        assert!((sy - 300.0).abs() < 1.0);
-
-        // Point behind camera should return None
-        let behind = cam.project_to_screen([0.0, 10.0, 20.0], (800.0, 600.0));
-        assert!(behind.is_none());
-    }
-
-    #[test]
-    fn test_camera_smooth_lerp() {
-        let mut cam = Camera::new(16.0 / 9.0);
-        cam.set_immediate([0.0, 5.0, 10.0], [0.0, 0.0, 0.0]);
-        assert_eq!(cam.eye, [0.0, 5.0, 10.0]);
-
-        cam.target_eye = [10.0, 5.0, 10.0];
-        cam.target_target = [10.0, 0.0, 0.0];
-
-        // Step by 0.016s (approx 60Hz dt)
-        cam.update_interpolation(0.016);
-
-        // Camera must move towards target without snapping immediately
-        assert!(cam.eye[0] > 0.0 && cam.eye[0] < 10.0);
-        assert!(cam.target[0] > 0.0 && cam.target[0] < 10.0);
-
-        // Multiple steps converge
-        for _ in 0..60 {
-            cam.update_interpolation(0.05);
-        }
-        assert!((cam.eye[0] - 10.0).abs() < 0.1);
-        assert!((cam.target[0] - 10.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn test_free_cam_vectors_pitch_clamping_and_translation() {
-        let mut free_cam = FreeCam::from_camera([0.0, 5.0, 10.0], [0.0, 5.0, 0.0]);
-        assert!(free_cam.enabled);
-        assert!((free_cam.pitch - 0.0).abs() < 1e-4);
-        assert!((free_cam.yaw - (-std::f32::consts::FRAC_PI_2)).abs() < 1e-4);
-
-        let f = free_cam.forward_vector();
-        assert!((f[0] - 0.0).abs() < 1e-4);
-        assert!((f[1] - 0.0).abs() < 1e-4);
-        assert!((f[2] - (-1.0)).abs() < 1e-4);
-
-        let r = free_cam.right_vector();
-        assert!((r[0] - 1.0).abs() < 1e-4);
-        assert!((r[1] - 0.0).abs() < 1e-4);
-        assert!((r[2] - 0.0).abs() < 1e-4);
-
-        // Pitch clamping test: [-1.5, 1.5]
-        free_cam.rotate(0.0, 3.0);
-        assert_eq!(free_cam.pitch, 1.5);
-        free_cam.rotate(0.0, -5.0);
-        assert_eq!(free_cam.pitch, -1.5);
-        free_cam.pitch = 0.0;
-
-        // Translation test: move forward 1 unit (move_vec = [0.0, 0.0, 1.0])
-        let initial_eye = free_cam.eye;
-        free_cam.translate([0.0, 0.0, 1.0], 0.1); // speed is 10.0, dist = 1.0 forward (Z - 1.0)
-        assert!((free_cam.eye[0] - initial_eye[0]).abs() < 1e-4);
-        assert!((free_cam.eye[1] - initial_eye[1]).abs() < 1e-4);
-        assert!((free_cam.eye[2] - (initial_eye[2] - 1.0)).abs() < 1e-4);
-
-        // Apply to camera test
-        let mut cam = Camera::new(16.0 / 9.0);
-        free_cam.apply_to_camera(&mut cam);
-        assert_eq!(cam.eye, free_cam.eye);
-        assert!((cam.target[0] - free_cam.eye[0]).abs() < 1e-4);
-        assert!((cam.target[1] - free_cam.eye[1]).abs() < 1e-4);
-        assert!((cam.target[2] - (free_cam.eye[2] - 1.0)).abs() < 1e-4);
+    fn test_free_cam_state() {
+        let free_cam = FreeCamState::default();
+        assert!(!free_cam.enabled);
+        assert_eq!(free_cam.speed, 15.0);
     }
 }

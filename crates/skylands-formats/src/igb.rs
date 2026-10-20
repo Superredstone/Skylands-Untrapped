@@ -138,6 +138,7 @@ pub enum AttrFormat {
     PackedI8x3Normal, // 3 x i8 normal, scaled by 1.0 / 127.0
     PackedI8x4Color,  // 4 x u8 or i8 color normalized
     U16x2UV,          // 2 x u16 UV, scaled by 1.0 / (1 << frac_bits) or 1.0 / 65535.0
+    Float16x2UV,      // 2 x IEEE-754 half-float (f16) UV
     PackedU8x4,       // 4 x u8 indices or weights
     PackedU16x4,      // 4 x u16 indices
     Unknown(u32),
@@ -995,6 +996,28 @@ impl IgbModel {
         }
     }
 
+    pub fn stats(&self) -> (usize, usize, usize) {
+        let mut vertex_count = 0;
+        let mut triangle_count = 0;
+
+        for m in &self.meshes {
+            vertex_count += m.vertices.len();
+            triangle_count += m.indices.len() / 3;
+        }
+
+        for g in &self.geometries {
+            if let Some(m) = &g.mesh {
+                if !self.meshes.iter().any(|mesh| std::ptr::eq(mesh, m)) {
+                    vertex_count += m.vertices.len();
+                    triangle_count += m.indices.len() / 3;
+                }
+            }
+        }
+
+        let bone_count = self.skeletons.first().map(|s| s.bones.len()).unwrap_or(0);
+        (vertex_count, triangle_count, bone_count)
+    }
+
     #[inline]
     fn read_u32(buf: &[u8], offset: usize, endian: IgbEndian) -> u32 {
         if offset + 4 > buf.len() {
@@ -1025,6 +1048,37 @@ impl IgbModel {
         match endian {
             IgbEndian::Little => LittleEndian::read_i16(&buf[offset..offset + 2]),
             IgbEndian::Big => BigEndian::read_i16(&buf[offset..offset + 2]),
+        }
+    }
+
+    #[inline]
+    pub fn half_to_f32(h: u16) -> f32 {
+        let sign = (h >> 15) & 0x0001;
+        let exp = (h >> 10) & 0x001f;
+        let frac = h & 0x03ff;
+
+        let val = if exp == 0 {
+            if frac == 0 {
+                0.0f32
+            } else {
+                // Subnormal
+                (frac as f32 / 1024.0f32) * 2.0f32.powi(-14)
+            }
+        } else if exp == 31 {
+            if frac == 0 {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            }
+        } else {
+            // Normalized
+            (1.0f32 + frac as f32 / 1024.0f32) * 2.0f32.powi(exp as i32 - 15)
+        };
+
+        if sign != 0 {
+            -val
+        } else {
+            val
         }
     }
 
@@ -1090,8 +1144,9 @@ impl IgbModel {
                 4 => AttrFormat::PackedI8x3Normal,
                 5 => AttrFormat::PackedI8x4Color,
                 6 => AttrFormat::U16x2UV,
-                7 => AttrFormat::PackedU8x4,
-                8 => AttrFormat::PackedU16x4,
+                7 => AttrFormat::Float16x2UV,
+                8 => AttrFormat::PackedU8x4,
+                9 => AttrFormat::PackedU16x4,
                 other => AttrFormat::Unknown(other),
             };
 
@@ -1279,6 +1334,11 @@ impl IgbModel {
                                 Self::read_u16(slice, aoff, endian) as f32 * scale,
                                 Self::read_u16(slice, aoff + 2, endian) as f32 * scale,
                             ];
+                        }
+                        AttrFormat::Float16x2UV if aoff + 4 <= slice.len() => {
+                            let u_half = Self::read_u16(slice, aoff, endian);
+                            let v_half = Self::read_u16(slice, aoff + 2, endian);
+                            vert.uv = [Self::half_to_f32(u_half), Self::half_to_f32(v_half)];
                         }
                         _ => {}
                     },
@@ -2016,19 +2076,102 @@ impl IgbModel {
             });
         }
 
-        // Section 0 is string table (TSTR / RTST)
+        #[derive(Debug, Clone)]
+        pub struct IgzFixupTable {
+            pub tag: [u8; 4],
+            pub count: u32,
+            pub size: u32,
+            pub offset: usize,
+        }
+
+        #[allow(unused_variables)]
+        let _ = |t: &IgzFixupTable| {
+            let _ = (t.tag, t.count, t.size, t.offset);
+        };
+
+        let mut _fixup_tables = Vec::new();
         let mut string_table = Vec::new();
+        let mut type_table = Vec::new();
+
         if let Some(sec0) = sections.first() {
             if sec0.offset < data.len() {
                 let end = (sec0.offset + sec0.size).min(data.len());
-                let str_data = &data[sec0.offset..end];
-                for s in str_data.split(|&b| b == 0) {
-                    if let Ok(st) = std::str::from_utf8(s) {
-                        let trimmed = st.trim();
-                        if trimmed.len() >= 2
-                            && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ')
-                        {
-                            string_table.push(trimmed.to_string());
+                let sec0_data = &data[sec0.offset..end];
+
+                // Scan Section 0 for known Alchemy fixup tables:
+                // TSTR / RTST (strings), TMET / TEMT (types), TDEP / PEDT (dependencies),
+                // RVTB / BTVR (object vtables), EXID / DIXE (external IDs)
+                let mut pos = 0;
+                while pos + 16 <= sec0_data.len() {
+                    let mut tag = [0u8; 4];
+                    tag.copy_from_slice(&sec0_data[pos..pos + 4]);
+                    let is_match = matches!(
+                        &tag,
+                        b"TSTR"
+                            | b"RTST"
+                            | b"TMET"
+                            | b"TEMT"
+                            | b"TDEP"
+                            | b"PEDT"
+                            | b"RVTB"
+                            | b"BTVR"
+                            | b"EXID"
+                            | b"DIXE"
+                    );
+
+                    if is_match {
+                        let count = Self::read_u32(sec0_data, pos + 4, endian);
+                        let size = Self::read_u32(sec0_data, pos + 8, endian);
+                        if (size as usize) <= sec0_data.len().saturating_sub(pos + 16) {
+                            _fixup_tables.push(IgzFixupTable {
+                                tag,
+                                count,
+                                size,
+                                offset: sec0.offset + pos + 16,
+                            });
+
+                            let payload_start = pos + 16;
+                            let payload_end = (payload_start + size as usize).min(sec0_data.len());
+                            let payload = &sec0_data[payload_start..payload_end];
+
+                            if tag == *b"TSTR" || tag == *b"RTST" {
+                                for s in payload.split(|&b| b == 0) {
+                                    if let Ok(st) = std::str::from_utf8(s) {
+                                        let trimmed = st.trim();
+                                        if !trimmed.is_empty() {
+                                            string_table.push(trimmed.to_string());
+                                        }
+                                    }
+                                }
+                            } else if tag == *b"TMET" || tag == *b"TEMT" {
+                                for s in payload.split(|&b| b == 0) {
+                                    if let Ok(st) = std::str::from_utf8(s) {
+                                        let trimmed = st.trim();
+                                        if !trimmed.is_empty() {
+                                            type_table.push(trimmed.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
+                            pos += 16 + (size as usize);
+                            pos = (pos + 3) & !3;
+                            continue;
+                        }
+                    }
+
+                    pos += 4;
+                }
+
+                if string_table.is_empty() {
+                    for s in sec0_data.split(|&b| b == 0) {
+                        if let Ok(st) = std::str::from_utf8(s) {
+                            let trimmed = st.trim();
+                            if trimmed.len() >= 2
+                                && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+                            {
+                                string_table.push(trimmed.to_string());
+                            }
                         }
                     }
                 }
@@ -2098,6 +2241,7 @@ impl IgbModel {
         }
 
         if meshes.is_empty() {
+            // Check for raw vertex streams with standard strides (0x10, 0x14, 0x18, 0x20, 0x24, 0x30)
             for (sec_idx, sec) in sections.iter().enumerate().skip(2) {
                 if sec.offset >= data.len() || sec.size == 0 || sec.size > data.len() {
                     continue;
@@ -2105,38 +2249,117 @@ impl IgbModel {
                 let end = (sec.offset + sec.size).min(data.len());
                 let sec_data = &data[sec.offset..end];
 
+                // Attempt decoding vertex stream with half-float UVs and standard strides
                 let mut extracted_verts = Vec::new();
-                let mut i = 0;
-                while i + 12 <= sec_data.len() {
-                    let x = Self::read_f32(sec_data, i, endian);
-                    let y = Self::read_f32(sec_data, i + 4, endian);
-                    let z = Self::read_f32(sec_data, i + 8, endian);
+                for &stride in &[0x30usize, 0x24, 0x20, 0x18, 0x14, 0x10] {
+                    if sec_data.len() < stride * 3 {
+                        continue;
+                    }
+                    let count = (sec_data.len() / stride).min(4000);
+                    let mut candidate_verts = Vec::with_capacity(count);
+                    let mut valid = true;
 
-                    if x.is_finite()
-                        && y.is_finite()
-                        && z.is_finite()
-                        && x.abs() < 2000.0
-                        && y.abs() < 1000.0
-                        && z.abs() < 2000.0
-                    {
-                        if x == 0.0 && y == 0.0 && z == 0.0 && extracted_verts.is_empty() {
-                            i += 4;
-                            continue;
+                    for i in 0..count {
+                        let off = i * stride;
+                        let x = Self::read_f32(sec_data, off, endian);
+                        let y = Self::read_f32(sec_data, off + 4, endian);
+                        let z = Self::read_f32(sec_data, off + 8, endian);
+
+                        if !x.is_finite()
+                            || !y.is_finite()
+                            || !z.is_finite()
+                            || x.abs() > 2000.0
+                            || y.abs() > 1000.0
+                            || z.abs() > 2000.0
+                        {
+                            valid = false;
+                            break;
                         }
-                        extracted_verts.push(IgbVertex {
+
+                        let mut normal = [0.0f32, 1.0f32, 0.0f32];
+                        let mut uv = [0.0f32, 0.0f32];
+
+                        if stride >= 0x18 {
+                            let nx = Self::read_f32(sec_data, off + 12, endian);
+                            let ny = Self::read_f32(sec_data, off + 16, endian);
+                            let nz = Self::read_f32(sec_data, off + 20, endian);
+                            if nx.is_finite()
+                                && ny.is_finite()
+                                && nz.is_finite()
+                                && (nx * nx + ny * ny + nz * nz).sqrt() > 0.1
+                            {
+                                normal = [nx, ny, nz];
+                            }
+                        }
+
+                        if stride == 0x14 || stride == 0x18 || stride == 0x20 {
+                            // Half-float UV at offset 12 or 24
+                            let uv_off = if stride == 0x14 || stride == 0x18 {
+                                12
+                            } else {
+                                24
+                            };
+                            if uv_off + 4 <= stride {
+                                let uh = Self::read_u16(sec_data, off + uv_off, endian);
+                                let vh = Self::read_u16(sec_data, off + uv_off + 2, endian);
+                                uv = [Self::half_to_f32(uh), Self::half_to_f32(vh)];
+                            }
+                        } else if stride >= 0x24 {
+                            uv = [
+                                Self::read_f32(sec_data, off + 24, endian),
+                                Self::read_f32(sec_data, off + 28, endian),
+                            ];
+                        }
+
+                        candidate_verts.push(IgbVertex {
                             position: [x, y, z],
-                            normal: [0.0, 1.0, 0.0],
-                            uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
+                            normal,
+                            uv,
                             color: [0.8, 0.8, 0.82, 1.0],
                             bone_indices: [0, 0, 0, 0],
                             bone_weights: [1.0, 0.0, 0.0, 0.0],
                         });
-                        i += 12;
-                        if extracted_verts.len() >= 4000 {
-                            break;
+                    }
+
+                    if valid && candidate_verts.len() >= 3 {
+                        extracted_verts = candidate_verts;
+                        break;
+                    }
+                }
+
+                if extracted_verts.is_empty() {
+                    let mut i = 0;
+                    while i + 12 <= sec_data.len() {
+                        let x = Self::read_f32(sec_data, i, endian);
+                        let y = Self::read_f32(sec_data, i + 4, endian);
+                        let z = Self::read_f32(sec_data, i + 8, endian);
+
+                        if x.is_finite()
+                            && y.is_finite()
+                            && z.is_finite()
+                            && x.abs() < 2000.0
+                            && y.abs() < 1000.0
+                            && z.abs() < 2000.0
+                        {
+                            if x == 0.0 && y == 0.0 && z == 0.0 && extracted_verts.is_empty() {
+                                i += 4;
+                                continue;
+                            }
+                            extracted_verts.push(IgbVertex {
+                                position: [x, y, z],
+                                normal: [0.0, 1.0, 0.0],
+                                uv: [(x * 0.05).fract().abs(), (z * 0.05).fract().abs()],
+                                color: [0.8, 0.8, 0.82, 1.0],
+                                bone_indices: [0, 0, 0, 0],
+                                bone_weights: [1.0, 0.0, 0.0, 0.0],
+                            });
+                            i += 12;
+                            if extracted_verts.len() >= 4000 {
+                                break;
+                            }
+                        } else {
+                            i += 4;
                         }
-                    } else {
-                        i += 4;
                     }
                 }
 
@@ -2215,10 +2438,45 @@ impl IgbModel {
                 || lower.contains("_j_")
         };
 
+        // Rigging & skeleton: scan for bone definitions across string table, type table, and section 1
         let mut bone_candidates = Vec::new();
-        for name in &string_table {
+        for name in string_table.iter().chain(type_table.iter()) {
             if is_bone_name(name) && !bone_candidates.contains(name) {
                 bone_candidates.push(name.clone());
+            }
+        }
+
+        // Also search section 1 (mesh / actor objects) for bone names (e.g. Havok J_root, J_head, etc.)
+        if let Some(sec1) = sections.get(1) {
+            let start = sec1.offset;
+            let end = (sec1.offset + sec1.size).min(data.len());
+            if start < end {
+                let sec1_data = &data[start..end];
+                let mut p = 0;
+                while p < sec1_data.len() {
+                    if (sec1_data[p] == b'J' || sec1_data[p] == b'j')
+                        && p + 3 < sec1_data.len()
+                        && sec1_data[p + 1] == b'_'
+                    {
+                        let mut end_p = p + 2;
+                        while end_p < sec1_data.len()
+                            && (sec1_data[end_p].is_ascii_alphanumeric()
+                                || sec1_data[end_p] == b'_')
+                        {
+                            end_p += 1;
+                        }
+                        if let Ok(name_str) = std::str::from_utf8(&sec1_data[p..end_p]) {
+                            if is_bone_name(name_str)
+                                && !bone_candidates.contains(&name_str.to_string())
+                            {
+                                bone_candidates.push(name_str.to_string());
+                            }
+                        }
+                        p = end_p;
+                    } else {
+                        p += 1;
+                    }
+                }
             }
         }
 
@@ -2234,14 +2492,24 @@ impl IgbModel {
         let mut bone_world_pos: Vec<[f32; 3]> = Vec::new();
 
         if !bone_candidates.is_empty() {
-            let mut root_idx = 0usize;
+            // Ensure first bone is always the root bone
+            if let Some(pos) = bone_candidates
+                .iter()
+                .position(|n| n.to_ascii_lowercase().contains("root"))
+            {
+                if pos != 0 {
+                    let root_name = bone_candidates.remove(pos);
+                    bone_candidates.insert(0, root_name);
+                }
+            }
+
+            let root_idx = 0usize;
             let mut pelvis_idx = None;
             let mut spine_idx = None;
 
             for (i, name) in bone_candidates.iter().enumerate() {
                 let lower = name.to_ascii_lowercase();
-                let (parent, wpos) = if lower.contains("root") || i == 0 {
-                    root_idx = i;
+                let (parent, wpos) = if i == 0 {
                     (None, [cx, y0, cz])
                 } else if lower.contains("pelvis") {
                     pelvis_idx = Some(i);
@@ -2271,9 +2539,21 @@ impl IgbModel {
                         };
                     (pelvis_idx.or(Some(root_idx)), [cx + dx, y0 + 0.15 * h, cz])
                 } else {
-                    let p = if i > 0 { i - 1 } else { root_idx };
+                    let p = if i > 0 {
+                        (i - 1).min(bone_world_pos.len().saturating_sub(1))
+                    } else {
+                        root_idx
+                    };
                     let t = (i as f32) / (bone_candidates.len().max(1) as f32);
                     (Some(p), [cx, y0 + t * h, cz])
+                };
+
+                let parent = if i == 0 {
+                    None
+                } else {
+                    parent
+                        .filter(|&p| p < bone_world_pos.len())
+                        .or(Some(root_idx))
                 };
 
                 let local_transform = match parent {
@@ -2544,77 +2824,215 @@ impl IgbModel {
                             i += 4;
                         }
                     } else {
-                        // Index8 attributes
-                        if i >= data.len() {
-                            break;
-                        }
-                        let pos_idx = data[i] as usize;
-                        i += 1;
-
-                        let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
-                        if pos_off + 6 <= data.len() {
-                            let sx = match endian {
-                                IgbEndian::Big => {
-                                    i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
-                                }
-                                IgbEndian::Little => {
-                                    i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
-                                }
-                            };
-                            let sy = match endian {
-                                IgbEndian::Big => {
-                                    i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                }
-                                IgbEndian::Little => {
-                                    i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                }
-                            };
-                            let sz = match endian {
-                                IgbEndian::Big => {
-                                    i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                }
-                                IgbEndian::Little => {
-                                    i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                }
-                            };
-                            pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
-                        }
-
-                        if nrm_fmt != 0 && i < data.len() {
-                            let nrm_idx = data[i] as usize;
-                            i += 1;
-                            let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
-                            if nrm_off + 3 <= data.len() {
-                                nrm = [
-                                    (data[nrm_off] as i8) as f32 / 127.0,
-                                    (data[nrm_off + 1] as i8) as f32 / 127.0,
-                                    (data[nrm_off + 2] as i8) as f32 / 127.0,
-                                ];
+                        // Index8 or Index16 attributes
+                        if pos_fmt == 3 {
+                            // Index16
+                            if i + 2 > data.len() {
+                                break;
                             }
-                        }
+                            let pos_idx = match endian {
+                                IgbEndian::Big => {
+                                    u16::from_be_bytes([data[i], data[i + 1]]) as usize
+                                }
+                                IgbEndian::Little => {
+                                    u16::from_le_bytes([data[i], data[i + 1]]) as usize
+                                }
+                            };
+                            i += 2;
 
-                        if tex0_fmt != 0 && i < data.len() {
-                            let tex_idx = data[i] as usize;
+                            let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
+                            if pos_off + 6 <= data.len() {
+                                let sx = match endian {
+                                    IgbEndian::Big => {
+                                        i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
+                                    }
+                                    IgbEndian::Little => {
+                                        i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
+                                    }
+                                };
+                                let sy = match endian {
+                                    IgbEndian::Big => {
+                                        i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
+                                    }
+                                    IgbEndian::Little => {
+                                        i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
+                                    }
+                                };
+                                let sz = match endian {
+                                    IgbEndian::Big => {
+                                        i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                    }
+                                    IgbEndian::Little => {
+                                        i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                    }
+                                };
+                                pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
+                            }
+
+                            if nrm_fmt == 3 && i + 2 <= data.len() {
+                                let nrm_idx = match endian {
+                                    IgbEndian::Big => {
+                                        u16::from_be_bytes([data[i], data[i + 1]]) as usize
+                                    }
+                                    IgbEndian::Little => {
+                                        u16::from_le_bytes([data[i], data[i + 1]]) as usize
+                                    }
+                                };
+                                i += 2;
+                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
+                                if nrm_off + 3 <= data.len() {
+                                    nrm = [
+                                        (data[nrm_off] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
+                                    ];
+                                }
+                            } else if nrm_fmt != 0 && i < data.len() {
+                                let nrm_idx = data[i] as usize;
+                                i += 1;
+                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
+                                if nrm_off + 3 <= data.len() {
+                                    nrm = [
+                                        (data[nrm_off] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
+                                    ];
+                                }
+                            }
+
+                            if tex0_fmt == 3 && i + 2 <= data.len() {
+                                let tex_idx = match endian {
+                                    IgbEndian::Big => {
+                                        u16::from_be_bytes([data[i], data[i + 1]]) as usize
+                                    }
+                                    IgbEndian::Little => {
+                                        u16::from_le_bytes([data[i], data[i + 1]]) as usize
+                                    }
+                                };
+                                i += 2;
+                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
+                                if tex_off + 4 <= data.len() {
+                                    let tu = match endian {
+                                        IgbEndian::Big => {
+                                            u16::from_be_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                        IgbEndian::Little => {
+                                            u16::from_le_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                    };
+                                    let tv = match endian {
+                                        IgbEndian::Big => u16::from_be_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                        IgbEndian::Little => u16::from_le_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                    };
+                                    uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                                }
+                            } else if tex0_fmt != 0 && i < data.len() {
+                                let tex_idx = data[i] as usize;
+                                i += 1;
+                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
+                                if tex_off + 4 <= data.len() {
+                                    let tu = match endian {
+                                        IgbEndian::Big => {
+                                            u16::from_be_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                        IgbEndian::Little => {
+                                            u16::from_le_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                    };
+                                    let tv = match endian {
+                                        IgbEndian::Big => u16::from_be_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                        IgbEndian::Little => u16::from_le_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                    };
+                                    uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                                }
+                            }
+                        } else {
+                            // Index8
+                            if i >= data.len() {
+                                break;
+                            }
+                            let pos_idx = data[i] as usize;
                             i += 1;
-                            let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
-                            if tex_off + 4 <= data.len() {
-                                let tu = match endian {
+
+                            let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
+                            if pos_off + 6 <= data.len() {
+                                let sx = match endian {
                                     IgbEndian::Big => {
-                                        u16::from_be_bytes([data[tex_off], data[tex_off + 1]])
+                                        i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
                                     }
                                     IgbEndian::Little => {
-                                        u16::from_le_bytes([data[tex_off], data[tex_off + 1]])
+                                        i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
                                     }
                                 };
-                                let tv = match endian {
+                                let sy = match endian {
                                     IgbEndian::Big => {
-                                        u16::from_be_bytes([data[tex_off + 2], data[tex_off + 3]])
+                                        i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
                                     }
                                     IgbEndian::Little => {
-                                        u16::from_le_bytes([data[tex_off + 2], data[tex_off + 3]])
+                                        i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
                                     }
                                 };
-                                uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                                let sz = match endian {
+                                    IgbEndian::Big => {
+                                        i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                    }
+                                    IgbEndian::Little => {
+                                        i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
+                                    }
+                                };
+                                pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
+                            }
+
+                            if nrm_fmt != 0 && i < data.len() {
+                                let nrm_idx = data[i] as usize;
+                                i += 1;
+                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
+                                if nrm_off + 3 <= data.len() {
+                                    nrm = [
+                                        (data[nrm_off] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
+                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
+                                    ];
+                                }
+                            }
+
+                            if tex0_fmt != 0 && i < data.len() {
+                                let tex_idx = data[i] as usize;
+                                i += 1;
+                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
+                                if tex_off + 4 <= data.len() {
+                                    let tu = match endian {
+                                        IgbEndian::Big => {
+                                            u16::from_be_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                        IgbEndian::Little => {
+                                            u16::from_le_bytes([data[tex_off], data[tex_off + 1]])
+                                        }
+                                    };
+                                    let tv = match endian {
+                                        IgbEndian::Big => u16::from_be_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                        IgbEndian::Little => u16::from_le_bytes([
+                                            data[tex_off + 2],
+                                            data[tex_off + 3],
+                                        ]),
+                                    };
+                                    uv = [tu as f32 / 1024.0, tv as f32 / 1024.0];
+                                }
                             }
                         }
                     }
@@ -3687,5 +4105,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_extract_real_character_spyro_mesh_and_skeleton() {
+        let p1 = std::path::Path::new("assets/files/character/016_Spyro.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/016_Spyro.bld");
+        let bytes = if p1.exists() {
+            std::fs::read(p1).unwrap()
+        } else if p2.exists() {
+            std::fs::read(p2).unwrap()
+        } else {
+            create_test_character_igz(&[
+                "j_root", "j_pelvis", "j_spine", "j_head", "j_wing_l", "j_wing_r", "j_tail",
+            ])
+        };
+
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        assert!(!model.meshes.is_empty(), "Spyro must have meshes");
+        let (min_pt, max_pt) = model.vertex_bounds();
+        let height = max_pt[1] - min_pt[1];
+        assert!(height > 0.0, "Spyro mesh height must be positive");
+        assert!(min_pt[0].is_finite() && max_pt[0].is_finite());
+
+        let total_verts: usize = model.meshes.iter().map(|m| m.vertices.len()).sum();
+        let total_indices: usize = model.meshes.iter().map(|m| m.indices.len()).sum();
+        assert!(total_verts >= 3, "Spyro vertices must be >= 3");
+        assert!(total_indices >= 3, "Spyro indices must be >= 3");
+
+        for mesh in &model.meshes {
+            for v in &mesh.vertices {
+                assert!(
+                    v.position[0].is_finite()
+                        && v.position[1].is_finite()
+                        && v.position[2].is_finite()
+                );
+                assert!(
+                    v.normal[0].is_finite() && v.normal[1].is_finite() && v.normal[2].is_finite()
+                );
+                assert!(v.uv[0].is_finite() && v.uv[1].is_finite());
+                let sum: f32 = v.bone_weights.iter().sum();
+                assert!((sum - 1.0).abs() < 1e-3, "Spyro weights must sum to ~1.0");
+            }
+            for &idx in &mesh.indices {
+                assert!(
+                    (idx as usize) < mesh.vertices.len(),
+                    "Index in vertex bounds"
+                );
+            }
+        }
+
+        assert!(
+            !model.skeletons.is_empty(),
+            "Spyro skeleton must be extracted"
+        );
+        let skel = &model.skeletons[0];
+        assert!(skel.bones.len() >= 6, "Spyro skeleton must have >= 6 bones");
+        assert!(skel.bones[0].parent.is_none(), "Root bone has no parent");
+        for (i, b) in skel.bones.iter().enumerate().skip(1) {
+            assert!(
+                b.parent.is_some_and(|p| p < skel.bones.len()),
+                "Spyro bone {} parent must be valid",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_half_float_decoding() {
+        assert_eq!(IgbModel::half_to_f32(0x0000), 0.0);
+        assert_eq!(IgbModel::half_to_f32(0x8000), -0.0);
+        assert_eq!(IgbModel::half_to_f32(0x3c00), 1.0);
+        assert_eq!(IgbModel::half_to_f32(0xbc00), -1.0);
+        assert_eq!(IgbModel::half_to_f32(0x3800), 0.5);
+        assert_eq!(IgbModel::half_to_f32(0xc000), -2.0);
+        assert!(
+            IgbModel::half_to_f32(0x7c00).is_infinite()
+                && IgbModel::half_to_f32(0x7c00).is_sign_positive()
+        );
+        assert!(
+            IgbModel::half_to_f32(0xfc00).is_infinite()
+                && IgbModel::half_to_f32(0xfc00).is_sign_negative()
+        );
+        assert!(IgbModel::half_to_f32(0x7c01).is_nan());
+    }
+
+    #[test]
+    fn test_fnv1a_32_archive_spec() {
+        use crate::archive::{hash_crc32, hash_fnv1a, hash_path};
+        // Verify FNV-1a matches expected hashes from igArchive wiki
+        assert_eq!(hash_fnv1a("level.bld"), 0xba91d879);
+        assert_eq!(hash_fnv1a("ENGLISH.pak"), 0xe115e6dd);
+        assert_eq!(hash_fnv1a("GERMAN.pak"), 0xe57e6515);
+        assert_eq!(hash_path("level.bld"), 0xba91d879);
+        assert_eq!(hash_crc32("level.bld"), 0xc73f6fdc);
     }
 }

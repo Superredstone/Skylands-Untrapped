@@ -19,6 +19,9 @@ Host runs NixOS. Standard tools require `nix-shell` (configured in `shell.nix` w
 - Always format code with `cargo fmt` and lint with `cargo clippy` at the end of a prompt.
 - The game must be deterministic.
 - Must implement everything that is described in README.md as objective.
+- All the files for the project are in this folder, don't look outside.
+- For extracting game files take ispiration from "https://github.com/NefariousTechSupport/igArchiveExtractor".
+- igArchive format is described here "https://skylanderswiki.miraheze.org/wiki/IgArchive".
 
 ## Architecture
 - `crates/skylands-formats`: Alchemy v8.1.0 file formats (`igArchive` `.arc`/`.bld`, `igIGBFile`, Big/Little Endian serialization).

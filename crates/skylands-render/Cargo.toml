@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu = { workspace = true }
-winit = { workspace = true }
-bytemuck = { workspace = true }
-pollster = { workspace = true }
+bevy = { workspace = true }
+skylands-formats = { workspace = true }
+skylands-core = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-skylands-formats = { workspace = true }

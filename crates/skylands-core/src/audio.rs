@@ -35,6 +35,7 @@ pub fn resample_to_8khz_u8(clip: &AudioClip) -> Vec<u8> {
     out
 }
 
+#[derive(Debug)]
 pub struct PortalSpeakerSink {
     seq: u8,
     queue: VecDeque<[u8; REPORT_SIZE]>,
@@ -208,11 +209,13 @@ impl AudioEngine {
         self.system.play_sfx_tone(1320.0, 0.12);
     }
 
-    pub fn on_hero_attack(&mut self, kind: crate::actor::AttackKind) {
+    pub fn on_hero_attack(&mut self, kind: crate::components::AttackKind) {
         match kind {
-            crate::actor::AttackKind::PrimaryMelee => self.system.play_sfx_tone(520.0, 0.08),
-            crate::actor::AttackKind::SecondarySweep => self.system.play_sfx_tone(380.0, 0.15),
-            crate::actor::AttackKind::SpecialProjectile => self.system.play_sfx_tone(740.0, 0.12),
+            crate::components::AttackKind::PrimaryMelee => self.system.play_sfx_tone(520.0, 0.08),
+            crate::components::AttackKind::SecondarySweep => self.system.play_sfx_tone(380.0, 0.15),
+            crate::components::AttackKind::SpecialProjectile => {
+                self.system.play_sfx_tone(740.0, 0.12)
+            }
         }
     }
 

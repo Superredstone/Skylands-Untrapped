@@ -91,10 +91,24 @@ pub struct ArchiveReader<R: Read + Seek> {
 }
 
 pub fn hash_path(path: &str) -> u32 {
+    hash_fnv1a(path)
+}
+
+pub fn hash_crc32(path: &str) -> u32 {
     let normalized = path.replace('\\', "/");
     let mut hasher = Hasher::new();
     hasher.update(normalized.as_bytes());
     hasher.finalize()
+}
+
+pub fn hash_fnv1a(path: &str) -> u32 {
+    let normalized = path.replace('\\', "/");
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in normalized.as_bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
@@ -440,17 +454,35 @@ impl<R: Read + Seek> ArchiveReader<R> {
         if let Some(&hash) = self.name_to_hash.get(&lower) {
             return self.read_file_by_hash(hash);
         }
-        let hash = hash_path(path);
-        self.read_file_by_hash(hash)
+        let fnv = hash_fnv1a(&normalized);
+        if let Ok(data) = self.read_file_by_hash(fnv) {
+            return Ok(data);
+        }
+        let fnv_lower = hash_fnv1a(&lower);
+        if let Ok(data) = self.read_file_by_hash(fnv_lower) {
+            return Ok(data);
+        }
+        let crc = hash_crc32(&normalized);
+        if let Ok(data) = self.read_file_by_hash(crc) {
+            return Ok(data);
+        }
+        let crc_lower = hash_crc32(&lower);
+        self.read_file_by_hash(crc_lower)
     }
 
     pub fn contains_path(&self, path: &str) -> bool {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
-        let hash = hash_path(path);
+        let fnv = hash_fnv1a(&normalized);
+        let fnv_lower = hash_fnv1a(&lower);
+        let crc = hash_crc32(&normalized);
+        let crc_lower = hash_crc32(&lower);
         self.name_to_hash.contains_key(&normalized)
             || self.name_to_hash.contains_key(&lower)
-            || self.entries.contains_key(&hash)
+            || self.entries.contains_key(&fnv)
+            || self.entries.contains_key(&fnv_lower)
+            || self.entries.contains_key(&crc)
+            || self.entries.contains_key(&crc_lower)
     }
 
     pub fn list_files(&self) -> Vec<&str> {
@@ -570,12 +602,20 @@ impl ArchiveMount {
                 return archive.read_file_by_hash(hash);
             }
         }
-        let hash = hash_path(&normalized);
-        if let Ok(data) = self.read_file_by_hash(hash) {
+        let fnv = hash_fnv1a(&normalized);
+        if let Ok(data) = self.read_file_by_hash(fnv) {
             return Ok(data);
         }
-        let hash_lower = hash_path(&lower);
-        self.read_file_by_hash(hash_lower)
+        let fnv_lower = hash_fnv1a(&lower);
+        if let Ok(data) = self.read_file_by_hash(fnv_lower) {
+            return Ok(data);
+        }
+        let crc = hash_crc32(&normalized);
+        if let Ok(data) = self.read_file_by_hash(crc) {
+            return Ok(data);
+        }
+        let crc_lower = hash_crc32(&lower);
+        self.read_file_by_hash(crc_lower)
     }
 
     pub fn contains_path(&self, path: &str) -> bool {
@@ -618,13 +658,17 @@ impl ArchiveMount {
             }
         }
 
-        let hash = hash_path(&normalized);
-        let hash_lower = hash_path(&lower);
+        let fnv = hash_fnv1a(&normalized);
+        let fnv_lower = hash_fnv1a(&lower);
+        let crc = hash_crc32(&normalized);
+        let crc_lower = hash_crc32(&lower);
         for archive in &self.archives {
             if archive.name_to_hash.contains_key(&normalized)
                 || archive.name_to_hash.contains_key(&lower)
-                || archive.entries.contains_key(&hash)
-                || archive.entries.contains_key(&hash_lower)
+                || archive.entries.contains_key(&fnv)
+                || archive.entries.contains_key(&fnv_lower)
+                || archive.entries.contains_key(&crc)
+                || archive.entries.contains_key(&crc_lower)
             {
                 return true;
             }

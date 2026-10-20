@@ -1,13 +1,3 @@
-use crate::actor::World;
-use crate::audio::AudioEngine;
-use crate::state::{GameState, GameStateMachine};
-use skylands_portal::protocol::{
-    encode_color_packet, encode_query_packet, encode_trap_light_packet, PortalEvent, PortalZone,
-    REPORT_SIZE,
-};
-use skylands_portal::tag::SkylanderTag;
-use std::collections::HashMap;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Element {
     Air,
@@ -22,6 +12,20 @@ pub enum Element {
 }
 
 impl Element {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Element::Air => "Air",
+            Element::Life => "Life",
+            Element::Undead => "Undead",
+            Element::Earth => "Earth",
+            Element::Fire => "Fire",
+            Element::Water => "Water",
+            Element::Magic => "Magic",
+            Element::Tech => "Tech",
+            Element::Kaos => "Kaos",
+        }
+    }
+
     pub fn rgb(&self) -> (u8, u8, u8) {
         match self {
             Element::Air => (0, 220, 255),
@@ -39,6 +43,9 @@ impl Element {
 
 pub fn get_character_info(character_id: u16) -> (&'static str, Element) {
     match character_id {
+        14 => ("Gill Grunt", Element::Water),
+        16 => ("Spyro", Element::Magic),
+        19 => ("Trigger Happy", Element::Tech),
         400 => ("Snap Shot", Element::Water),
         401 => ("Food Fight", Element::Life),
         402 => ("Wildfire", Element::Fire),
@@ -46,9 +53,9 @@ pub fn get_character_info(character_id: u16) -> (&'static str, Element) {
         404 => ("Gearshift", Element::Tech),
         405 => ("Krypt King", Element::Undead),
         406 => ("Enigma", Element::Magic),
-        407 => ("Gusto", Element::Air),
+        407 | 450 => ("Gusto", Element::Air),
         1010 => ("Kaos", Element::Kaos),
-        1001 => ("The Gulper", Element::Water),
+        1001 => ("Chompy Mage", Element::Life),
         1002 => ("Wolfgang", Element::Undead),
         1003 => ("Chompy Mage", Element::Life),
         1004 => ("Golden Queen", Element::Earth),
@@ -58,6 +65,30 @@ pub fn get_character_info(character_id: u16) -> (&'static str, Element) {
         1008 => ("Pain-Yatta", Element::Magic),
         3000..=3100 => ("Trap", Element::Kaos),
         _ => ("Unknown Skylander", Element::Magic),
+    }
+}
+
+pub fn resolve_character_id_by_name(name: &str) -> Option<u16> {
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    match clean.as_str() {
+        "snapshot" => Some(400),
+        "foodfight" => Some(401),
+        "wildfire" => Some(402),
+        "wallop" => Some(403),
+        "gearshift" => Some(404),
+        "kryptking" => Some(405),
+        "enigma" => Some(406),
+        "gusto" => Some(407),
+        "spyro" => Some(16),
+        "gillgrunt" => Some(14),
+        "triggerhappy" => Some(19),
+        "kaos" => Some(1010),
+        "chompymage" => Some(1001),
+        _ => None,
     }
 }
 
@@ -79,6 +110,16 @@ pub fn get_character_voice_path(character_id: u16) -> Option<&'static str> {
 pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
     match character_id {
         400 | 462 => return Some("462_Water_Crocky.bld".to_string()),
+        401 => return Some("476_Artichoke.bld".to_string()),
+        402 => return Some("459_Barbarian.bld".to_string()),
+        403 => return Some("457_Earth_Boulderdash.bld".to_string()),
+        404 => return Some("470_Tech_BruteForce.bld".to_string()),
+        405 => return Some("481_Bonesaw.bld".to_string()),
+        406 => return Some("467_Void.bld".to_string()),
+        407 | 450 => return Some("450_Typhoon.bld".to_string()),
+        14 => return Some("014_GillGrunt.bld".to_string()),
+        16 => return Some("016_Spyro.bld".to_string()),
+        19 => return Some("019_GoldenCheat.bld".to_string()),
         1010 => return Some("1010_Kaos.bld".to_string()),
         1001 => return Some("1001_ChompyMage.bld".to_string()),
         _ => {}
@@ -111,38 +152,38 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
             "462_Water_Crocky.bld",
             Some("textures/characters/snapshot.png"),
         ),
+        401 => (
+            "476_Artichoke.bld",
+            Some("textures/characters/foodfight.png"),
+        ),
+        402 => (
+            "459_Barbarian.bld",
+            Some("textures/characters/wildfire.png"),
+        ),
+        403 => (
+            "457_Earth_Boulderdash.bld",
+            Some("textures/characters/wallop.png"),
+        ),
+        404 => (
+            "470_Tech_BruteForce.bld",
+            Some("textures/characters/gearshift.png"),
+        ),
+        405 => ("481_Bonesaw.bld", Some("textures/characters/kryptking.png")),
+        406 => ("467_Void.bld", Some("textures/characters/enigma.png")),
+        407 | 450 => ("450_Typhoon.bld", Some("textures/characters/gusto.png")),
+        14 => (
+            "014_GillGrunt.bld",
+            Some("textures/characters/gillgrunt.png"),
+        ),
+        16 => ("016_Spyro.bld", Some("textures/characters/spyro.png")),
+        19 => (
+            "019_GoldenCheat.bld",
+            Some("textures/characters/triggerhappy.png"),
+        ),
         1010 => ("1010_Kaos.bld", Some("textures/characters/kaos.png")),
         1001 => (
             "1001_ChompyMage.bld",
             Some("textures/characters/chompymage.png"),
-        ),
-        401 => (
-            "models/characters/foodfight.igb",
-            Some("textures/characters/foodfight.png"),
-        ),
-        402 => (
-            "models/characters/wildfire.igb",
-            Some("textures/characters/wildfire.png"),
-        ),
-        403 => (
-            "models/characters/wallop.igb",
-            Some("textures/characters/wallop.png"),
-        ),
-        404 => (
-            "models/characters/gearshift.igb",
-            Some("textures/characters/gearshift.png"),
-        ),
-        405 => (
-            "models/characters/kryptking.igb",
-            Some("textures/characters/kryptking.png"),
-        ),
-        406 => (
-            "models/characters/enigma.igb",
-            Some("textures/characters/enigma.png"),
-        ),
-        407 => (
-            "models/characters/gusto.igb",
-            Some("textures/characters/gusto.png"),
         ),
         1002 => (
             "models/characters/wolfgang.igb",
@@ -180,253 +221,9 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
     }
 }
 
-pub struct PortalGameplay {
-    pub active_tags: HashMap<u8, (PortalZone, SkylanderTag)>,
-    pending_blocks: HashMap<u8, HashMap<u8, [u8; 16]>>,
-}
-
-impl PortalGameplay {
-    pub fn new() -> Self {
-        Self {
-            active_tags: HashMap::new(),
-            pending_blocks: HashMap::new(),
-        }
-    }
-
-    pub fn handle_event(
-        &mut self,
-        event: PortalEvent,
-        world: &mut World,
-        state: &mut GameStateMachine,
-        audio: &mut AudioEngine,
-    ) -> Vec<[u8; REPORT_SIZE]> {
-        let mut outgoing = Vec::new();
-
-        match event {
-            PortalEvent::TagArrived { tag_index, zone } => {
-                outgoing.push(encode_query_packet(tag_index, 0));
-                outgoing.push(encode_query_packet(tag_index, 1));
-                outgoing.push(encode_query_packet(tag_index, 8));
-                self.pending_blocks.insert(tag_index, HashMap::new());
-
-                let is_trap = zone == PortalZone::TrapSlot;
-                let default_tag = SkylanderTag {
-                    uid: [tag_index, 0, 0, 0],
-                    character_id: if is_trap { 3010 } else { 400 },
-                    variant: if is_trap { 1010 } else { 0 },
-                    nickname: String::new(),
-                    xp: 0,
-                    money: 0,
-                    is_trap,
-                    villain_id: if is_trap { Some(1010) } else { None },
-                };
-                let cmds =
-                    self.on_tag_identified(tag_index, zone, default_tag, world, state, audio);
-                outgoing.extend(cmds);
-            }
-            PortalEvent::TagData {
-                tag_index,
-                block,
-                data,
-            } => {
-                if let Some(blocks) = self.pending_blocks.get_mut(&tag_index) {
-                    blocks.insert(block, data);
-                    if blocks.contains_key(&0) && blocks.contains_key(&1) && blocks.contains_key(&8)
-                    {
-                        let b0 = blocks[&0];
-                        let b1 = blocks[&1];
-                        let b8 = blocks[&8];
-                        let parsed = SkylanderTag::parse_blocks(&b0, &b1, &b8);
-                        let zone = if tag_index == 0 {
-                            PortalZone::TrapSlot
-                        } else {
-                            PortalZone::LeftRing
-                        };
-                        let cmds =
-                            self.on_tag_identified(tag_index, zone, parsed, world, state, audio);
-                        outgoing.extend(cmds);
-                    }
-                }
-            }
-            PortalEvent::TagRemoved { tag_index } => {
-                outgoing.extend(self.on_tag_removed(tag_index, world, state));
-            }
-            _ => {}
-        }
-
-        outgoing
-    }
-
-    pub fn on_tag_identified(
-        &mut self,
-        slot: u8,
-        zone: PortalZone,
-        tag: SkylanderTag,
-        world: &mut World,
-        state: &mut GameStateMachine,
-        audio: &mut AudioEngine,
-    ) -> Vec<[u8; REPORT_SIZE]> {
-        // If slot already has an active tag with different character, remove it first
-        let mut cmds = if let Some((_, old_tag)) = self.active_tags.get(&slot) {
-            let old_id = if old_tag.is_trap {
-                old_tag.villain_id.unwrap_or(old_tag.variant)
-            } else {
-                old_tag.character_id
-            };
-            let new_id = if tag.is_trap || zone == PortalZone::TrapSlot {
-                tag.villain_id.unwrap_or(tag.variant)
-            } else {
-                tag.character_id
-            };
-            if old_id != new_id {
-                self.on_tag_removed(slot, world, state)
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        let (name, elem) = get_character_info(tag.character_id);
-
-        if tag.is_trap || zone == PortalZone::TrapSlot {
-            let villain = tag.villain_id.unwrap_or(tag.variant);
-            state.set_state(GameState::VillainCapture {
-                villain_id: villain,
-                progress: 0.0,
-            });
-            audio.on_villain_trapped(villain);
-
-            let (r, g, b) = elem.rgb();
-            cmds.push(encode_trap_light_packet(r, g, b));
-
-            let (model_path, tex_path) = get_character_asset_paths(villain);
-            if world.find_by_character_id(villain).is_none() {
-                world.spawn(
-                    villain,
-                    tag.variant,
-                    name,
-                    [2.5, 0.2, 0.0],
-                    true,
-                    Some(model_path.to_string()),
-                    tex_path.map(|s| s.to_string()),
-                );
-            }
-        } else {
-            let (model_path, tex_path) = get_character_asset_paths(tag.character_id);
-            if world.find_by_character_id(tag.character_id).is_none() {
-                world.spawn(
-                    tag.character_id,
-                    tag.variant,
-                    name,
-                    [0.0, 0.2, 0.0],
-                    false,
-                    Some(model_path.to_string()),
-                    tex_path.map(|s| s.to_string()),
-                );
-                audio.on_hero_summoned();
-            }
-
-            let (r, g, b) = elem.rgb();
-            cmds.push(encode_color_packet(zone, r, g, b));
-        }
-
-        self.active_tags.insert(slot, (zone, tag));
-        cmds
-    }
-
-    pub fn on_tag_removed(
-        &mut self,
-        slot: u8,
-        world: &mut World,
-        state: &mut GameStateMachine,
-    ) -> Vec<[u8; REPORT_SIZE]> {
-        let mut cmds = Vec::new();
-        self.pending_blocks.remove(&slot);
-
-        if let Some((zone, tag)) = self.active_tags.remove(&slot) {
-            if tag.is_trap || zone == PortalZone::TrapSlot {
-                let villain = tag.villain_id.unwrap_or(tag.variant);
-                world.despawn_by_character_id(villain);
-                cmds.push(encode_trap_light_packet(0, 0, 0));
-                if state.is_villain_capture() {
-                    state.set_state(GameState::Hub {
-                        academy_area: "Academy Grounds".into(),
-                    });
-                }
-            } else {
-                world.despawn_by_character_id(tag.character_id);
-                cmds.push(encode_color_packet(zone, 0, 0, 0));
-            }
-        }
-
-        cmds
-    }
-}
-
-impl Default for PortalGameplay {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_hero_tag_spawn_and_lighting() {
-        let mut pg = PortalGameplay::new();
-        let mut world = World::new();
-        let mut state = GameStateMachine::new();
-        let mut audio = AudioEngine::new();
-
-        let event = PortalEvent::TagArrived {
-            tag_index: 1,
-            zone: PortalZone::LeftRing,
-        };
-
-        let cmds = pg.handle_event(event, &mut world, &mut state, &mut audio);
-        assert!(!cmds.is_empty());
-        assert_eq!(world.actors.len(), 1);
-        assert_eq!(world.actors[0].character_id, 400);
-        assert_eq!(
-            world.actors[0].model_path,
-            Some("462_Water_Crocky.bld".to_string())
-        );
-        assert_eq!(
-            world.actors[0].texture_path,
-            Some("textures/characters/snapshot.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_trap_tag_villain_capture() {
-        let mut pg = PortalGameplay::new();
-        let mut world = World::new();
-        let mut state = GameStateMachine::new();
-        let mut audio = AudioEngine::new();
-
-        let event = PortalEvent::TagArrived {
-            tag_index: 0,
-            zone: PortalZone::TrapSlot,
-        };
-
-        let cmds = pg.handle_event(event, &mut world, &mut state, &mut audio);
-        assert!(!cmds.is_empty());
-        assert!(state.is_villain_capture());
-        assert!(audio.portal.is_streaming());
-        assert_eq!(world.actors.len(), 1);
-        assert_eq!(world.actors[0].character_id, 1010);
-        assert_eq!(
-            world.actors[0].model_path,
-            Some("1010_Kaos.bld".to_string())
-        );
-        assert_eq!(
-            world.actors[0].texture_path,
-            Some("textures/characters/kaos.png".to_string())
-        );
-    }
 
     #[test]
     fn test_get_character_asset_paths() {
@@ -451,15 +248,23 @@ mod tests {
         assert_eq!(
             get_character_asset_paths(401),
             (
-                "models/characters/foodfight.igb",
+                "476_Artichoke.bld",
                 Some("textures/characters/foodfight.png")
             )
+        );
+        assert_eq!(
+            get_character_asset_paths(16),
+            ("016_Spyro.bld", Some("textures/characters/spyro.png"))
         );
         assert_eq!(get_character_asset_paths(9999), ("models/hero.igb", None));
 
         assert_eq!(
             resolve_character_model_archive(400),
             Some("462_Water_Crocky.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(401),
+            Some("476_Artichoke.bld".to_string())
         );
         assert_eq!(
             resolve_character_model_archive(1010),
@@ -470,5 +275,10 @@ mod tests {
             Some("1001_ChompyMage.bld".to_string())
         );
         assert!(resolve_character_model_archive(500).is_some());
+
+        assert_eq!(resolve_character_id_by_name("Snap Shot"), Some(400));
+        assert_eq!(resolve_character_id_by_name("food-fight"), Some(401));
+        assert_eq!(resolve_character_id_by_name("spyro"), Some(16));
+        assert_eq!(resolve_character_id_by_name("NonExistent"), None);
     }
 }
