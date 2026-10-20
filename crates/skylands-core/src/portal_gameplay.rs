@@ -306,7 +306,7 @@ impl PortalGameplay {
                     villain,
                     tag.variant,
                     name,
-                    [0.0, 0.2, 0.0],
+                    [2.5, 0.2, 0.0],
                     true,
                     Some(model_path.to_string()),
                     tex_path.map(|s| s.to_string()),

@@ -975,6 +975,26 @@ impl IgbModel {
         })
     }
 
+    pub fn vertex_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        let mut min_pt = [f32::MAX, f32::MAX, f32::MAX];
+        let mut max_pt = [f32::MIN, f32::MIN, f32::MIN];
+        let mut has_pts = false;
+        for m in &self.meshes {
+            for v in &m.vertices {
+                has_pts = true;
+                for c in 0..3 {
+                    min_pt[c] = min_pt[c].min(v.position[c]);
+                    max_pt[c] = max_pt[c].max(v.position[c]);
+                }
+            }
+        }
+        if !has_pts {
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        } else {
+            (min_pt, max_pt)
+        }
+    }
+
     #[inline]
     fn read_u32(buf: &[u8], offset: usize, endian: IgbEndian) -> u32 {
         if offset + 4 > buf.len() {
@@ -3582,6 +3602,8 @@ mod tests {
         };
 
         let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse crocky");
+        let (min_pt, max_pt) = model.vertex_bounds();
+        println!("Crocky bounds: min={:?}, max={:?}, height={}", min_pt, max_pt, max_pt[1] - min_pt[1]);
         assert!(!model.skeletons.is_empty(), "Skeleton must be extracted");
         let skel = &model.skeletons[0];
         assert!(!skel.bones.is_empty(), "Bones must be non-empty");
@@ -3616,6 +3638,8 @@ mod tests {
         };
 
         let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
+        let (min_pt, max_pt) = model.vertex_bounds();
+        println!("Kaos bounds: min={:?}, max={:?}, height={}", min_pt, max_pt, max_pt[1] - min_pt[1]);
         assert!(!model.skeletons.is_empty(), "Kaos skeleton extracted");
         assert!(!model.meshes.is_empty(), "Kaos meshes present");
         for mesh in &model.meshes {

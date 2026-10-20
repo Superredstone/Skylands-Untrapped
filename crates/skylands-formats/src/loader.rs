@@ -136,7 +136,15 @@ impl AssetLoader {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>, AssetError> {
-        let raw = self.load_raw(path)?;
+        let raw = if path.ends_with(".bld") || path.ends_with(".arc") {
+            if let Ok(inner) = self.vfs.read_from_archive(path, "level.bld") {
+                Arc::new(inner)
+            } else {
+                self.load_raw(path)?
+            }
+        } else {
+            self.load_raw(path)?
+        };
         let bytes: &[u8] = if raw.len() >= 64 && &raw[0..4] == b"IGZ\x01" {
             let soff = u32::from_be_bytes([raw[56], raw[57], raw[58], raw[59]]) as usize;
             if soff < raw.len() {

@@ -1274,7 +1274,24 @@ impl RenderAppHandler for AppRuntime {
                         }
                         _ => (a.position, a.rotation),
                     };
-                    let actor_mat = mat4::transform(pos, rot, [1.0, 1.0, 1.0]);
+                    let actor_scale = match a.kind {
+                        ActorKind::Hero | ActorKind::Villain => {
+                            if let Some(igb) = self.dynamic_igb_models.get(&model_key) {
+                                let (min_pt, max_pt) = igb.vertex_bounds();
+                                let raw_height = max_pt[1] - min_pt[1];
+                                if raw_height > 10.0 {
+                                    let s = 1.6 / raw_height;
+                                    [s, s, s]
+                                } else {
+                                    [1.0, 1.0, 1.0]
+                                }
+                            } else {
+                                [1.0, 1.0, 1.0]
+                            }
+                        }
+                        _ => [1.0, 1.0, 1.0],
+                    };
+                    let actor_mat = mat4::transform(pos, rot, actor_scale);
 
                     let model_path = a.model_path.as_deref().unwrap_or("models/hero.igb");
                     let model_key = model_path.replace('\\', "/").to_ascii_lowercase();
