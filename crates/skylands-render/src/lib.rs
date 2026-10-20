@@ -11,7 +11,8 @@ pub use camera::{
 };
 pub use hud::{damage_popup_ui_system, hud_update_system, setup_hud_ui};
 pub use mesh_conversion::{
-    igb_mesh_to_bevy, igb_model_to_bevy_meshes, normalize_model_mesh, Mesh, Vertex,
+    combine_or_normalize_model_meshes, igb_mesh_to_bevy, igb_model_to_bevy_meshes,
+    normalize_model_mesh, Mesh, Vertex,
 };
 pub use texture_conversion::{
     create_colored_material, create_textured_material, rgba8_to_bevy_image,
@@ -19,7 +20,7 @@ pub use texture_conversion::{
 pub use viewer::{viewer_controls_system, ViewerSettings, SHOWCASE_CHARACTERS};
 pub use visual_sync::{
     actor_visual_sync_system, setup_environment_and_assets, CharacterAssetServer,
-    CharacterVisualRegistry, RenderMeshAssets,
+    CharacterVisualRegistry, ModelVisualRegistry, RenderMeshAssets,
 };
 
 use bevy::prelude::*;
@@ -33,6 +34,7 @@ impl Plugin for SkylandsRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharacterAssetServer>()
             .init_resource::<CharacterVisualRegistry>()
+            .init_resource::<ModelVisualRegistry>()
             .init_resource::<FreeCamState>()
             .insert_resource(OrbitCameraState {
                 active: self.viewer_mode,

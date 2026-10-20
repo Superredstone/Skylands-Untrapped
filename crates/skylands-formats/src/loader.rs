@@ -170,6 +170,37 @@ impl AssetLoader {
         Ok(rgba)
     }
 
+    pub fn load_first_image_rgba(
+        &self,
+        model_path: &str,
+    ) -> Result<(u32, u32, Vec<u8>), AssetError> {
+        let model = self.load_igb(model_path)?;
+        if let Some(first_img) = model.images.first() {
+            let width = first_img.width as u32;
+            let height = first_img.height as u32;
+            if width > 0 && height > 0 && first_img.texture_size > 0 {
+                let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
+                    if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
+                        Arc::new(inner)
+                    } else {
+                        self.load_raw(model_path)?
+                    }
+                } else {
+                    self.load_raw(model_path)?
+                };
+                let end = (first_img.texture_offset + first_img.texture_size).min(raw.len());
+                if first_img.texture_offset < end {
+                    let slice = &raw[first_img.texture_offset..end];
+                    if let Ok(rgba) = decode_cmpr(slice, width, height) {
+                        return Ok((width, height, rgba));
+                    }
+                }
+            }
+        }
+        let fallback_rgba = self.load_cmpr_rgba(model_path, 128, 128)?;
+        Ok((128, 128, fallback_rgba))
+    }
+
     pub fn load_audio(&self, path: &str) -> Result<AudioClip, AssetError> {
         let raw = self.load_raw(path)?;
         let clip = parse_fsb5(&raw)?;

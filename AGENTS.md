@@ -22,12 +22,14 @@ Host runs NixOS. Standard tools require `nix-shell` (configured in `shell.nix` w
 - All the files for the project are in this folder, don't look outside.
 - For extracting game files take ispiration from "https://github.com/NefariousTechSupport/igArchiveExtractor".
 - igArchive format is described here "https://skylanderswiki.miraheze.org/wiki/IgArchive".
+- Write down progress inside of markdown files in the agent/ folder.
 
 ## Architecture
-- `crates/skylands-formats`: Alchemy v8.1.0 file formats (`igArchive` `.arc`/`.bld`, `igIGBFile`, Big/Little Endian serialization).
-- `crates/skylands-portal`: USB HID Traptanium portal driver (`VID: 0x1430`, `PID: 0x0150`), tag protocol, color/audio commands, mock portal mode.
-- `crates/skylands-extractor`: ROM extraction (`rom.eu.wbfs`), asset unpacker, validation.
-- `crates/skylands-render`: Windowing (winit) and rendering (wgpu) pipeline, vertex buffers from IGB models.
-- `crates/skylands-core`: 60Hz fixed tick rate game loop, state machine, input translation (gilrs + keyboard), actor spawning, dual audio sink (system + Traptanium USB speaker).
-- `crates/skylands-app`: CLI & native runtime entry point. Runs first-time extraction before launch.
-- `tools/rea-bridge`: REA / Ghidra PowerPC decompiler harness for `sys/main.dol`.
+- `./crates/skylands-formats`: Alchemy v8.1.0 file formats (`igArchive` `.arc`/`.bld`, `igIGBFile`, Big/Little Endian serialization).
+- `./crates/skylands-portal`: USB HID Traptanium portal driver (`VID: 0x1430`, `PID: 0x0150`), tag protocol, color/audio commands, mock portal mode.
+- `./crates/skylands-extractor`: ROM extraction (`rom.eu.wbfs`), asset unpacker, validation.
+- `./crates/skylands-render`: Windowing (winit) and rendering (wgpu) pipeline, vertex buffers from IGB models.
+- `./crates/skylands-core`: 60Hz fixed tick rate game loop, state machine, input translation (gilrs + keyboard), actor spawning, dual audio sink (system + Traptanium USB speaker).
+- `./crates/skylands-app`: CLI & native runtime entry point. Runs first-time extraction before launch.
+- `./tools/rea-bridge`: REA / Ghidra PowerPC decompiler harness for `sys/main.dol`.
+- `./tools/igArchiveExtractor`: Archive extractor for Skylanders format.

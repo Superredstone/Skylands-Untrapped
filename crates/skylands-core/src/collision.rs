@@ -587,6 +587,7 @@ mod tests {
             index_buffers: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
+            images: Vec::new(),
             meshes: Vec::new(),
             skeletons: Vec::new(),
             animations: Vec::new(),

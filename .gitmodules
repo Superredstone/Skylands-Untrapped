@@ -1,0 +1,3 @@
+[submodule "tools/igArchiveExtractor"]
+	path = tools/igArchiveExtractor
+	url = git@github.com:NefariousTechSupport/igArchiveExtractor.git

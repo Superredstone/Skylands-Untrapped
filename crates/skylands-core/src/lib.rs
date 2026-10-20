@@ -15,7 +15,7 @@ pub use events::*;
 pub use input::{InputMapper, KeyCode, WiiButton, WiiInputState};
 pub use portal_gameplay::{
     get_character_asset_paths, get_character_info, get_character_voice_path,
-    resolve_character_id_by_name, resolve_character_model_archive, Element,
+    resolve_character_id_by_name, resolve_character_model_archive, resolve_model_archive, Element,
 };
 pub use resources::*;
 pub use states::GameState;

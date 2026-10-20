@@ -1022,6 +1022,37 @@ mod tests {
     }
 
     #[test]
+    fn test_all_categories_sample_bld_loading() {
+        let samples = [
+            "assets/files/character/016_Spyro.bld",
+            "assets/files/character/1001_ChompyMage.bld",
+            "assets/files/item/Item_HelpingHand.bld",
+            "assets/files/outfit/Hat_114.bld",
+            "assets/files/misc/StoreItem_Hat_021.bld",
+            "assets/files/level/Arena_Mesh_300.bld",
+        ];
+
+        for path_str in samples {
+            let p1 = Path::new(path_str);
+            let p2 = Path::new("../../").join(path_str);
+            let path = if p1.exists() {
+                p1
+            } else if p2.exists() {
+                &p2
+            } else {
+                continue;
+            };
+
+            let mut mount = ArchiveMount::new();
+            assert!(mount.mount(path).is_ok(), "Mount failed for {}", path_str);
+            let level_bld = mount.read_file("level.bld");
+            assert!(level_bld.is_ok(), "read level.bld failed for {}", path_str);
+            let bytes = level_bld.unwrap();
+            assert!(!bytes.is_empty(), "level.bld is empty for {}", path_str);
+        }
+    }
+
+    #[test]
     fn test_inspect_extracted_targets() {
         let targets = [
             "assets/files/character/462_Water_Crocky.bld",

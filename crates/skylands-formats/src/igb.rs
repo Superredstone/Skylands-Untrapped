@@ -320,6 +320,421 @@ pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzImage2 {
+    pub offset: usize,
+    pub width: u16,
+    pub height: u16,
+    pub depth: u16,
+    pub mipmap_count: u16,
+    pub array: u16,
+    pub format: u32,
+    pub texture_offset: usize,
+    pub texture_size: usize,
+}
+
+impl IgzImage2 {
+    pub fn parse(
+        data: &[u8],
+        obj_offset: usize,
+        version: u32,
+        endian: IgbEndian,
+        exid_formats: &[u32],
+        tmhn_entries: &[(usize, usize)],
+    ) -> Option<Self> {
+        let field_start = if version == 5 {
+            obj_offset + 0x0c
+        } else if version == 9 {
+            obj_offset + 0x34
+        } else {
+            obj_offset + 0x30
+        };
+
+        if field_start + 28 > data.len() {
+            return None;
+        }
+
+        let width = IgbModel::read_u16(data, field_start, endian);
+        let height = IgbModel::read_u16(data, field_start + 2, endian);
+        let depth = IgbModel::read_u16(data, field_start + 4, endian);
+        let mipmap_count = IgbModel::read_u16(data, field_start + 6, endian);
+        let array = IgbModel::read_u16(data, field_start + 8, endian);
+
+        let exid_idx = IgbModel::read_u16(data, field_start + 14, endian) as usize;
+        let format = exid_formats.get(exid_idx).copied().unwrap_or(0);
+
+        let tmhn_idx = IgbModel::read_u32(data, field_start + 24, endian) as usize;
+        let (texture_offset, texture_size) = tmhn_entries.get(tmhn_idx).copied().unwrap_or((0, 0));
+
+        Some(Self {
+            offset: obj_offset,
+            width,
+            height,
+            depth,
+            mipmap_count,
+            array,
+            format,
+            texture_offset,
+            texture_size,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzChunkDescriptor {
+    pub offset: usize,
+    pub size: usize,
+    pub unknown1: u32,
+    pub unknown2: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzHeader {
+    pub magic: [u8; 4],
+    pub version: u32,
+    pub crc: u32,
+    pub endian: IgbEndian,
+    pub descriptors: Vec<IgzChunkDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzOffsetMapFixup {
+    pub magic: [u8; 4],
+    pub count: u32,
+    pub length: u32,
+    pub start_of_data: u32,
+    pub offsets: Vec<usize>,
+}
+
+impl IgzOffsetMapFixup {
+    pub fn parse(
+        data: &[u8],
+        fixup_offset: usize,
+        endian: IgbEndian,
+        version: u32,
+        descriptors: &[IgzChunkDescriptor],
+    ) -> Result<Self, IgbError> {
+        if fixup_offset + 16 > data.len() {
+            return Err(IgbError::CorruptObjectDirectory(
+                "Fixup header out of bounds".into(),
+            ));
+        }
+
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&data[fixup_offset..fixup_offset + 4]);
+
+        let (count_offset, length_offset, start_offset) = if version <= 6 {
+            (fixup_offset + 12, fixup_offset + 16, fixup_offset + 20)
+        } else {
+            (fixup_offset + 4, fixup_offset + 8, fixup_offset + 12)
+        };
+
+        if start_offset + 4 > data.len() {
+            return Err(IgbError::CorruptObjectDirectory(
+                "Fixup fields out of bounds".into(),
+            ));
+        }
+
+        let count = IgbModel::read_u32(data, count_offset, endian);
+        let length = IgbModel::read_u32(data, length_offset, endian);
+        let start_of_data = IgbModel::read_u32(data, start_offset, endian);
+
+        let data_start = fixup_offset + (start_of_data as usize);
+        let data_end = (fixup_offset + (length as usize)).min(data.len());
+        if data_start > data_end {
+            return Err(IgbError::CorruptObjectDirectory(
+                "Fixup data bounds invalid".into(),
+            ));
+        }
+
+        let packed_data = &data[data_start..data_end];
+        let offsets = Self::unpack_offsets(packed_data, count as usize, version, descriptors)?;
+
+        Ok(Self {
+            magic,
+            count,
+            length,
+            start_of_data,
+            offsets,
+        })
+    }
+
+    pub fn unpack_offsets(
+        packed_data: &[u8],
+        count: usize,
+        version: u32,
+        descriptors: &[IgzChunkDescriptor],
+    ) -> Result<Vec<usize>, IgbError> {
+        let mut offsets = Vec::with_capacity(count);
+        let mut byte_idx = 0;
+        let mut high_nibble = false;
+        let mut previous_int: u32 = 0;
+
+        let read_nibble = |byte_idx: &mut usize, high_nibble: &mut bool| -> Option<u8> {
+            if *byte_idx >= packed_data.len() {
+                return None;
+            }
+            let byte = packed_data[*byte_idx];
+            if !*high_nibble {
+                *high_nibble = true;
+                Some(byte & 0x0F)
+            } else {
+                *high_nibble = false;
+                *byte_idx += 1;
+                Some((byte >> 4) & 0x0F)
+            }
+        };
+
+        for _ in 0..count {
+            let mut current = match read_nibble(&mut byte_idx, &mut high_nibble) {
+                Some(n) => n as u32,
+                None => {
+                    return Err(IgbError::CorruptObjectDirectory(
+                        "Unexpected end of packed fixup stream".into(),
+                    ));
+                }
+            };
+
+            let mut shift_amount: u32 = 3;
+            let mut unpacked_int = current & 7;
+
+            while (current & 8) != 0 {
+                current = match read_nibble(&mut byte_idx, &mut high_nibble) {
+                    Some(n) => n as u32,
+                    None => {
+                        return Err(IgbError::CorruptObjectDirectory(
+                            "Unexpected end of packed integer continuation".into(),
+                        ));
+                    }
+                };
+
+                let shift = shift_amount & 0x1F;
+                unpacked_int |= (current & 7) << shift;
+                shift_amount = shift_amount.wrapping_add(3);
+            }
+
+            let delta = unpacked_int
+                .wrapping_mul(4)
+                .wrapping_add(if version < 9 { 4 } else { 0 });
+            previous_int = previous_int.wrapping_add(delta);
+
+            let abs_offset = if version <= 6 {
+                let desc_idx = ((previous_int >> 24) + 1) as usize;
+                let rel_offset = (previous_int & 0x00FF_FFFF) as usize;
+                let base = descriptors.get(desc_idx).map(|d| d.offset).unwrap_or(0);
+                base + rel_offset
+            } else {
+                let desc_idx = ((previous_int >> 27) + 1) as usize;
+                let rel_offset = (previous_int & 0x07FF_FFFF) as usize;
+                let base = descriptors.get(desc_idx).map(|d| d.offset).unwrap_or(0);
+                base + rel_offset
+            };
+
+            offsets.push(abs_offset);
+        }
+
+        Ok(offsets)
+    }
+}
+
+impl IgzHeader {
+    pub fn parse(data: &[u8]) -> Result<Self, IgbError> {
+        if data.len() < 24 {
+            return Err(IgbError::CorruptObjectDirectory(
+                "IGZ file too short".into(),
+            ));
+        }
+
+        let magic = [data[0], data[1], data[2], data[3]];
+        if &magic != IGZ_MAGIC {
+            return Err(IgbError::InvalidMagic(magic));
+        }
+
+        let ver_be = IgbModel::read_u32(data, 4, IgbEndian::Big);
+        let endian = if ver_be <= 0x1000 {
+            IgbEndian::Big
+        } else {
+            IgbEndian::Little
+        };
+
+        let version = IgbModel::read_u32(data, 4, endian);
+        let crc = IgbModel::read_u32(data, 8, endian);
+
+        let desc_start = if version <= 6 { 0x10 } else { 0x18 };
+        let mut descriptors = Vec::new();
+
+        let mut pos = desc_start;
+        while pos + 16 <= data.len() {
+            let offset = IgbModel::read_u32(data, pos, endian) as usize;
+            let size = IgbModel::read_u32(data, pos + 4, endian) as usize;
+            let unknown1 = IgbModel::read_u32(data, pos + 8, endian);
+            let unknown2 = IgbModel::read_u32(data, pos + 12, endian);
+
+            if offset == 0 {
+                break;
+            }
+
+            descriptors.push(IgzChunkDescriptor {
+                offset,
+                size,
+                unknown1,
+                unknown2,
+            });
+            pos += 16;
+        }
+
+        Ok(Self {
+            magic,
+            version,
+            crc,
+            endian,
+            descriptors,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzObject {
+    pub offset: usize,
+    pub type_index: usize,
+    pub type_name: Option<String>,
+    pub item_count: u32,
+    pub length: u16,
+    pub data: Vec<u8>,
+    pub fields: Vec<u32>,
+}
+
+impl IgzObject {
+    pub fn parse(
+        data: &[u8],
+        offset: usize,
+        version: u32,
+        endian: IgbEndian,
+        type_table: &[String],
+    ) -> Result<Self, IgbError> {
+        if offset >= data.len() {
+            return Err(IgbError::CorruptObjectDirectory(
+                "Object offset out of bounds".into(),
+            ));
+        }
+
+        let slice = &data[offset..];
+        let (type_index, item_count, length, data_offset) = if version == 6 || version == 8 {
+            if slice.len() < 16 {
+                return Err(IgbError::CorruptObjectDirectory(
+                    "Object header truncated".into(),
+                ));
+            }
+            let type_idx = IgbModel::read_u16(slice, 2, endian) as usize;
+            let item_count = IgbModel::read_u32(slice, 4, endian);
+            let flags1 = IgbModel::read_u16(slice, 8, endian);
+            let (length, after_hdr) = if (flags1 & 0x3000) != 0 {
+                let len = IgbModel::read_u16(slice, 10, endian);
+                (len, 16)
+            } else {
+                let len = IgbModel::read_u16(slice, 14, endian);
+                (len, 16)
+            };
+            (type_idx, item_count, length, after_hdr)
+        } else {
+            if slice.len() < 22 {
+                return Err(IgbError::CorruptObjectDirectory(
+                    "Object header truncated".into(),
+                ));
+            }
+            let type_idx = IgbModel::read_u32(slice, 0, endian) as usize;
+            let item_count = IgbModel::read_u32(slice, 8, endian);
+            let length = IgbModel::read_u16(slice, 18, endian);
+            (type_idx, item_count, length, 22)
+        };
+
+        let type_name = type_table.get(type_index).cloned();
+
+        let data_start = data_offset;
+        let data_end = (data_start + length as usize).min(slice.len());
+        let obj_data = if data_start <= slice.len() {
+            slice[data_start..data_end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let mut fields = Vec::new();
+        if slice.len() >= 0x14 {
+            let field_slice = &slice[0x14..];
+            let num_fields = (length as usize / 4).min(field_slice.len() / 4);
+            for i in 0..num_fields {
+                fields.push(IgbModel::read_u32(field_slice, i * 4, endian));
+            }
+        }
+
+        Ok(Self {
+            offset,
+            type_index,
+            type_name,
+            item_count,
+            length,
+            data: obj_data,
+            fields,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgzObjectList {
+    pub list_object: IgzObject,
+    pub objects: Vec<IgzObject>,
+}
+
+impl IgzObjectList {
+    pub fn parse(
+        data: &[u8],
+        descriptors: &[IgzChunkDescriptor],
+        version: u32,
+        endian: IgbEndian,
+        type_table: &[String],
+        rvtb_offsets: &[usize],
+    ) -> Result<Self, IgbError> {
+        if descriptors.len() < 2 {
+            return Err(IgbError::CorruptObjectDirectory(
+                "Not enough chunk descriptors for ObjectList".into(),
+            ));
+        }
+
+        let desc1 = &descriptors[1];
+        let mut list_offset = desc1.offset;
+        if version == 6 || version == 8 {
+            list_offset += desc1.unknown2 as usize;
+        }
+
+        let mut list_object = IgzObject::parse(data, list_offset, version, endian, type_table)?;
+        let mut pointer_fields = Vec::new();
+        if list_offset + 0x14 <= data.len() {
+            let field_slice = &data[list_offset + 0x14..];
+            let count = (list_object.item_count as usize).min(field_slice.len() / 4);
+            for i in 0..count {
+                let pot = IgbModel::read_u32(field_slice, i * 4, endian);
+                if (pot & 0x8000_0000) == 0 {
+                    pointer_fields.push(pot);
+                }
+            }
+        }
+        list_object.item_count = pointer_fields.len() as u32;
+        list_object.fields = pointer_fields;
+
+        let mut objects = Vec::new();
+        for &offset in rvtb_offsets.iter().skip(1) {
+            if let Ok(obj) = IgzObject::parse(data, offset, version, endian, type_table) {
+                objects.push(obj);
+            }
+        }
+
+        Ok(Self {
+            list_object,
+            objects,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bone {
     pub name: String,
@@ -715,6 +1130,7 @@ pub struct IgbModel {
     pub index_buffers: Vec<IgbIndexBuffer>,
     pub materials: Vec<IgbMaterial>,
     pub textures: Vec<IgbTextureRef>,
+    pub images: Vec<IgzImage2>,
     pub meshes: Vec<IgbMesh>,
     pub skeletons: Vec<Skeleton>,
     pub animations: Vec<AnimationClip>,
@@ -766,6 +1182,7 @@ impl IgbModel {
                 index_buffers: Vec::new(),
                 materials: Vec::new(),
                 textures: Vec::new(),
+                images: Vec::new(),
                 meshes,
                 skeletons: Vec::new(),
                 animations: Vec::new(),
@@ -794,6 +1211,7 @@ impl IgbModel {
                 index_buffers: Vec::new(),
                 materials: Vec::new(),
                 textures: Vec::new(),
+                images: Vec::new(),
                 meshes,
                 skeletons: Vec::new(),
                 animations: Vec::new(),
@@ -970,6 +1388,7 @@ impl IgbModel {
             index_buffers,
             materials,
             textures,
+            images: Vec::new(),
             meshes,
             skeletons,
             animations,
@@ -2036,45 +2455,10 @@ impl IgbModel {
     }
 
     pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
-        if data.len() < 20 {
-            return Err(IgbError::CorruptObjectDirectory(
-                "IGZ file too short".into(),
-            ));
-        }
-
-        let ver_be = Self::read_u32(data, 4, IgbEndian::Big);
-        let endian = if ver_be <= 0x1000 {
-            IgbEndian::Big
-        } else {
-            IgbEndian::Little
-        };
-        let version = Self::read_u32(data, 4, endian);
-        let num_sections = Self::read_u32(data, 16, endian) as usize;
-
-        struct IgzSection {
-            _flags: u32,
-            offset: usize,
-            size: usize,
-            _alignment: u32,
-        }
-
-        let mut sections = Vec::with_capacity(num_sections.min(64));
-        for s in 0..num_sections.min(64) {
-            let off = 20 + s * 16;
-            if off + 16 > data.len() {
-                break;
-            }
-            let flags = Self::read_u32(data, off, endian);
-            let soff = Self::read_u32(data, off + 4, endian) as usize;
-            let ssz = Self::read_u32(data, off + 8, endian) as usize;
-            let align = Self::read_u32(data, off + 12, endian);
-            sections.push(IgzSection {
-                _flags: flags,
-                offset: soff,
-                size: ssz,
-                _alignment: align,
-            });
-        }
+        let igz_header = IgzHeader::parse(data)?;
+        let endian = igz_header.endian;
+        let version = igz_header.version;
+        let sections = &igz_header.descriptors;
 
         #[derive(Debug, Clone)]
         pub struct IgzFixupTable {
@@ -2092,6 +2476,9 @@ impl IgbModel {
         let mut _fixup_tables = Vec::new();
         let mut string_table = Vec::new();
         let mut type_table = Vec::new();
+        let mut rvtb_offsets = Vec::new();
+        let mut exid_formats = Vec::new();
+        let mut tmhn_entries = Vec::new();
 
         if let Some(sec0) = sections.first() {
             if sec0.offset < data.len() {
@@ -2100,7 +2487,7 @@ impl IgbModel {
 
                 // Scan Section 0 for known Alchemy fixup tables:
                 // TSTR / RTST (strings), TMET / TEMT (types), TDEP / PEDT (dependencies),
-                // RVTB / BTVR (object vtables), EXID / DIXE (external IDs)
+                // RVTB / BTVR (object vtables), EXID / DIXE (external IDs), TMHN / NHMT (thumbnails)
                 let mut pos = 0;
                 while pos + 16 <= sec0_data.len() {
                     let mut tag = [0u8; 4];
@@ -2117,22 +2504,40 @@ impl IgbModel {
                             | b"BTVR"
                             | b"EXID"
                             | b"DIXE"
+                            | b"TMHN"
+                            | b"NHMT"
                     );
 
                     if is_match {
-                        let count = Self::read_u32(sec0_data, pos + 4, endian);
-                        let size = Self::read_u32(sec0_data, pos + 8, endian);
-                        if (size as usize) <= sec0_data.len().saturating_sub(pos + 16) {
+                        let (count, size, start_of_data) = if version <= 6 {
+                            (
+                                Self::read_u32(sec0_data, pos + 12, endian),
+                                Self::read_u32(sec0_data, pos + 16, endian),
+                                Self::read_u32(sec0_data, pos + 20, endian),
+                            )
+                        } else {
+                            (
+                                Self::read_u32(sec0_data, pos + 4, endian),
+                                Self::read_u32(sec0_data, pos + 8, endian),
+                                Self::read_u32(sec0_data, pos + 12, endian),
+                            )
+                        };
+                        let header_len = if version <= 6 { 24 } else { 16 };
+                        if (size as usize) <= sec0_data.len().saturating_sub(pos) {
                             _fixup_tables.push(IgzFixupTable {
                                 tag,
                                 count,
                                 size,
-                                offset: sec0.offset + pos + 16,
+                                offset: sec0.offset + pos + header_len,
                             });
 
-                            let payload_start = pos + 16;
-                            let payload_end = (payload_start + size as usize).min(sec0_data.len());
-                            let payload = &sec0_data[payload_start..payload_end];
+                            let payload_start = pos + (start_of_data as usize).max(header_len);
+                            let payload_end = (pos + size as usize).min(sec0_data.len());
+                            let payload = if payload_start <= payload_end {
+                                &sec0_data[payload_start..payload_end]
+                            } else {
+                                &[]
+                            };
 
                             if tag == *b"TSTR" || tag == *b"RTST" {
                                 for s in payload.split(|&b| b == 0) {
@@ -2152,9 +2557,47 @@ impl IgbModel {
                                         }
                                     }
                                 }
+                            } else if (tag == *b"RVTB" || tag == *b"BTVR")
+                                && rvtb_offsets.is_empty()
+                            {
+                                if let Ok(fixup) = IgzOffsetMapFixup::parse(
+                                    sec0_data, pos, endian, version, sections,
+                                ) {
+                                    rvtb_offsets = fixup.offsets;
+                                }
+                            } else if tag == *b"EXID" || tag == *b"DIXE" {
+                                for k in 0..(count as usize) {
+                                    if k * 8 + 4 <= payload.len() {
+                                        let hash = Self::read_u32(payload, k * 8, endian);
+                                        exid_formats.push(hash);
+                                    }
+                                }
+                            } else if tag == *b"TMHN" || tag == *b"NHMT" {
+                                for k in 0..(count as usize) {
+                                    if k * 8 + 8 <= payload.len() {
+                                        let sz = (Self::read_u32(payload, k * 8, endian)
+                                            & 0x07FF_FFFF)
+                                            as usize;
+                                        let raw_off = Self::read_u32(payload, k * 8 + 4, endian);
+                                        let (desc_idx, rel_off) = if version <= 6 {
+                                            (
+                                                ((raw_off >> 24) + 1) as usize,
+                                                (raw_off & 0x00FF_FFFF) as usize,
+                                            )
+                                        } else {
+                                            (
+                                                ((raw_off >> 27) + 1) as usize,
+                                                (raw_off & 0x07FF_FFFF) as usize,
+                                            )
+                                        };
+                                        let base =
+                                            sections.get(desc_idx).map(|d| d.offset).unwrap_or(0);
+                                        tmhn_entries.push((base + rel_off, sz));
+                                    }
+                                }
                             }
 
-                            pos += 16 + (size as usize);
+                            pos += size as usize;
                             pos = (pos + 3) & !3;
                             continue;
                         }
@@ -2173,6 +2616,129 @@ impl IgbModel {
                                 string_table.push(trimmed.to_string());
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        let igz_objects = if !rvtb_offsets.is_empty() && sections.len() >= 2 {
+            IgzObjectList::parse(data, sections, version, endian, &type_table, &rvtb_offsets).ok()
+        } else {
+            None
+        };
+
+        // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
+        let mut vertex_buffers = Vec::new();
+        let mut index_buffers = Vec::new();
+        let mut attr_lists = Vec::new();
+        let mut geometries = Vec::new();
+
+        if let Some(ref obj_list) = igz_objects {
+            for (idx, obj) in obj_list.objects.iter().enumerate() {
+                match obj.type_name.as_deref() {
+                    Some("igVertexBuffer") => {
+                        let count = if obj.fields.len() >= 2 {
+                            obj.fields[1] as usize
+                        } else {
+                            obj.item_count as usize
+                        };
+                        let stride = if obj.fields.len() >= 3 {
+                            obj.fields[2] as usize
+                        } else {
+                            32
+                        };
+                        let mut vb = IgbVertexBuffer {
+                            count,
+                            stride,
+                            data: obj.data.clone(),
+                        };
+                        if vb.data.is_empty() && obj.offset + 16 <= data.len() {
+                            let slice = &data[obj.offset + 16..];
+                            vb.data =
+                                slice[..slice.len().min(count.max(1) * stride.max(16))].to_vec();
+                        }
+                        vertex_buffers.push(vb);
+                    }
+                    Some("igIndexBuffer") => {
+                        let mut indices = Vec::new();
+                        for &f in &obj.fields {
+                            if (f & 0x8000_0000) == 0 && f < 65536 {
+                                indices.push(f);
+                            }
+                        }
+                        index_buffers.push(IgbIndexBuffer {
+                            topology: IndexTopology::Triangles,
+                            indices,
+                        });
+                    }
+                    Some("igVertexFormat") | Some("igGeometryAttr") => {
+                        let stride = if !obj.fields.is_empty() {
+                            obj.fields[0].min(128)
+                        } else {
+                            32
+                        };
+                        attr_lists.push(IgbAttrList {
+                            stride,
+                            attributes: vec![
+                                IgbAttrDesc {
+                                    semantic: AttrSemantic::Position,
+                                    format: AttrFormat::Float32x3,
+                                    offset: 0,
+                                    scale: 1.0,
+                                },
+                                IgbAttrDesc {
+                                    semantic: AttrSemantic::Normal,
+                                    format: AttrFormat::Float32x3,
+                                    offset: 12,
+                                    scale: 1.0,
+                                },
+                                IgbAttrDesc {
+                                    semantic: AttrSemantic::TexCoord,
+                                    format: AttrFormat::Float32x2,
+                                    offset: 24,
+                                    scale: 1.0,
+                                },
+                            ],
+                        });
+                    }
+                    Some("igWiiGeometry") => {
+                        let geo_name = format!("igWiiGeometry_{}", idx);
+                        geometries.push(IgbGeometryNode {
+                            name: geo_name,
+                            vertex_buffer_index: Some(vertex_buffers.len().saturating_sub(1)),
+                            index_buffer_index: Some(index_buffers.len().saturating_sub(1)),
+                            attr_list_index: Some(attr_lists.len().saturating_sub(1)),
+                            material_index: Some(0),
+                            mesh: None,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Extract textures from igImage2 objects in registry
+        let mut textures = Vec::new();
+        let mut images = Vec::new();
+        if let Some(ref obj_list) = igz_objects {
+            for (idx, obj) in obj_list.objects.iter().enumerate() {
+                if obj.type_name.as_deref() == Some("igImage2") {
+                    if let Some(img2) = IgzImage2::parse(
+                        data,
+                        obj.offset,
+                        version,
+                        endian,
+                        &exid_formats,
+                        &tmhn_entries,
+                    ) {
+                        let tex_name = format!("igImage2_{}_{}x{}", idx, img2.width, img2.height);
+                        let tex_path =
+                            format!("memory://texture/{}/0x{:x}", idx, img2.texture_offset);
+                        textures.push(IgbTextureRef {
+                            name: tex_name,
+                            path: tex_path,
+                        });
+                        images.push(img2);
                     }
                 }
             }
@@ -2209,7 +2775,6 @@ impl IgbModel {
 
         // Extract 3D geometry from Section 3 (Wii GX FIFO command stream)
         let mut meshes = Vec::new();
-        let mut geometries = Vec::new();
 
         if sections.len() > 3 {
             let sec3 = &sections[3];
@@ -2684,11 +3249,12 @@ impl IgbModel {
             directory: Vec::new(),
             nodes,
             geometries,
-            attr_lists: Vec::new(),
-            vertex_buffers: Vec::new(),
-            index_buffers: Vec::new(),
+            attr_lists,
+            vertex_buffers,
+            index_buffers,
             materials: Vec::new(),
-            textures: Vec::new(),
+            textures,
+            images,
             meshes,
             skeletons,
             animations,
@@ -3572,6 +4138,7 @@ mod tests {
             index_buffers: vec![],
             materials: vec![],
             textures: vec![],
+            images: vec![],
             meshes: vec![],
             skeletons: vec![],
             animations: vec![],
@@ -3674,6 +4241,7 @@ mod tests {
             index_buffers: vec![],
             materials: vec![],
             textures: vec![],
+            images: vec![],
             meshes: vec![test_mesh],
             skeletons: vec![],
             animations: vec![],
@@ -3712,14 +4280,18 @@ mod tests {
         igz.extend_from_slice(b"IGZ\x01");
         // Version 8 (BE)
         igz.extend_from_slice(&8u32.to_be_bytes());
-        // Platform
+        // CRC
         igz.extend_from_slice(&0u32.to_be_bytes());
-        // Root obj
+        // Platform
         igz.extend_from_slice(&2u32.to_be_bytes());
-        // Num sections: 4
+        // Root obj / unknown
         igz.extend_from_slice(&4u32.to_be_bytes());
+        // Padding at 0x14
+        igz.extend_from_slice(&0u32.to_be_bytes());
 
-        let sec0_off = 20 + 4 * 16; // 84
+        // Chunk descriptors start at 0x18. 4 descriptors (16 bytes each) + 1 sentinel (16 bytes zero) = 80 bytes
+        // Data starts at 0x18 + 80 = 0x68 (104)
+        let sec0_off = 0x18 + 5 * 16;
         let str_data = b"RTST\0sp_hero\0pickup_gem\0^Lantern1\0geo_ground\0";
         let sec0_sz = str_data.len();
 
@@ -3750,29 +4322,35 @@ mod tests {
         sec3_data.extend_from_slice(&10240i16.to_be_bytes());
         let sec3_sz = sec3_data.len();
 
-        // Section 0
-        igz.extend_from_slice(&0u32.to_be_bytes());
+        // Section 0 descriptor: offset, size, unknown1, unknown2
         igz.extend_from_slice(&(sec0_off as u32).to_be_bytes());
         igz.extend_from_slice(&(sec0_sz as u32).to_be_bytes());
-        igz.extend_from_slice(&16u32.to_be_bytes());
-
-        // Section 1
         igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+
+        // Section 1 descriptor
         igz.extend_from_slice(&(sec1_off as u32).to_be_bytes());
         igz.extend_from_slice(&(sec1_sz as u32).to_be_bytes());
-        igz.extend_from_slice(&16u32.to_be_bytes());
-
-        // Section 2
         igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+
+        // Section 2 descriptor
         igz.extend_from_slice(&(sec2_off as u32).to_be_bytes());
         igz.extend_from_slice(&(sec2_sz as u32).to_be_bytes());
-        igz.extend_from_slice(&32u32.to_be_bytes());
-
-        // Section 3
         igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+
+        // Section 3 descriptor
         igz.extend_from_slice(&(sec3_off as u32).to_be_bytes());
         igz.extend_from_slice(&(sec3_sz as u32).to_be_bytes());
-        igz.extend_from_slice(&32u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+
+        // Sentinel descriptor: offset == 0
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
 
         // Write section data
         igz.extend_from_slice(str_data);
@@ -3787,6 +4365,13 @@ mod tests {
         assert_eq!(model.meshes.len(), 1);
         assert_eq!(model.meshes[0].vertices.len(), 3);
         assert_eq!(model.meshes[0].indices.len(), 3);
+
+        let parsed_igz_header = IgzHeader::parse(&igz).expect("Parse IgzHeader");
+        assert_eq!(parsed_igz_header.descriptors.len(), 4);
+        assert_eq!(parsed_igz_header.descriptors[0].offset, sec0_off);
+        assert_eq!(parsed_igz_header.descriptors[0].size, sec0_sz);
+        assert_eq!(parsed_igz_header.descriptors[3].offset, sec3_off);
+        assert_eq!(parsed_igz_header.descriptors[3].size, sec3_sz);
 
         let markers = model.extract_level_markers();
         assert_eq!(markers.len(), 3); // sp_hero, pickup_gem, ^Lantern1
@@ -3934,6 +4519,7 @@ mod tests {
             index_buffers: vec![],
             materials: vec![],
             textures: vec![],
+            images: vec![],
             meshes: vec![],
             skeletons: vec![skeleton],
             animations: vec![clip.clone()],
@@ -3952,8 +4538,9 @@ mod tests {
         igz.extend_from_slice(&0u32.to_be_bytes());
         igz.extend_from_slice(&2u32.to_be_bytes());
         igz.extend_from_slice(&4u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
 
-        let sec0_off = 20 + 4 * 16;
+        let sec0_off = 0x18 + 5 * 16;
         let mut str_data = Vec::new();
         str_data.extend_from_slice(b"RTST\0");
         for b in bone_names {
@@ -3987,11 +4574,15 @@ mod tests {
             (sec2_off, sec2_sz),
             (sec3_off, sec3_sz),
         ] {
-            igz.extend_from_slice(&0u32.to_be_bytes());
             igz.extend_from_slice(&(off as u32).to_be_bytes());
             igz.extend_from_slice(&(sz as u32).to_be_bytes());
-            igz.extend_from_slice(&16u32.to_be_bytes());
+            igz.extend_from_slice(&0u32.to_be_bytes());
+            igz.extend_from_slice(&0u32.to_be_bytes());
         }
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
+        igz.extend_from_slice(&0u32.to_be_bytes());
 
         igz.extend_from_slice(&str_data);
         igz.resize(sec1_off + sec1_sz, 0);
@@ -4169,6 +4760,19 @@ mod tests {
                 i
             );
         }
+
+        if p1.exists() || p2.exists() {
+            assert!(
+                !model.textures.is_empty(),
+                "Spyro textures extracted from igImage2"
+            );
+            assert!(
+                !model.images.is_empty(),
+                "Spyro images extracted from igImage2"
+            );
+            assert!(model.images[0].width > 0 && model.images[0].height > 0);
+            assert!(model.images[0].texture_size > 0);
+        }
     }
 
     #[test]
@@ -4188,6 +4792,191 @@ mod tests {
                 && IgbModel::half_to_f32(0xfc00).is_sign_negative()
         );
         assert!(IgbModel::half_to_f32(0x7c01).is_nan());
+    }
+
+    #[test]
+    fn test_rvtb_packed_integer_unpacking() {
+        let descriptors = vec![
+            IgzChunkDescriptor {
+                offset: 0x1000,
+                size: 0x200,
+                unknown1: 0,
+                unknown2: 0,
+            },
+            IgzChunkDescriptor {
+                offset: 0x2000,
+                size: 0x1000,
+                unknown1: 0,
+                unknown2: 0,
+            },
+        ];
+
+        // 3 entries:
+        // Entry 0: raw nibble 0x01 (unpacked = 1, cont = 0)
+        // Entry 1: raw nibble 0x02 (unpacked = 2, cont = 0)
+        // Entry 2: multi-nibble: nibble 0 = 0x0B (val = 3, cont = 1), nibble 1 = 0x01 (val = 1, cont = 0)
+        // unpacked_int = 3 | (1 << 3) = 11.
+        // Packed stream nibbles: [0x1, 0x2, 0xB, 0x1]
+        // Byte 0: 0x21 (low = 1, high = 2)
+        // Byte 1: 0x1B (low = 0xB, high = 1)
+        let packed_data = vec![0x21, 0x1B];
+        let offsets = IgzOffsetMapFixup::unpack_offsets(&packed_data, 3, 8, &descriptors)
+            .expect("unpack offsets");
+
+        // version 8: delta = unpacked_int * 4 + 4
+        // Entry 0: delta = 1 * 4 + 4 = 8. prev = 8.
+        // desc_idx = (8 >> 27) + 1 = 1 -> base = descriptors[1].offset = 0x2000.
+        // offset = 0x2000 + (8 & 0x07FFFFFF) = 0x2008.
+        // Entry 1: delta = 2 * 4 + 4 = 12. prev = 8 + 12 = 20.
+        // offset = 0x2000 + 20 = 0x2014.
+        // Entry 2: delta = 11 * 4 + 4 = 48. prev = 20 + 48 = 68.
+        // offset = 0x2000 + 68 = 0x2044.
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(offsets[0], 0x2008);
+        assert_eq!(offsets[1], 0x2014);
+        assert_eq!(offsets[2], 0x2044);
+    }
+
+    #[test]
+    fn test_rvtb_fixup_parsing() {
+        let descriptors = vec![
+            IgzChunkDescriptor {
+                offset: 0x00,
+                size: 0x100,
+                unknown1: 0,
+                unknown2: 0,
+            },
+            IgzChunkDescriptor {
+                offset: 0x1000,
+                size: 0x1000,
+                unknown1: 0,
+                unknown2: 0,
+            },
+        ];
+
+        // Construct RVTB fixup table block in BigEndian
+        let mut fixup_block = Vec::new();
+        fixup_block.extend_from_slice(b"RVTB"); // magic
+        fixup_block.extend_from_slice(&2u32.to_be_bytes()); // count = 2
+        fixup_block.extend_from_slice(&18u32.to_be_bytes()); // length = 18 bytes
+        fixup_block.extend_from_slice(&16u32.to_be_bytes()); // start_of_data = 16
+                                                             // Nibbles for 2 entries: 0x00, 0x01 -> byte: 0x10
+        fixup_block.push(0x10);
+        fixup_block.push(0x00);
+
+        let fixup = IgzOffsetMapFixup::parse(&fixup_block, 0, IgbEndian::Big, 8, &descriptors)
+            .expect("parse RVTB fixup");
+
+        assert_eq!(fixup.magic, *b"RVTB");
+        assert_eq!(fixup.count, 2);
+        assert_eq!(fixup.offsets.len(), 2);
+        // Entry 0: delta = 0*4 + 4 = 4 -> 0x1000 + 4 = 0x1004
+        // Entry 1: delta = 1*4 + 4 = 8 -> 0x1004 + 8 = 0x100C
+        assert_eq!(fixup.offsets[0], 0x1004);
+        assert_eq!(fixup.offsets[1], 0x100C);
+    }
+
+    #[test]
+    fn test_igz_object_registry_parsing() {
+        // Build mock IGZ buffer:
+        // Version 8, Big Endian
+        let mut igz = vec![0u8; 0x400];
+        igz[0..4].copy_from_slice(b"IGZ\x01"); // magic
+        igz[4..8].copy_from_slice(&8u32.to_be_bytes()); // version
+        igz[8..12].copy_from_slice(&0u32.to_be_bytes()); // crc
+
+        // Section descriptors starting at 0x18
+        // Section 0: fixups, offset = 0x80, size = 0x80
+        igz[0x18..0x1C].copy_from_slice(&0x80u32.to_be_bytes());
+        igz[0x1C..0x20].copy_from_slice(&0x80u32.to_be_bytes());
+        // Section 1: objects, offset = 0x100, size = 0x100, unknown2 = 0x20
+        igz[0x28..0x2C].copy_from_slice(&0x100u32.to_be_bytes());
+        igz[0x2C..0x30].copy_from_slice(&0x100u32.to_be_bytes());
+        igz[0x34..0x38].copy_from_slice(&0x20u32.to_be_bytes()); // unknown2
+                                                                 // End sentinel (offset = 0) at 0x38..0x3C is already 0
+
+        // In Section 0 (0x80):
+        // 1) TEMT table at 0x80:
+        // tag = b"TEMT", count = 2, size = 20, startOfData = 16
+        igz[0x80..0x84].copy_from_slice(b"TEMT");
+        igz[0x84..0x88].copy_from_slice(&2u32.to_be_bytes());
+        igz[0x88..0x8C].copy_from_slice(&20u32.to_be_bytes());
+        igz[0x8C..0x90].copy_from_slice(&16u32.to_be_bytes());
+        let type_strings = b"igObjectList\0igImage2\0";
+        igz[0x90..0x90 + type_strings.len()].copy_from_slice(type_strings);
+
+        // In Section 1:
+        // List object at offset 0x100 + unknown2 (0x20) = 0x120
+        // Header for v8:
+        // u16 unk (0), u16 name (0 -> igObjectList), u32 itemCount (1), u16 flags1 (0), u32 unk (0), u16 length (8), u32 unk (0)
+        let list_off = 0x120;
+        igz[list_off + 2..list_off + 4].copy_from_slice(&0u16.to_be_bytes()); // type index 0
+        igz[list_off + 4..list_off + 8].copy_from_slice(&1u32.to_be_bytes()); // itemCount = 1
+        igz[list_off + 8..list_off + 10].copy_from_slice(&0u16.to_be_bytes()); // flags1 = 0
+        igz[list_off + 14..list_off + 16].copy_from_slice(&8u16.to_be_bytes()); // length = 8
+                                                                                // Pointer field at list_off + 0x14:
+        igz[list_off + 0x14..list_off + 0x18].copy_from_slice(&0x140u32.to_be_bytes());
+
+        // Object 1 at 0x140:
+        // u16 unk, u16 name (1 -> igImage2), u32 itemCount (0), u16 flags1 (0), u32 unk, u16 length (4), u32 unk
+        let obj1_off = 0x140;
+        igz[obj1_off + 2..obj1_off + 4].copy_from_slice(&1u16.to_be_bytes()); // type index 1
+        igz[obj1_off + 4..obj1_off + 8].copy_from_slice(&0u32.to_be_bytes());
+        igz[obj1_off + 8..obj1_off + 10].copy_from_slice(&0u16.to_be_bytes());
+        igz[obj1_off + 14..obj1_off + 16].copy_from_slice(&4u16.to_be_bytes());
+
+        let header = IgzHeader::parse(&igz).expect("header parse");
+        let type_table = vec!["igObjectList".to_string(), "igImage2".to_string()];
+        let rvtb_offsets = vec![list_off, obj1_off];
+
+        let obj_list = IgzObjectList::parse(
+            &igz,
+            &header.descriptors,
+            header.version,
+            header.endian,
+            &type_table,
+            &rvtb_offsets,
+        )
+        .expect("object list parse");
+
+        assert_eq!(obj_list.list_object.type_name, Some("igObjectList".into()));
+        assert_eq!(obj_list.list_object.fields, vec![0x140]);
+        assert_eq!(obj_list.objects.len(), 1);
+        assert_eq!(obj_list.objects[0].offset, 0x140);
+        assert_eq!(obj_list.objects[0].type_name, Some("igImage2".into()));
+    }
+
+    #[test]
+    fn test_inspect_spyro_mesh_sources() {
+        use crate::archive::ArchiveMount;
+        let p1 = std::path::Path::new("assets/files/character/016_Spyro.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/016_Spyro.bld");
+        let p = if p1.exists() {
+            p1
+        } else if p2.exists() {
+            p2
+        } else {
+            return;
+        };
+        let mut mount = ArchiveMount::new();
+        mount.mount(p).expect("mount spyro");
+        let level_bld = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&level_bld)).expect("parse level.bld");
+        assert!(!model.meshes.is_empty(), "Spyro has extracted meshes");
+        assert!(!model.textures.is_empty(), "Spyro has extracted textures");
+        assert_eq!(model.images.len(), 77, "Spyro has 77 igImage2 textures");
+        assert_eq!(
+            model.geometries.len(),
+            18,
+            "Spyro has 17 Wii geometries + 1 GX mesh geometry"
+        );
+        assert_eq!(model.vertex_buffers.len(), 6, "Spyro has 6 vertex buffers");
+        assert_eq!(model.index_buffers.len(), 6, "Spyro has 6 index buffers");
+        assert_eq!(
+            model.attr_lists.len(),
+            18,
+            "Spyro has 18 vertex format/attr lists"
+        );
     }
 
     #[test]

@@ -1,12 +1,90 @@
-use crate::mesh_conversion::{normalize_model_mesh, Mesh as ProceduralMesh};
+use crate::mesh_conversion::{combine_or_normalize_model_meshes, Mesh as ProceduralMesh};
 use crate::texture_conversion::create_colored_material;
 use bevy::prelude::*;
 use bevy::utils::HashMap;
 use skylands_core::{
-    resolve_character_model_archive, ActorIdentity, Collectible, Hero, Projectile, Prop, Villain,
+    get_character_info, resolve_character_model_archive, resolve_model_archive, ActorIdentity,
+    Collectible, Element, Hero, Projectile, Prop, Villain,
 };
 use skylands_formats::AssetLoader;
 use std::sync::{Arc, Mutex};
+
+pub fn element_to_color(element: Element) -> Color {
+    let (r, g, b) = element.rgb();
+    Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct ModelVisualRegistry {
+    pub cache: HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+
+impl ModelVisualRegistry {
+    pub fn get_or_load_model(
+        &mut self,
+        identifier: &str,
+        target_height: Option<f32>,
+        base_color: Option<Color>,
+        asset_server: Option<&CharacterAssetServer>,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
+        let key = identifier.to_ascii_lowercase();
+        if let Some(pair) = self.cache.get(&key) {
+            return Some(pair.clone());
+        }
+
+        let asset_server = asset_server?;
+        let loader = asset_server.loader.lock().ok()?;
+
+        let resolved_path = if loader.has_file(identifier) {
+            Some(identifier.to_string())
+        } else if let Some((cat, name)) = identifier.split_once('/') {
+            resolve_model_archive(cat, name)
+        } else {
+            resolve_model_archive("character", identifier)
+                .or_else(|| resolve_model_archive("outfit", identifier))
+                .or_else(|| resolve_model_archive("item", identifier))
+                .or_else(|| resolve_model_archive("misc", identifier))
+                .or_else(|| resolve_model_archive("level", identifier))
+        }?;
+
+        let model = loader.load_igb(&resolved_path).ok()?;
+        let bevy_mesh = combine_or_normalize_model_meshes(&model.meshes, target_height);
+        let mesh_handle = meshes.add(bevy_mesh);
+
+        let base_color_texture = None;
+        let arc_name = resolved_path
+            .strip_suffix(".bld")
+            .unwrap_or(&resolved_path)
+            .to_string()
+            + ".arc";
+        if loader.has_file(&arc_name) {
+            if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
+                let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
+                // ponytail: texture asset addition deferred; standard material with elemental color
+                let _ = img;
+            }
+        }
+        if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&resolved_path) {
+            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+            let _ = img;
+        }
+
+        let color = base_color.unwrap_or(Color::srgb(0.7, 0.7, 0.7));
+        let material_handle = materials.add(StandardMaterial {
+            base_color: color,
+            base_color_texture,
+            perceptual_roughness: 0.8,
+            reflectance: 0.2,
+            ..default()
+        });
+
+        let pair = (mesh_handle, material_handle);
+        self.cache.insert(key, pair.clone());
+        Some(pair)
+    }
+}
 
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
@@ -34,19 +112,25 @@ impl CharacterVisualRegistry {
             .or_else(|| resolve_character_model_archive(character_id))?;
 
         let model = loader.load_igb(&bld_name).ok()?;
-        let mesh = model.meshes.iter().find(|m| !m.vertices.is_empty())?;
-
-        let normalized_bevy_mesh = normalize_model_mesh(mesh, 1.8);
+        let normalized_bevy_mesh = combine_or_normalize_model_meshes(&model.meshes, Some(1.8));
         let mesh_handle = meshes.add(normalized_bevy_mesh);
 
         let mat_color = if character_id == 16 {
             Color::srgb(0.42, 0.18, 0.60)
         } else {
-            Color::srgb(0.2, 0.6, 1.0)
+            let (_, elem) = get_character_info(character_id);
+            element_to_color(elem)
         };
+
+        let base_color_texture = None;
+        if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
+            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+            let _ = img;
+        }
 
         let material_handle = materials.add(StandardMaterial {
             base_color: mat_color,
+            base_color_texture,
             perceptual_roughness: 0.8,
             reflectance: 0.2,
             ..default()
@@ -175,6 +259,7 @@ pub fn actor_visual_sync_system(
     assets: Option<Res<RenderMeshAssets>>,
     asset_server: Option<Res<CharacterAssetServer>>,
     mut visual_registry: Option<ResMut<CharacterVisualRegistry>>,
+    mut model_registry: Option<ResMut<ModelVisualRegistry>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     actor_query: Query<
@@ -217,15 +302,61 @@ pub fn actor_visual_sync_system(
                 ));
             }
         } else if maybe_villain.is_some() {
-            commands.entity(entity).insert((
-                Mesh3d(assets.villain_mesh.clone()),
-                MeshMaterial3d(assets.villain_material.clone()),
-            ));
+            let villain_visual = model_registry.as_mut().and_then(|reg| {
+                let resolved_archive;
+                let model_name = if let Some(path) = ident.model_path.as_deref() {
+                    path
+                } else if ident.character_id > 0 {
+                    resolved_archive = resolve_character_model_archive(ident.character_id)?;
+                    &resolved_archive
+                } else {
+                    return None;
+                };
+                let (_, elem) = get_character_info(ident.character_id);
+                let col = Some(element_to_color(elem));
+                reg.get_or_load_model(
+                    model_name,
+                    Some(2.0),
+                    col,
+                    asset_server.as_deref(),
+                    &mut meshes,
+                    &mut materials,
+                )
+            });
+
+            if let Some((mesh, mat)) = villain_visual {
+                commands
+                    .entity(entity)
+                    .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
+            } else {
+                commands.entity(entity).insert((
+                    Mesh3d(assets.villain_mesh.clone()),
+                    MeshMaterial3d(assets.villain_material.clone()),
+                ));
+            }
         } else if maybe_prop.is_some() {
-            commands.entity(entity).insert((
-                Mesh3d(assets.prop_mesh.clone()),
-                MeshMaterial3d(assets.prop_material.clone()),
-            ));
+            let prop_visual = model_registry.as_mut().and_then(|reg| {
+                let path = ident.model_path.as_deref()?;
+                reg.get_or_load_model(
+                    path,
+                    Some(1.0),
+                    Some(Color::srgb(0.6, 0.4, 0.2)),
+                    asset_server.as_deref(),
+                    &mut meshes,
+                    &mut materials,
+                )
+            });
+
+            if let Some((mesh, mat)) = prop_visual {
+                commands
+                    .entity(entity)
+                    .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
+            } else {
+                commands.entity(entity).insert((
+                    Mesh3d(assets.prop_mesh.clone()),
+                    MeshMaterial3d(assets.prop_material.clone()),
+                ));
+            }
         }
     }
 
@@ -298,6 +429,7 @@ mod tests {
         app.init_resource::<Assets<StandardMaterial>>();
         app.init_resource::<CharacterAssetServer>();
         app.init_resource::<CharacterVisualRegistry>();
+        app.init_resource::<ModelVisualRegistry>();
 
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
         let hero_mesh = meshes.add(ProceduralMesh::prop_cube(0.5).to_bevy());
@@ -442,6 +574,81 @@ mod tests {
             assert!(loaded_mesh.count_vertices() >= 3);
             let loaded_mat = materials.get(&mat_handle).expect("material in assets");
             assert_eq!(loaded_mat.base_color, Color::srgb(0.42, 0.18, 0.60));
+
+            // Verify igImage2 extraction
+            let loader = server.loader.lock().unwrap();
+            let tex_res = loader.load_first_image_rgba("016_Spyro.bld");
+            assert!(tex_res.is_ok(), "First image rgba extracted from Spyro BLD");
+            let (w, h, rgba) = tex_res.unwrap();
+            assert!(w > 0 && h > 0);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }
+    }
+
+    #[test]
+    fn test_universal_model_registry_loads_hats_and_items() {
+        let root1 = std::path::Path::new("assets/files");
+        let root2 = std::path::Path::new("../../assets/files");
+        let root = if root1.exists() {
+            Some(root1)
+        } else if root2.exists() {
+            Some(root2)
+        } else {
+            None
+        };
+
+        if let Some(r) = root {
+            let server = CharacterAssetServer::default();
+            {
+                let mut loader = server.loader.lock().unwrap();
+                let _ = loader.mount_dir(r);
+            }
+
+            let mut registry = ModelVisualRegistry::default();
+            let mut meshes = Assets::<Mesh>::default();
+            let mut materials = Assets::<StandardMaterial>::default();
+
+            // 1. Hat loading
+            let hat = registry.get_or_load_model(
+                "outfit/Hat_114.bld",
+                Some(0.5),
+                None,
+                Some(&server),
+                &mut meshes,
+                &mut materials,
+            );
+            assert!(
+                hat.is_some(),
+                "Hat_114.bld should be loaded by ModelVisualRegistry"
+            );
+
+            // 2. Item loading
+            let item = registry.get_or_load_model(
+                "item/Item_HelpingHand.bld",
+                Some(0.8),
+                None,
+                Some(&server),
+                &mut meshes,
+                &mut materials,
+            );
+            assert!(
+                item.is_some(),
+                "Item_HelpingHand.bld should be loaded by ModelVisualRegistry"
+            );
+
+            // 3. Villain loading
+            let villain = registry.get_or_load_model(
+                "character/1001_ChompyMage.bld",
+                Some(2.0),
+                None,
+                Some(&server),
+                &mut meshes,
+                &mut materials,
+            );
+            assert!(
+                villain.is_some(),
+                "1001_ChompyMage.bld should be loaded by ModelVisualRegistry"
+            );
         }
     }
 }

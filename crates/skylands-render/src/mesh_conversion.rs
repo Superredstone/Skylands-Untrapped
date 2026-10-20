@@ -601,15 +601,45 @@ pub fn igb_mesh_to_bevy(igb_mesh: &IgbMesh) -> BevyMesh {
     bevy_mesh
 }
 
-pub fn normalize_model_mesh(mesh: &IgbMesh, target_height: f32) -> BevyMesh {
-    if mesh.vertices.is_empty() {
-        return igb_mesh_to_bevy(mesh);
+pub fn combine_or_normalize_model_meshes(
+    meshes: &[IgbMesh],
+    target_height: Option<f32>,
+) -> BevyMesh {
+    let non_empty: Vec<&IgbMesh> = meshes.iter().filter(|m| !m.vertices.is_empty()).collect();
+
+    if non_empty.is_empty() {
+        return Mesh::prop_cube(0.5).to_bevy();
     }
 
-    let mut min = mesh.vertices[0].position;
-    let mut max = mesh.vertices[0].position;
+    let mut total_vert_count = 0;
+    let mut total_idx_count = 0;
+    for m in &non_empty {
+        total_vert_count += m.vertices.len();
+        total_idx_count += m.indices.len();
+    }
 
-    for v in &mesh.vertices {
+    let mut combined_vertices = Vec::with_capacity(total_vert_count);
+    let mut combined_indices = Vec::with_capacity(total_idx_count);
+
+    let mut vert_offset = 0u32;
+    for m in &non_empty {
+        combined_vertices.extend(m.vertices.iter().cloned());
+        if m.indices.is_empty() {
+            for idx in 0..m.vertices.len() as u32 {
+                combined_indices.push(vert_offset + idx);
+            }
+        } else {
+            for &idx in &m.indices {
+                combined_indices.push(vert_offset + idx);
+            }
+        }
+        vert_offset += m.vertices.len() as u32;
+    }
+
+    let mut min = combined_vertices[0].position;
+    let mut max = combined_vertices[0].position;
+
+    for v in &combined_vertices {
         min[0] = min[0].min(v.position[0]);
         min[1] = min[1].min(v.position[1]);
         min[2] = min[2].min(v.position[2]);
@@ -619,9 +649,13 @@ pub fn normalize_model_mesh(mesh: &IgbMesh, target_height: f32) -> BevyMesh {
         max[2] = max[2].max(v.position[2]);
     }
 
-    let orig_height = max[1] - min[1];
-    let scale = if orig_height > 1e-4 {
-        target_height / orig_height
+    let scale = if let Some(th) = target_height {
+        let orig_height = max[1] - min[1];
+        if orig_height > 1e-4 {
+            th / orig_height
+        } else {
+            1.0
+        }
     } else {
         1.0
     };
@@ -630,14 +664,41 @@ pub fn normalize_model_mesh(mesh: &IgbMesh, target_height: f32) -> BevyMesh {
     let center_z = (min[2] + max[2]) * 0.5;
     let min_y = min[1];
 
-    let mut normalized_mesh = mesh.clone();
-    for v in &mut normalized_mesh.vertices {
-        v.position[0] = (v.position[0] - center_x) * scale;
-        v.position[1] = (v.position[1] - min_y) * scale;
-        v.position[2] = (v.position[2] - center_z) * scale;
-    }
+    let mut bevy_mesh = BevyMesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
 
-    igb_mesh_to_bevy(&normalized_mesh)
+    let positions: Vec<[f32; 3]> = combined_vertices
+        .iter()
+        .map(|v| {
+            if target_height.is_some() {
+                [
+                    (v.position[0] - center_x) * scale,
+                    (v.position[1] - min_y) * scale,
+                    (v.position[2] - center_z) * scale,
+                ]
+            } else {
+                v.position
+            }
+        })
+        .collect();
+
+    let normals: Vec<[f32; 3]> = combined_vertices.iter().map(|v| v.normal).collect();
+    let uvs: Vec<[f32; 2]> = combined_vertices.iter().map(|v| v.uv).collect();
+    let colors: Vec<[f32; 4]> = combined_vertices.iter().map(|v| v.color).collect();
+
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    bevy_mesh.insert_indices(Indices::U32(combined_indices));
+
+    bevy_mesh
+}
+
+pub fn normalize_model_mesh(mesh: &IgbMesh, target_height: f32) -> BevyMesh {
+    combine_or_normalize_model_meshes(std::slice::from_ref(mesh), Some(target_height))
 }
 
 pub fn igb_model_to_bevy_meshes(model: &IgbModel) -> Vec<BevyMesh> {
@@ -802,6 +863,72 @@ mod tests {
             assert!(bevy_mesh.attribute(BevyMesh::ATTRIBUTE_NORMAL).is_some());
             assert!(bevy_mesh.attribute(BevyMesh::ATTRIBUTE_UV_0).is_some());
             assert!(bevy_mesh.indices().is_some());
+        }
+    }
+
+    #[test]
+    fn test_multi_submesh_combine_and_normalize() {
+        let sub1 = IgbMesh {
+            name: "body".to_string(),
+            vertices: vec![
+                IgbVertex {
+                    position: [-1.0, 0.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    ..Default::default()
+                },
+                IgbVertex {
+                    position: [1.0, 2.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [1.0, 1.0],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    ..Default::default()
+                },
+            ],
+            indices: vec![0, 1],
+            material_name: None,
+        };
+        let sub2 = IgbMesh {
+            name: "hat".to_string(),
+            vertices: vec![
+                IgbVertex {
+                    position: [0.0, 2.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.5, 0.5],
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    ..Default::default()
+                },
+                IgbVertex {
+                    position: [0.0, 4.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.5, 1.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    ..Default::default()
+                },
+            ],
+            indices: vec![0, 1],
+            material_name: None,
+        };
+
+        let combined = combine_or_normalize_model_meshes(&[sub1, sub2], Some(2.0));
+        assert_eq!(combined.count_vertices(), 4);
+        let indices = combined.indices().unwrap();
+        assert_eq!(indices.len(), 4);
+        let idx_vec: Vec<u32> = match indices {
+            Indices::U32(v) => v.clone(),
+            _ => panic!("expected u32 indices"),
+        };
+        assert_eq!(idx_vec, vec![0, 1, 2, 3]);
+
+        let pos = combined.attribute(BevyMesh::ATTRIBUTE_POSITION).unwrap();
+        if let bevy::render::mesh::VertexAttributeValues::Float32x3(pts) = pos {
+            let min_y = pts.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+            let max_y = pts.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+            assert!((min_y - 0.0).abs() < 1e-4);
+            assert!((max_y - 2.0).abs() < 1e-4);
+        } else {
+            panic!("expected Float32x3");
         }
     }
 }

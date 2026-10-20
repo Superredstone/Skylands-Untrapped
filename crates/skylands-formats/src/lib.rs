@@ -13,7 +13,8 @@ pub use igb::{
     slerp_quat, AnimationClip, AttrFormat, AttrSemantic, Bone, BoneTrack, IgbAttrDesc, IgbAttrList,
     IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader, IgbIndexBuffer,
     IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef, IgbVertex,
-    IgbVertexBuffer, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance, Skeleton,
+    IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
+    IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};
 pub use texture::{decode_cmpr, decode_dxt1, decode_dxt1_block, decode_rgb565, TextureError};

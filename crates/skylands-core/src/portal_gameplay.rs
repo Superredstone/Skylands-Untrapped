@@ -131,12 +131,15 @@ pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
         std::path::Path::new("../assets/files/character"),
     ];
 
-    let prefix = format!("{}_", character_id);
+    let prefix1 = format!("{}_", character_id);
+    let prefix2 = format!("{:03}_", character_id);
     for dir in &search_dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&prefix) && name.ends_with(".bld") {
+                if (name.starts_with(&prefix1) || name.starts_with(&prefix2))
+                    && name.ends_with(".bld")
+                {
                     return Some(name);
                 }
             }
@@ -144,6 +147,51 @@ pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
     }
 
     Some(format!("{}_Character.bld", character_id))
+}
+
+pub fn resolve_model_archive(category: &str, identifier: &str) -> Option<String> {
+    let clean_id = identifier.replace('\\', "/");
+    let file_name = clean_id.rsplit('/').next().unwrap_or(&clean_id);
+
+    let base_name = if file_name.ends_with(".bld") || file_name.ends_with(".arc") {
+        file_name.to_string()
+    } else {
+        format!("{}.bld", file_name)
+    };
+
+    let search_dirs = [
+        format!("assets/files/{}", category),
+        format!("../../assets/files/{}", category),
+        format!("../assets/files/{}", category),
+    ];
+
+    for dir_str in &search_dirs {
+        let dir = std::path::Path::new(dir_str);
+        if !dir.is_dir() {
+            continue;
+        }
+
+        let exact = dir.join(&base_name);
+        if exact.exists() {
+            return Some(base_name);
+        }
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let lower_target = base_name.to_ascii_lowercase();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.to_ascii_lowercase() == lower_target
+                    || name
+                        .to_ascii_lowercase()
+                        .starts_with(lower_target.strip_suffix(".bld").unwrap_or(&lower_target))
+                {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
+    Some(base_name)
 }
 
 pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'static str>) {
@@ -280,5 +328,9 @@ mod tests {
         assert_eq!(resolve_character_id_by_name("food-fight"), Some(401));
         assert_eq!(resolve_character_id_by_name("spyro"), Some(16));
         assert_eq!(resolve_character_id_by_name("NonExistent"), None);
+
+        assert!(resolve_model_archive("outfit", "Hat_114").is_some());
+        assert!(resolve_model_archive("item", "Item_HelpingHand").is_some());
+        assert!(resolve_model_archive("character", "1001_ChompyMage").is_some());
     }
 }
