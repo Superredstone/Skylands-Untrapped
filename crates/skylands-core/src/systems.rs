@@ -746,76 +746,212 @@ pub fn state_transition_update_system(
     }
 }
 
-pub fn setup_default_scene(mut commands: Commands) {
-    // Academy Courtyard Zone Trigger
-    commands.spawn((
-        ZoneTrigger {
-            id: 1,
-            prompt: "Press A to Enter Academy".into(),
-            target_zone: "Academy Library".into(),
-            target_spawn: Vec3::new(0.0, 0.0, 5.0),
-            radius: 2.5,
-        },
-        Transform::from_xyz(0.0, 0.0, -8.0),
-    ));
+pub fn setup_default_scene(
+    mut commands: Commands,
+    asset_server: Option<Res<GameAssetServer>>,
+    active_level: Option<Res<ActiveLevel>>,
+    mut env_col: Option<ResMut<EnvironmentCollision>>,
+    mut game_stats: Option<ResMut<GameStats>>,
+) {
+    let level_name = active_level
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| "Level_Hub_2014_01.bld".to_string());
 
-    // Wooden barrel prop
-    commands.spawn((
-        ActorIdentity {
-            id: 2001,
-            character_id: 0,
-            name: "prop_wooden_barrel".into(),
-            is_villain: false,
-            model_path: None,
-            texture_path: None,
-        },
-        Prop { destructible: true },
-        Health {
-            current: 50,
-            max: 50,
-        },
-        Transform::from_xyz(5.0, 0.0, 0.0),
-        CharacterCollider {
-            radius: 0.5,
-            height: 1.0,
-            step_height: 0.0,
-            grounded: true,
-        },
-    ));
+    let mut loaded_real_level = false;
 
-    // Gold coin pickup
-    commands.spawn((
-        ActorIdentity {
-            id: 3001,
-            character_id: 0,
-            name: "pickup_coin_gold".into(),
-            is_villain: false,
-            model_path: None,
-            texture_path: None,
-        },
-        Collectible {
-            value: 1,
-            collected: false,
-        },
-        Transform::from_xyz(0.0, 0.5, -2.0),
-    ));
+    if let Some(server) = asset_server {
+        if let Ok(loader) = server.loader.lock() {
+            let resolved = if loader.has_file(&level_name) {
+                Some(level_name.clone())
+            } else {
+                crate::portal_gameplay::resolve_model_archive("level", &level_name)
+            };
 
-    // Emerald gem pickup
-    commands.spawn((
-        ActorIdentity {
-            id: 3002,
-            character_id: 0,
-            name: "pickup_gem_emerald".into(),
-            is_villain: false,
-            model_path: None,
-            texture_path: None,
-        },
-        Collectible {
-            value: 5,
-            collected: false,
-        },
-        Transform::from_xyz(0.0, 0.5, -10.0),
-    ));
+            if let Some(path) = resolved {
+                if let Ok(model) = loader.load_igb(&path) {
+                    let col_mesh = crate::collision::CollisionMesh::from_igb(&model);
+                    if !col_mesh.triangles.is_empty() {
+                        if let Some(ref mut env) = env_col {
+                            env.mesh = col_mesh;
+                        }
+                    }
+
+                    let markers = model.extract_level_markers();
+                    let mut marker_id_counter = 5000u32;
+                    let mut has_spawn = false;
+
+                    for marker in &markers {
+                        match marker.kind {
+                            skylands_formats::igb::MarkerKind::Spawn => {
+                                if !has_spawn {
+                                    if let Some(ref mut env) = env_col {
+                                        env.spawn_point = Vec3::new(
+                                            marker.position[0],
+                                            marker.position[1],
+                                            marker.position[2],
+                                        );
+                                    }
+                                    has_spawn = true;
+                                }
+                            }
+                            skylands_formats::igb::MarkerKind::Doorway
+                            | skylands_formats::igb::MarkerKind::TriggerZone => {
+                                commands.spawn((
+                                    ZoneTrigger {
+                                        id: marker_id_counter,
+                                        prompt: format!("Press A to enter {}", marker.name),
+                                        target_zone: marker.name.clone(),
+                                        target_spawn: Vec3::new(
+                                            marker.position[0],
+                                            marker.position[1],
+                                            marker.position[2] + 2.0,
+                                        ),
+                                        radius: 2.5,
+                                    },
+                                    Transform::from_xyz(
+                                        marker.position[0],
+                                        marker.position[1],
+                                        marker.position[2],
+                                    ),
+                                ));
+                                marker_id_counter += 1;
+                            }
+                            skylands_formats::igb::MarkerKind::Prop => {
+                                commands.spawn((
+                                    ActorIdentity {
+                                        id: marker_id_counter,
+                                        character_id: 0,
+                                        name: marker.name.clone(),
+                                        is_villain: false,
+                                        model_path: None,
+                                        texture_path: None,
+                                    },
+                                    Prop { destructible: true },
+                                    Health {
+                                        current: 50,
+                                        max: 50,
+                                    },
+                                    Transform::from_xyz(
+                                        marker.position[0],
+                                        marker.position[1],
+                                        marker.position[2],
+                                    ),
+                                    CharacterCollider {
+                                        radius: 0.5,
+                                        height: 1.0,
+                                        step_height: 0.0,
+                                        grounded: true,
+                                    },
+                                ));
+                                marker_id_counter += 1;
+                            }
+                            skylands_formats::igb::MarkerKind::Collectible => {
+                                commands.spawn((
+                                    ActorIdentity {
+                                        id: marker_id_counter,
+                                        character_id: 0,
+                                        name: marker.name.clone(),
+                                        is_villain: false,
+                                        model_path: None,
+                                        texture_path: None,
+                                    },
+                                    Collectible {
+                                        value: 1,
+                                        collected: false,
+                                    },
+                                    Transform::from_xyz(
+                                        marker.position[0],
+                                        marker.position[1] + 0.5,
+                                        marker.position[2],
+                                    ),
+                                ));
+                                marker_id_counter += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(ref mut stats) = game_stats {
+                        stats.active_zone = level_name
+                            .strip_suffix(".bld")
+                            .unwrap_or(&level_name)
+                            .to_string();
+                    }
+
+                    loaded_real_level = true;
+                }
+            }
+        }
+    }
+
+    if !loaded_real_level {
+        // Fallback synthetic courtyard scene
+        commands.spawn((
+            ZoneTrigger {
+                id: 1,
+                prompt: "Press A to Enter Academy".into(),
+                target_zone: "Academy Library".into(),
+                target_spawn: Vec3::new(0.0, 0.0, 5.0),
+                radius: 2.5,
+            },
+            Transform::from_xyz(0.0, 0.0, -8.0),
+        ));
+
+        commands.spawn((
+            ActorIdentity {
+                id: 2001,
+                character_id: 0,
+                name: "prop_wooden_barrel".into(),
+                is_villain: false,
+                model_path: None,
+                texture_path: None,
+            },
+            Prop { destructible: true },
+            Health {
+                current: 50,
+                max: 50,
+            },
+            Transform::from_xyz(5.0, 0.0, 0.0),
+            CharacterCollider {
+                radius: 0.5,
+                height: 1.0,
+                step_height: 0.0,
+                grounded: true,
+            },
+        ));
+
+        commands.spawn((
+            ActorIdentity {
+                id: 3001,
+                character_id: 0,
+                name: "pickup_coin_gold".into(),
+                is_villain: false,
+                model_path: None,
+                texture_path: None,
+            },
+            Collectible {
+                value: 1,
+                collected: false,
+            },
+            Transform::from_xyz(0.0, 0.5, -2.0),
+        ));
+
+        commands.spawn((
+            ActorIdentity {
+                id: 3002,
+                character_id: 0,
+                name: "pickup_gem_emerald".into(),
+                is_villain: false,
+                model_path: None,
+                texture_path: None,
+            },
+            Collectible {
+                value: 5,
+                collected: false,
+            },
+            Transform::from_xyz(0.0, 0.5, -10.0),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1036,5 +1172,28 @@ mod tests {
         let (_, ident) = hero_query.iter(app.world()).next().unwrap();
         assert_eq!(ident.character_id, 16);
         assert_eq!(ident.name, "Spyro");
+    }
+
+    #[test]
+    fn test_setup_default_scene_spawns_courtyard_entities() {
+        let mut app = build_test_app();
+        app.update();
+
+        let mut trigger_query = app.world_mut().query::<&ZoneTrigger>();
+        assert_eq!(trigger_query.iter(app.world()).count(), 1);
+
+        let mut collect_query = app.world_mut().query::<&Collectible>();
+        assert_eq!(collect_query.iter(app.world()).count(), 2);
+
+        let mut prop_query = app.world_mut().query::<&Prop>();
+        assert_eq!(prop_query.iter(app.world()).count(), 1);
+    }
+
+    #[test]
+    fn test_active_level_resource_defaults() {
+        let lvl = ActiveLevel::default();
+        assert_eq!(lvl.name, "Level_Hub_2014_01.bld");
+        let custom = ActiveLevel::new("Level_313_Tutorial.bld");
+        assert_eq!(custom.name, "Level_313_Tutorial.bld");
     }
 }

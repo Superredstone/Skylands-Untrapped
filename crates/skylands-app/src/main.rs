@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use bevy::prelude::*;
 use skylands_core::{
-    resolve_character_id_by_name, ActivePortal, ActorIdentity, GameState, PortalGameplayState,
-    SkylandsCorePlugin,
+    resolve_character_id_by_name, ActiveLevel, ActivePortal, ActorIdentity, GameState,
+    PortalGameplayState, SkylandsCorePlugin,
 };
 use skylands_extractor::Extractor;
 use skylands_formats::AssetLoader;
@@ -51,6 +51,12 @@ struct Args {
         help = "Spawn specified character directly by name or ID (e.g. 'spyro' or '16')"
     )]
     character: Option<String>,
+
+    #[arg(
+        long,
+        help = "Specify level archive to load (default: 'Level_Hub_2014_01.bld')"
+    )]
+    level: Option<String>,
 
     #[arg(
         long,
@@ -158,6 +164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .unwrap_or(16);
 
+    let active_level = args
+        .level
+        .as_ref()
+        .map(|lvl| ActiveLevel::new(lvl.as_str()))
+        .unwrap_or_default();
+
     // 4. Initialize portal
     let portal = init_portal(args.mock_portal, Some(resolved_char_id));
 
@@ -168,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.add_plugins(MinimalPlugins);
         app.add_plugins(SkylandsCorePlugin);
         app.insert_resource(asset_server.clone());
+        app.insert_resource(active_level.clone());
         app.insert_resource(portal);
 
         let mut gameplay = app.world_mut().resource_mut::<PortalGameplayState>();
@@ -211,6 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewer_mode: args.viewer,
     });
     app.insert_resource(asset_server);
+    app.insert_resource(active_level);
     app.insert_resource(portal);
 
     let mut gameplay = app.world_mut().resource_mut::<PortalGameplayState>();

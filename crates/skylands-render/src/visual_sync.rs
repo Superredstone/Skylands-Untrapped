@@ -2,12 +2,13 @@ use crate::mesh_conversion::{combine_or_normalize_model_meshes, Mesh as Procedur
 use crate::texture_conversion::create_colored_material;
 use bevy::prelude::*;
 use bevy::utils::HashMap;
+pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
-    get_character_info, resolve_character_model_archive, resolve_model_archive, ActorIdentity,
-    Collectible, Element, Hero, Projectile, Prop, Villain,
+    get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
+    ActorIdentity, Collectible, Element, Hero, Projectile, Prop, Villain,
 };
+#[cfg(test)]
 use skylands_formats::AssetLoader;
-use std::sync::{Arc, Mutex};
 
 pub fn element_to_color(element: Element) -> Color {
     let (r, g, b) = element.rgb();
@@ -150,35 +151,6 @@ impl CharacterVisualRegistry {
     }
 }
 
-#[derive(Resource, Clone, Default)]
-pub struct CharacterAssetServer {
-    pub loader: Arc<Mutex<AssetLoader>>,
-}
-
-impl CharacterAssetServer {
-    pub fn new(loader: AssetLoader) -> Self {
-        Self {
-            loader: Arc::new(Mutex::new(loader)),
-        }
-    }
-
-    pub fn from_arc(loader: Arc<Mutex<AssetLoader>>) -> Self {
-        Self { loader }
-    }
-}
-
-impl From<AssetLoader> for CharacterAssetServer {
-    fn from(loader: AssetLoader) -> Self {
-        Self::new(loader)
-    }
-}
-
-impl From<Arc<Mutex<AssetLoader>>> for CharacterAssetServer {
-    fn from(loader: Arc<Mutex<AssetLoader>>) -> Self {
-        Self { loader }
-    }
-}
-
 #[derive(Resource, Clone)]
 pub struct RenderMeshAssets {
     pub courtyard_mesh: Handle<Mesh>,
@@ -199,10 +171,15 @@ pub struct RenderMeshAssets {
     pub projectile_material: Handle<StandardMaterial>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn setup_environment_and_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Option<Res<CharacterAssetServer>>,
+    active_level: Option<Res<ActiveLevel>>,
+    viewer_settings: Option<Res<crate::ViewerSettings>>,
 ) {
     let courtyard_mesh = meshes.add(ProceduralMesh::synthetic_courtyard().to_bevy());
     let courtyard_material = create_colored_material(Color::srgb(0.5, 0.5, 0.48), &mut materials);
@@ -228,13 +205,84 @@ pub fn setup_environment_and_assets(
     let projectile_mesh = meshes.add(ProceduralMesh::collectible_coin(0.2, 0.1, 8).to_bevy());
     let projectile_material = create_colored_material(Color::srgb(1.0, 0.6, 0.1), &mut materials);
 
-    // Spawn courtyard ground and pedestal in world
-    commands.spawn((
-        Mesh3d(courtyard_mesh.clone()),
-        MeshMaterial3d(courtyard_material.clone()),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-    ));
+    let is_viewer = viewer_settings
+        .as_ref()
+        .map(|v| v.viewer_mode)
+        .unwrap_or(false);
+    let level_name = active_level
+        .as_ref()
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| "Level_Hub_2014_01.bld".to_string());
 
+    let mut loaded_real_level = false;
+
+    if !is_viewer {
+        if let Some(ref server) = asset_server {
+            if let Ok(loader) = server.loader.lock() {
+                let resolved = if loader.has_file(&level_name) {
+                    Some(level_name.clone())
+                } else {
+                    resolve_model_archive("level", &level_name)
+                };
+
+                if let Some(path) = resolved {
+                    if let Ok(model) = loader.load_igb(&path) {
+                        if !model.meshes.is_empty() {
+                            let mut base_color_texture = None;
+                            if let Ok((w, h, rgba)) =
+                                loader.load_companion_texture_rgba(&path, None)
+                            {
+                                let img =
+                                    crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                                base_color_texture = Some(images.add(img));
+                            } else if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&path) {
+                                let img =
+                                    crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                                base_color_texture = Some(images.add(img));
+                            }
+
+                            let mat_color = if base_color_texture.is_some() {
+                                Color::WHITE
+                            } else {
+                                Color::srgb(0.7, 0.7, 0.68)
+                            };
+
+                            let level_material = materials.add(StandardMaterial {
+                                base_color: mat_color,
+                                base_color_texture,
+                                perceptual_roughness: 0.85,
+                                reflectance: 0.15,
+                                ..default()
+                            });
+
+                            let combined_mesh =
+                                combine_or_normalize_model_meshes(&model.meshes, None);
+                            let mesh_handle = meshes.add(combined_mesh);
+
+                            commands.spawn((
+                                Mesh3d(mesh_handle),
+                                MeshMaterial3d(level_material),
+                                Transform::from_xyz(0.0, 0.0, 0.0),
+                            ));
+
+                            loaded_real_level = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !loaded_real_level {
+        // Spawn courtyard ground fallback
+        commands.spawn((
+            Mesh3d(courtyard_mesh.clone()),
+            MeshMaterial3d(courtyard_material.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+    }
+
+    // Spawn pedestal in world
     commands.spawn((
         Mesh3d(pedestal_mesh.clone()),
         MeshMaterial3d(pedestal_material.clone()),
@@ -830,6 +878,56 @@ mod tests {
             .expect("image exists in Assets<Image>");
         assert_eq!(image.texture_descriptor.size.width, 128);
         assert_eq!(image.texture_descriptor.size.height, 128);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_setup_environment_and_assets_level_loading() {
+        let tmp_dir = std::env::temp_dir().join("skylands_level_env_test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let bld_path = tmp_dir.join("Level_Hub_2014_01.bld");
+        let arc_path = tmp_dir.join("Level_Hub_2014_01.arc");
+
+        let mut igb_bytes = Vec::new();
+        igb_bytes.extend_from_slice(b"IGBF");
+        igb_bytes.extend_from_slice(&8u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..12 {
+            igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+
+        create_test_archive(&bld_path, &[("level.bld", &igb_bytes)]).expect("write level bld");
+
+        let mut cmpr_data = vec![0u8; 32 * 16 * 16];
+        for chunk in cmpr_data.as_chunks_mut::<8>().0 {
+            chunk[0..2].copy_from_slice(&0x07E0u16.to_be_bytes());
+            chunk[2..4].copy_from_slice(&0x0000u16.to_be_bytes());
+        }
+        create_test_archive(&arc_path, &[("textures/hub.png.igb.tex.igz", &cmpr_data)])
+            .expect("write level arc");
+
+        let mut loader = AssetLoader::default();
+        loader.mount_dir(&tmp_dir).expect("mount dir");
+        let server = CharacterAssetServer::new(loader);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.insert_resource(server);
+        app.insert_resource(ActiveLevel::new("Level_Hub_2014_01.bld"));
+        app.add_systems(Startup, setup_environment_and_assets);
+
+        app.update();
+
+        assert!(app.world().get_resource::<RenderMeshAssets>().is_some());
+        let mesh_count = app.world_mut().query::<&Mesh3d>().iter(app.world()).count();
+        assert!(mesh_count >= 2, "Must spawn level geometry and pedestal");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

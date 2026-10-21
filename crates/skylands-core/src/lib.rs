@@ -44,6 +44,8 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<CaptureProgress>()
             .init_resource::<ZoneTransitionProgress>()
             .init_resource::<EnvironmentCollision>()
+            .init_resource::<ActiveLevel>()
+            .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
             .add_systems(Startup, systems::setup_default_scene)
             .add_systems(

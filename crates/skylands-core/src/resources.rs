@@ -2,11 +2,61 @@ use crate::audio::PortalSpeakerSink;
 use crate::collision::CollisionMesh;
 use crate::events::PortalEvent;
 use bevy::prelude::*;
+use skylands_formats::AssetLoader;
 use skylands_portal::protocol::{
     decode_portal_response, encode_color_packet, encode_trap_light_packet, PortalZone, REPORT_SIZE,
 };
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+#[derive(Resource, Clone, Default)]
+pub struct GameAssetServer {
+    pub loader: Arc<Mutex<AssetLoader>>,
+}
+
+impl GameAssetServer {
+    pub fn new(loader: AssetLoader) -> Self {
+        Self {
+            loader: Arc::new(Mutex::new(loader)),
+        }
+    }
+
+    pub fn from_arc(loader: Arc<Mutex<AssetLoader>>) -> Self {
+        Self { loader }
+    }
+}
+
+impl From<AssetLoader> for GameAssetServer {
+    fn from(loader: AssetLoader) -> Self {
+        Self::new(loader)
+    }
+}
+
+impl From<Arc<Mutex<AssetLoader>>> for GameAssetServer {
+    fn from(loader: Arc<Mutex<AssetLoader>>) -> Self {
+        Self { loader }
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct ActiveLevel {
+    pub name: String,
+}
+
+impl Default for ActiveLevel {
+    fn default() -> Self {
+        Self {
+            name: "Level_Hub_2014_01.bld".to_string(),
+        }
+    }
+}
+
+impl ActiveLevel {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
