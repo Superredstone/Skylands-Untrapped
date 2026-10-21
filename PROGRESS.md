@@ -51,7 +51,7 @@
 
 ### Phase 1: Texture Binding & Visual Pipeline
 - [x] Bind decoded CMPR/DXT1 textures to Bevy `StandardMaterial.base_color_texture` instead of placeholder solid colors.
-- [ ] Correct UV coordinate decoding for character and environment submeshes.
+- [x] Correct UV coordinate decoding for character and environment submeshes.
 - [ ] Automated character texture pairing: resolve `.arc` texture bundle alongside `.bld` mesh bundle.
 - [ ] Support normal maps and specular maps where present in `igImage2` registries.
 
