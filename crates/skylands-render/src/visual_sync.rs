@@ -228,44 +228,172 @@ pub fn setup_environment_and_assets(
                 if let Some(path) = resolved {
                     if let Ok(model) = loader.load_igb(&path) {
                         if !model.meshes.is_empty() {
-                            let mut base_color_texture = None;
-                            if let Ok((w, h, rgba)) =
-                                loader.load_companion_texture_rgba(&path, None)
-                            {
-                                let img =
-                                    crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                                base_color_texture = Some(images.add(img));
-                            } else if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&path) {
-                                let img =
-                                    crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                                base_color_texture = Some(images.add(img));
+                            let is_level = path.to_ascii_lowercase().contains("level");
+                            let instances = model.evaluate_scene_graph();
+
+                            let mut material_groups: HashMap<
+                                String,
+                                Vec<&skylands_formats::igb::SceneInstance>,
+                            > = HashMap::new();
+                            if !instances.is_empty() && !model.geometries.is_empty() {
+                                for inst in &instances {
+                                    if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                                        let mat_name = geo
+                                            .mesh
+                                            .as_ref()
+                                            .and_then(|m| m.material_name.clone())
+                                            .unwrap_or_else(|| format!("mat_{}", geo.name));
+                                        material_groups.entry(mat_name).or_default().push(inst);
+                                    }
+                                }
                             }
 
-                            let mat_color = if base_color_texture.is_some() {
-                                Color::WHITE
+                            if material_groups.is_empty() {
+                                let mut base_color_texture = None;
+                                if let Ok((w, h, rgba)) =
+                                    loader.load_companion_texture_rgba(&path, None)
+                                {
+                                    let img =
+                                        crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                                    base_color_texture = Some(images.add(img));
+                                } else if !is_level {
+                                    if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&path) {
+                                        let img = crate::texture_conversion::rgba8_to_bevy_image(
+                                            w, h, rgba,
+                                        );
+                                        base_color_texture = Some(images.add(img));
+                                    }
+                                }
+
+                                let mat_color = if base_color_texture.is_some() {
+                                    Color::WHITE
+                                } else {
+                                    Color::srgb(0.72, 0.70, 0.65)
+                                };
+
+                                let level_material = materials.add(StandardMaterial {
+                                    base_color: mat_color,
+                                    base_color_texture,
+                                    perceptual_roughness: 0.85,
+                                    reflectance: 0.20,
+                                    cull_mode: None,
+                                    double_sided: true,
+                                    ..default()
+                                });
+
+                                let combined_mesh =
+                                    combine_or_normalize_model_meshes(&model.meshes, None);
+                                let mesh_handle = meshes.add(combined_mesh);
+
+                                commands.spawn((
+                                    Mesh3d(mesh_handle),
+                                    MeshMaterial3d(level_material),
+                                    Transform::from_xyz(0.0, 0.0, 0.0),
+                                ));
+
+                                loaded_real_level = true;
                             } else {
-                                Color::srgb(0.7, 0.7, 0.68)
-                            };
+                                for (mat_name, group_instances) in material_groups {
+                                    let mut total_verts = 0;
+                                    let mut total_idxs = 0;
+                                    for inst in &group_instances {
+                                        if let Some(geo) = model.geometries.get(inst.geometry_index)
+                                        {
+                                            if let Some(ref m) = geo.mesh {
+                                                total_verts += m.vertices.len();
+                                                total_idxs += m.indices.len();
+                                            }
+                                        }
+                                    }
 
-                            let level_material = materials.add(StandardMaterial {
-                                base_color: mat_color,
-                                base_color_texture,
-                                perceptual_roughness: 0.85,
-                                reflectance: 0.15,
-                                ..default()
-                            });
+                                    if total_verts == 0 || total_idxs == 0 {
+                                        continue;
+                                    }
 
-                            let combined_mesh =
-                                combine_or_normalize_model_meshes(&model.meshes, None);
-                            let mesh_handle = meshes.add(combined_mesh);
+                                    let mut positions = Vec::with_capacity(total_verts);
+                                    let mut normals = Vec::with_capacity(total_verts);
+                                    let mut uvs = Vec::with_capacity(total_verts);
+                                    let mut colors = Vec::with_capacity(total_verts);
+                                    let mut indices = Vec::with_capacity(total_idxs);
+                                    let mut vert_offset = 0u32;
 
-                            commands.spawn((
-                                Mesh3d(mesh_handle),
-                                MeshMaterial3d(level_material),
-                                Transform::from_xyz(0.0, 0.0, 0.0),
-                            ));
+                                    for inst in &group_instances {
+                                        if let Some(geo) = model.geometries.get(inst.geometry_index)
+                                        {
+                                            if let Some(ref m) = geo.mesh {
+                                                if m.vertices.is_empty() || m.indices.is_empty() {
+                                                    continue;
+                                                }
+                                                for v in &m.vertices {
+                                                    positions.push(
+                                                        skylands_formats::igb::transform_point(
+                                                            &inst.world_transform,
+                                                            v.position,
+                                                        ),
+                                                    );
+                                                    normals.push(v.normal);
+                                                    uvs.push(v.uv);
+                                                    colors.push(v.color);
+                                                }
+                                                for &idx in &m.indices {
+                                                    indices.push(vert_offset + idx);
+                                                }
+                                                vert_offset += m.vertices.len() as u32;
+                                            }
+                                        }
+                                    }
 
-                            loaded_real_level = true;
+                                    if indices.is_empty() {
+                                        continue;
+                                    }
+
+                                    let mut bevy_mesh = Mesh::new(
+                                        bevy::render::mesh::PrimitiveTopology::TriangleList,
+                                        bevy::render::render_asset::RenderAssetUsages::default(),
+                                    );
+                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+                                    bevy_mesh
+                                        .insert_indices(bevy::render::mesh::Indices::U32(indices));
+
+                                    let mut base_color_texture = None;
+                                    if let Ok((w, h, rgba)) =
+                                        loader.load_companion_texture_rgba(&path, Some(&mat_name))
+                                    {
+                                        let img = crate::texture_conversion::rgba8_to_bevy_image(
+                                            w, h, rgba,
+                                        );
+                                        base_color_texture = Some(images.add(img));
+                                    }
+
+                                    let mat_color = if base_color_texture.is_some() {
+                                        Color::WHITE
+                                    } else {
+                                        Color::srgb(0.72, 0.70, 0.65)
+                                    };
+
+                                    let submesh_mat = materials.add(StandardMaterial {
+                                        base_color: mat_color,
+                                        base_color_texture,
+                                        perceptual_roughness: 0.85,
+                                        reflectance: 0.20,
+                                        cull_mode: None,
+                                        double_sided: true,
+                                        ..default()
+                                    });
+
+                                    let mesh_handle = meshes.add(bevy_mesh);
+                                    commands.spawn((
+                                        Mesh3d(mesh_handle),
+                                        MeshMaterial3d(submesh_mat),
+                                        Transform::from_xyz(0.0, 0.0, 0.0),
+                                    ));
+
+                                    loaded_real_level = true;
+                                }
+                            }
                         }
                     }
                 }

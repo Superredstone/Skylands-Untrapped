@@ -28,6 +28,15 @@ pub struct AssetLoader {
     igb_cache: Mutex<HashMap<String, Arc<IgbModel>>>,
 }
 
+#[inline]
+pub fn is_ui_texture_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("hud/")
+        || lower.contains("portraits/")
+        || lower.contains("cardgame/")
+        || lower.contains("wantedposters/")
+}
+
 impl AssetLoader {
     pub fn new(vfs: ArchiveMount) -> Self {
         Self {
@@ -186,6 +195,7 @@ impl AssetLoader {
             )));
         }
 
+        let is_level = model_path.to_ascii_lowercase().contains("level");
         let tex_files = self.vfs.find_archive_texture_files(&arc_name);
         let chosen_file = if let Some(pref) = preferred_name {
             let pref_clean = pref.replace('\\', "/");
@@ -198,18 +208,33 @@ impl AssetLoader {
                 .iter()
                 .find(|f| f.to_ascii_lowercase().contains(&pref_stem))
                 .cloned()
-                .or_else(|| tex_files.first().cloned())
+                .or_else(|| {
+                    tex_files
+                        .iter()
+                        .find(|f| !is_level || !is_ui_texture_path(f))
+                        .cloned()
+                })
         } else {
-            tex_files.first().cloned()
+            tex_files
+                .iter()
+                .find(|f| !is_level || !is_ui_texture_path(f))
+                .cloned()
         };
 
         let raw = if let Some(ref file) = chosen_file {
             self.vfs.read_from_archive(&arc_name, file)?
-        } else if let Ok(inner) = self.vfs.read_from_archive(&arc_name, "level.bld") {
-            inner
+        } else if !is_level {
+            if let Ok(inner) = self.vfs.read_from_archive(&arc_name, "level.bld") {
+                inner
+            } else {
+                return Err(AssetError::NotFound(format!(
+                    "No texture files in companion archive {}",
+                    arc_name
+                )));
+            }
         } else {
             return Err(AssetError::NotFound(format!(
-                "No texture files in companion archive {}",
+                "No non-UI texture files in companion archive {}",
                 arc_name
             )));
         };
@@ -252,6 +277,7 @@ impl AssetLoader {
         &self,
         model_path: &str,
     ) -> Result<(u32, u32, Vec<u8>), AssetError> {
+        let is_level = model_path.to_ascii_lowercase().contains("level");
         let model = self.load_igb(model_path);
         if let Ok(ref m) = model {
             if let Some(first_img) = m.images.first() {
@@ -287,6 +313,13 @@ impl AssetLoader {
 
         if let Ok(paired) = self.load_companion_texture_rgba(model_path, None) {
             return Ok(paired);
+        }
+
+        if is_level {
+            return Err(AssetError::NotFound(format!(
+                "No valid environmental texture for level {}",
+                model_path
+            )));
         }
 
         let fallback_rgba = self.load_cmpr_rgba(model_path, 128, 128)?;
@@ -600,5 +633,47 @@ mod tests {
         assert_eq!(auto.2.len(), 128 * 128 * 4);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_level_hub_geometry_and_texture_filtering() {
+        let bld_path = std::path::Path::new("../../assets/files/level/Level_Hub_2014_01.bld");
+        if !bld_path.exists() {
+            return;
+        }
+        let mut loader = AssetLoader::default();
+        loader
+            .mount_dir(std::path::Path::new("../../assets/files"))
+            .unwrap();
+
+        // 1. Must NOT load UI portraits as level companion texture
+        let tex_res = loader.load_companion_texture_rgba("Level_Hub_2014_01.bld", None);
+        assert!(
+            tex_res.is_err(),
+            "Must reject UI portraits/hud as level companion texture"
+        );
+
+        // 2. All triangles in level meshes must respect maximum edge length (no spikes)
+        let model = loader.load_igb("Level_Hub_2014_01.bld").unwrap();
+        assert!(!model.meshes.is_empty());
+        for m in &model.meshes {
+            for tri in m.indices.as_chunks::<3>().0 {
+                let p0 = m.vertices[tri[0] as usize].position;
+                let p1 = m.vertices[tri[1] as usize].position;
+                let p2 = m.vertices[tri[2] as usize].position;
+                let d01_sq =
+                    (p0[0] - p1[0]).powi(2) + (p0[1] - p1[1]).powi(2) + (p0[2] - p1[2]).powi(2);
+                let d12_sq =
+                    (p1[0] - p2[0]).powi(2) + (p1[1] - p2[1]).powi(2) + (p1[2] - p2[2]).powi(2);
+                let d20_sq =
+                    (p2[0] - p0[0]).powi(2) + (p2[1] - p0[1]).powi(2) + (p2[2] - p0[2]).powi(2);
+                let max_sq = d01_sq.max(d12_sq).max(d20_sq);
+                assert!(
+                    max_sq <= 15.0 * 15.0 + 1e-3,
+                    "No triangle edge may exceed 15m in level mesh (found {})",
+                    max_sq.sqrt()
+                );
+            }
+        }
     }
 }

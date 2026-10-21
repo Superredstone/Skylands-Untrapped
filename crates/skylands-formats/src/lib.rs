@@ -10,10 +10,10 @@ pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use igb::{
     compose_transform, lerp_vec3, mat4_identity, mat4_mul, quat_to_mat4, sample_quat, sample_vec3,
-    slerp_quat, AnimationClip, AttrFormat, AttrSemantic, Bone, BoneTrack, IgbAttrDesc, IgbAttrList,
-    IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader, IgbIndexBuffer,
-    IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef, IgbVertex,
-    IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
+    slerp_quat, transform_point, AnimationClip, AttrFormat, AttrSemantic, Bone, BoneTrack,
+    IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
+    IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
+    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
     IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};

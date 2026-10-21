@@ -309,15 +309,25 @@ pub fn mat4_identity() -> [f32; 16] {
 
 pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut out = [0.0f32; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            out[col * 4 + row] = a[row] * b[col * 4]
-                + a[4 + row] * b[col * 4 + 1]
-                + a[8 + row] * b[col * 4 + 2]
-                + a[12 + row] * b[col * 4 + 3];
+    for r in 0..4 {
+        for c in 0..4 {
+            out[c * 4 + r] = a[r] * b[c * 4]
+                + a[4 + r] * b[c * 4 + 1]
+                + a[8 + r] * b[c * 4 + 2]
+                + a[12 + r] * b[c * 4 + 3];
         }
     }
     out
+}
+
+pub fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    let w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    let inv_w = if w.abs() > 1e-6 { 1.0 / w } else { 1.0 };
+    [
+        (m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12]) * inv_w,
+        (m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13]) * inv_w,
+        (m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]) * inv_w,
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1438,7 +1448,7 @@ impl IgbModel {
     }
 
     #[inline]
-    fn read_u32(buf: &[u8], offset: usize, endian: IgbEndian) -> u32 {
+    pub fn read_u32(buf: &[u8], offset: usize, endian: IgbEndian) -> u32 {
         if offset + 4 > buf.len() {
             return 0;
         }
@@ -2767,12 +2777,12 @@ impl IgbModel {
                         attr_lists.push(attr_list);
                     }
                     Some("igWiiGeometry") => {
-                        let geo_name = format!("igWiiGeometry_{}", idx);
                         let slice = if obj.offset + 120 <= data.len() {
                             &data[obj.offset..]
                         } else {
                             &[]
                         };
+                        let geo_name = format!("igWiiGeometry_{}", idx);
 
                         let mut decoded_mesh: Option<IgbMesh> = None;
                         if !slice.is_empty() && sections.len() > 2 {
@@ -2828,8 +2838,10 @@ impl IgbModel {
 
                             let (min_pt, max_pt) = if is_valid_aabb(aabb_18.0, aabb_18.1) {
                                 aabb_18
-                            } else {
+                            } else if is_valid_aabb(aabb_24.0, aabb_24.1) {
                                 aabb_24
+                            } else {
+                                ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
                             };
 
                             if vtx_cnt >= 3
@@ -2969,15 +2981,64 @@ impl IgbModel {
                                     }
 
                                     let mut indices = Vec::with_capacity((count - 2) * 3);
+                                    let diag = ((max_pt[0] - min_pt[0]).powi(2)
+                                        + (max_pt[1] - min_pt[1]).powi(2)
+                                        + (max_pt[2] - min_pt[2]).powi(2))
+                                    .sqrt();
+                                    let max_edge = (diag * 0.45).clamp(3.0, 15.0);
+                                    let max_edge_sq = max_edge * max_edge;
+
                                     for t in 0..count.saturating_sub(2) {
-                                        if (t % 2) == 0 {
-                                            indices.push(t as u32);
-                                            indices.push((t + 1) as u32);
-                                            indices.push((t + 2) as u32);
+                                        let (i0, i1, i2) = if (t % 2) == 0 {
+                                            (t as u32, (t + 1) as u32, (t + 2) as u32)
                                         } else {
-                                            indices.push((t + 1) as u32);
-                                            indices.push(t as u32);
-                                            indices.push((t + 2) as u32);
+                                            ((t + 1) as u32, t as u32, (t + 2) as u32)
+                                        };
+                                        let p0 = vertices[i0 as usize].position;
+                                        let p1 = vertices[i1 as usize].position;
+                                        let p2 = vertices[i2 as usize].position;
+                                        let d01_sq = (p0[0] - p1[0]).powi(2)
+                                            + (p0[1] - p1[1]).powi(2)
+                                            + (p0[2] - p1[2]).powi(2);
+                                        let d12_sq = (p1[0] - p2[0]).powi(2)
+                                            + (p1[1] - p2[1]).powi(2)
+                                            + (p1[2] - p2[2]).powi(2);
+                                        let d20_sq = (p2[0] - p0[0]).powi(2)
+                                            + (p2[1] - p0[1]).powi(2)
+                                            + (p2[2] - p0[2]).powi(2);
+
+                                        let min_edge_sq = d01_sq.min(d12_sq).min(d20_sq);
+                                        let max_sq = d01_sq.max(d12_sq).max(d20_sq);
+
+                                        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+                                        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+                                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                                        let area_sq = 0.25 * (nx * nx + ny * ny + nz * nz);
+
+                                        if min_edge_sq > 1e-6
+                                            && max_sq <= max_edge_sq
+                                            && area_sq > 1e-6
+                                            && (max_sq <= 36.0 * min_edge_sq || max_sq <= 9.0)
+                                        {
+                                            indices.push(i0);
+                                            indices.push(i1);
+                                            indices.push(i2);
+                                        }
+                                    }
+
+                                    if indices.is_empty() && count >= 3 && diag <= 5.0 {
+                                        for t in 0..count.saturating_sub(2) {
+                                            if (t % 2) == 0 {
+                                                indices.push(t as u32);
+                                                indices.push((t + 1) as u32);
+                                                indices.push((t + 2) as u32);
+                                            } else {
+                                                indices.push((t + 1) as u32);
+                                                indices.push(t as u32);
+                                                indices.push((t + 2) as u32);
+                                            }
                                         }
                                     }
 

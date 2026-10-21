@@ -60,6 +60,8 @@
 - [x] Build world `EnvironmentCollision` directly from level IGB collision meshes (`col_*`, `trig_*`) via `CollisionMesh::from_igb` with 2D XZ spatial grid broadphase.
 - [x] Scene marker instantiation: auto-spawn player at level spawn marker or ground raycast, doors at doorways, collectibles at pickup markers, kill plane at -350.0.
 - [x] Replace synthetic courtyard startup scene with loaded level geometry.
+- [x] Correct visual scene graph placement via node transforms and dynamic edge-length / aspect-ratio bridge rejection (eliminating 154k+ vertex spikes).
+- [x] Level texture binding fix: filter UI/portrait textures from level companion loader; multi-submesh material binding with neutral stone/earth PBR terrain fallback.
 
 ### Phase 3: Trapping System & Tag Persistence
 - [ ] Villain timer / energy meter: timed villain summons, cooldowns, and return to trap.

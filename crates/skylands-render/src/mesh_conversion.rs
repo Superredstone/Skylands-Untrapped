@@ -1,6 +1,6 @@
 use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
-use skylands_formats::igb::{IgbMesh, IgbModel};
+use skylands_formats::igb::{transform_point, IgbMesh, IgbModel};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vertex {
@@ -694,6 +694,65 @@ pub fn combine_or_normalize_model_meshes(
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
     bevy_mesh.insert_indices(Indices::U32(combined_indices));
 
+    bevy_mesh
+}
+
+pub fn combine_scene_instances_to_bevy(
+    model: &IgbModel,
+    instances: &[skylands_formats::igb::SceneInstance],
+) -> BevyMesh {
+    let mut total_vert_count = 0;
+    let mut total_idx_count = 0;
+
+    for inst in instances {
+        if let Some(geo) = model.geometries.get(inst.geometry_index) {
+            if let Some(ref m) = geo.mesh {
+                total_vert_count += m.vertices.len();
+                total_idx_count += m.indices.len();
+            }
+        }
+    }
+
+    if total_vert_count == 0 {
+        return Mesh::prop_cube(0.5).to_bevy();
+    }
+
+    let mut positions = Vec::with_capacity(total_vert_count);
+    let mut normals = Vec::with_capacity(total_vert_count);
+    let mut uvs = Vec::with_capacity(total_vert_count);
+    let mut colors = Vec::with_capacity(total_vert_count);
+    let mut indices = Vec::with_capacity(total_idx_count);
+
+    let mut vert_offset = 0u32;
+    for inst in instances {
+        if let Some(geo) = model.geometries.get(inst.geometry_index) {
+            if let Some(ref m) = geo.mesh {
+                if m.vertices.is_empty() {
+                    continue;
+                }
+                for v in &m.vertices {
+                    positions.push(transform_point(&inst.world_transform, v.position));
+                    normals.push(v.normal);
+                    uvs.push(v.uv);
+                    colors.push(v.color);
+                }
+                for &idx in &m.indices {
+                    indices.push(vert_offset + idx);
+                }
+                vert_offset += m.vertices.len() as u32;
+            }
+        }
+    }
+
+    let mut bevy_mesh = BevyMesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    bevy_mesh.insert_indices(Indices::U32(indices));
     bevy_mesh
 }
 
