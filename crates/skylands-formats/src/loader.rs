@@ -170,33 +170,125 @@ impl AssetLoader {
         Ok(rgba)
     }
 
+    pub fn load_companion_texture_rgba(
+        &self,
+        model_path: &str,
+        preferred_name: Option<&str>,
+    ) -> Result<(u32, u32, Vec<u8>), AssetError> {
+        let clean = model_path.replace('\\', "/");
+        let name = clean.rsplit('/').next().unwrap_or(&clean);
+        let arc_name = name.strip_suffix(".bld").unwrap_or(name).to_string() + ".arc";
+
+        if !self.vfs.has_archive(&arc_name) {
+            return Err(AssetError::NotFound(format!(
+                "Companion archive {} not found for {}",
+                arc_name, model_path
+            )));
+        }
+
+        let tex_files = self.vfs.find_archive_texture_files(&arc_name);
+        let chosen_file = if let Some(pref) = preferred_name {
+            let pref_clean = pref.replace('\\', "/");
+            let pref_stem = pref_clean
+                .rsplit('/')
+                .next()
+                .unwrap_or(&pref_clean)
+                .to_ascii_lowercase();
+            tex_files
+                .iter()
+                .find(|f| f.to_ascii_lowercase().contains(&pref_stem))
+                .cloned()
+                .or_else(|| tex_files.first().cloned())
+        } else {
+            tex_files.first().cloned()
+        };
+
+        let raw = if let Some(ref file) = chosen_file {
+            self.vfs.read_from_archive(&arc_name, file)?
+        } else if let Ok(inner) = self.vfs.read_from_archive(&arc_name, "level.bld") {
+            inner
+        } else {
+            return Err(AssetError::NotFound(format!(
+                "No texture files in companion archive {}",
+                arc_name
+            )));
+        };
+
+        if raw.len() >= 4 && &raw[0..4] == b"IGZ\x01" {
+            if let Ok(tex_model) = IgbModel::parse_igz(&raw) {
+                if let Some(first_img) = tex_model.images.first() {
+                    let width = first_img.width as u32;
+                    let height = first_img.height as u32;
+                    if width > 0 && height > 0 && first_img.texture_size > 0 {
+                        let end =
+                            (first_img.texture_offset + first_img.texture_size).min(raw.len());
+                        if first_img.texture_offset < end {
+                            let slice = &raw[first_img.texture_offset..end];
+                            if let Ok(rgba) = decode_cmpr(slice, width, height) {
+                                return Ok((width, height, rgba));
+                            }
+                        }
+                    }
+                }
+            }
+            if raw.len() >= 64 {
+                let soff = u32::from_be_bytes([raw[56], raw[57], raw[58], raw[59]]) as usize;
+                let slice = if soff < raw.len() {
+                    &raw[soff..]
+                } else {
+                    &raw[..]
+                };
+                if let Ok(rgba) = decode_cmpr(slice, 128, 128) {
+                    return Ok((128, 128, rgba));
+                }
+            }
+        }
+
+        let rgba = decode_cmpr(&raw, 128, 128)?;
+        Ok((128, 128, rgba))
+    }
+
     pub fn load_first_image_rgba(
         &self,
         model_path: &str,
     ) -> Result<(u32, u32, Vec<u8>), AssetError> {
-        let model = self.load_igb(model_path)?;
-        if let Some(first_img) = model.images.first() {
-            let width = first_img.width as u32;
-            let height = first_img.height as u32;
-            if width > 0 && height > 0 && first_img.texture_size > 0 {
-                let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
-                    if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
-                        Arc::new(inner)
+        let model = self.load_igb(model_path);
+        if let Ok(ref m) = model {
+            if let Some(first_img) = m.images.first() {
+                let width = first_img.width as u32;
+                let height = first_img.height as u32;
+                if width > 0 && height > 0 && first_img.texture_size > 0 {
+                    let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
+                        if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
+                            Arc::new(inner)
+                        } else {
+                            self.load_raw(model_path)?
+                        }
                     } else {
                         self.load_raw(model_path)?
-                    }
-                } else {
-                    self.load_raw(model_path)?
-                };
-                let end = (first_img.texture_offset + first_img.texture_size).min(raw.len());
-                if first_img.texture_offset < end {
-                    let slice = &raw[first_img.texture_offset..end];
-                    if let Ok(rgba) = decode_cmpr(slice, width, height) {
-                        return Ok((width, height, rgba));
+                    };
+                    let end = (first_img.texture_offset + first_img.texture_size).min(raw.len());
+                    if first_img.texture_offset < end {
+                        let slice = &raw[first_img.texture_offset..end];
+                        if let Ok(rgba) = decode_cmpr(slice, width, height) {
+                            return Ok((width, height, rgba));
+                        }
                     }
                 }
             }
+            let preferred_name = m
+                .materials
+                .iter()
+                .find_map(|mat| mat.texture_name.as_deref());
+            if let Ok(paired) = self.load_companion_texture_rgba(model_path, preferred_name) {
+                return Ok(paired);
+            }
         }
+
+        if let Ok(paired) = self.load_companion_texture_rgba(model_path, None) {
+            return Ok(paired);
+        }
+
         let fallback_rgba = self.load_cmpr_rgba(model_path, 128, 128)?;
         Ok((128, 128, fallback_rgba))
     }
@@ -237,8 +329,15 @@ mod tests {
         path: &Path,
         files: &[(&str, &[u8])],
     ) -> Result<(), std::io::Error> {
+        use crate::archive::hash_path;
         let mut buf = Vec::new();
         let num_files = files.len() as u32;
+
+        let mut hashed_files: Vec<(u32, &str, &[u8])> = files
+            .iter()
+            .map(|(name, data)| (hash_path(name), *name, *data))
+            .collect();
+        hashed_files.sort_by_key(|(h, _, _)| *h);
 
         buf.extend_from_slice(b"IGA\x1a");
         buf.extend_from_slice(&11u32.to_le_bytes()); // version
@@ -255,7 +354,7 @@ mod tests {
         let mut nt_offsets = Vec::new();
         let mut cur_offset = num_files * 4;
 
-        for (name, _) in files {
+        for (_, name, _) in &hashed_files {
             nt_offsets.push(cur_offset);
             let name_bytes = name.as_bytes();
             cur_offset += name_bytes.len() as u32 + 1;
@@ -264,56 +363,40 @@ mod tests {
         for off in &nt_offsets {
             nt_payload.extend_from_slice(&off.to_le_bytes());
         }
-        for (name, _) in files {
+        for (_, name, _) in &hashed_files {
             nt_payload.extend_from_slice(name.as_bytes());
             nt_payload.push(0);
         }
 
-        let nt_offset = 4096u64;
+        let nt_offset = 2048u64;
         let nt_size = nt_payload.len() as u64;
         buf.extend_from_slice(&nt_offset.to_le_bytes());
         buf.extend_from_slice(&nt_size.to_le_bytes());
-
-        // File IDs (sorted crc32 hashes)
-        use crate::archive::hash_path;
-        let mut hashed_files: Vec<(u32, &str, &[u8])> = files
-            .iter()
-            .map(|(name, data)| (hash_path(name), *name, *data))
-            .collect();
-        hashed_files.sort_by_key(|(h, _, _)| *h);
 
         for (h, _, _) in &hashed_files {
             buf.extend_from_slice(&h.to_le_bytes());
         }
 
-        // File headers
-        let mut cur_file_offset = 2048u32;
+        // File headers start at 4096
+        let file_start_offset = 4096u32;
+        let mut cur_file_offset = file_start_offset;
         for (_, _, data) in &hashed_files {
             buf.extend_from_slice(&cur_file_offset.to_le_bytes());
             buf.extend_from_slice(&0u32.to_le_bytes());
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
-            cur_file_offset += 64; // pad between files
+            cur_file_offset += data.len() as u32;
         }
 
-        // Pad to sector 1 (2048)
-        if buf.len() < 2048 {
-            buf.resize(2048, 0);
-        }
-
-        // Write file contents
-        let mut cur_write_offset = 2048;
-        for (_, _, data) in &hashed_files {
-            buf.resize(cur_write_offset, 0);
-            buf.extend_from_slice(data);
-            cur_write_offset += 64;
-        }
-
-        // Pad to sector 2 (4096) for name table
-        if buf.len() < 4096 {
-            buf.resize(4096, 0);
-        }
+        // Name table at 2048
+        buf.resize(2048, 0);
         buf.extend_from_slice(&nt_payload);
+
+        // Files at 4096
+        buf.resize(4096, 0);
+        for (_, _, data) in &hashed_files {
+            buf.extend_from_slice(data);
+        }
 
         let mut file = File::create(path)?;
         file.write_all(&buf)?;
@@ -456,6 +539,66 @@ mod tests {
             assert!(loader.has_file("Level_Hub_2014_01.bld"));
             let hub = loader.load_raw("Level_Hub_2014_01.bld").expect("load hub");
             assert_eq!(&hub[0..4], b"IGZ\x01");
+
+            // Test automated companion texture pairing on real assets
+            if loader.has_file("StoreItem_Hat_009.bld") {
+                let paired = loader.load_companion_texture_rgba("StoreItem_Hat_009.bld", None);
+                assert!(paired.is_ok(), "StoreItem_Hat_009 companion texture pairs");
+                let (w, h, rgba) = paired.unwrap();
+                assert!(w > 0 && h > 0);
+                assert_eq!(rgba.len(), (w * h * 4) as usize);
+            }
         }
+    }
+
+    #[test]
+    fn test_synthetic_companion_texture_pairing() {
+        let tmp_dir = std::env::temp_dir().join("skylands_companion_pairing_test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let bld_path = tmp_dir.join("companion_hero.bld");
+        let arc_path = tmp_dir.join("companion_hero.arc");
+
+        let mut igb_bytes = Vec::new();
+        igb_bytes.extend_from_slice(b"IGBF");
+        igb_bytes.extend_from_slice(&8u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..12 {
+            igb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+
+        create_test_archive_with_files(&bld_path, &[("level.bld", &igb_bytes)])
+            .expect("create test bld");
+
+        let mut cmpr_data = vec![0u8; 32 * 16 * 16]; // 128x128 CMPR
+        for chunk in cmpr_data.as_chunks_mut::<8>().0 {
+            chunk[0..2].copy_from_slice(&0x07E0u16.to_be_bytes()); // green
+            chunk[2..4].copy_from_slice(&0x0000u16.to_be_bytes());
+        }
+
+        create_test_archive_with_files(&arc_path, &[("textures/hero.png.igb.tex.igz", &cmpr_data)])
+            .expect("create test arc");
+
+        let mut loader = AssetLoader::default();
+        let mounted = loader.mount_dir(&tmp_dir).expect("mount dir");
+        assert!(mounted >= 2);
+
+        let paired = loader
+            .load_companion_texture_rgba("companion_hero.bld", Some("hero.png"))
+            .expect("load companion texture");
+        assert_eq!(paired.0, 128);
+        assert_eq!(paired.1, 128);
+        assert_eq!(paired.2.len(), 128 * 128 * 4);
+
+        let auto = loader
+            .load_first_image_rgba("companion_hero.bld")
+            .expect("auto paired texture via load_first_image_rgba");
+        assert_eq!(auto.0, 128);
+        assert_eq!(auto.1, 128);
+        assert_eq!(auto.2.len(), 128 * 128 * 4);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

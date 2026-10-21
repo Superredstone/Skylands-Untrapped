@@ -59,18 +59,9 @@ impl ModelVisualRegistry {
         if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&resolved_path) {
             let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
             base_color_texture = Some(images.add(img));
-        } else {
-            let arc_name = resolved_path
-                .strip_suffix(".bld")
-                .unwrap_or(&resolved_path)
-                .to_string()
-                + ".arc";
-            if loader.has_file(&arc_name) {
-                if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
-                    let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
-                    base_color_texture = Some(images.add(img));
-                }
-            }
+        } else if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&resolved_path, None) {
+            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+            base_color_texture = Some(images.add(img));
         }
 
         let color = if base_color_texture.is_some() {
@@ -134,18 +125,9 @@ impl CharacterVisualRegistry {
         if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
             let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
             base_color_texture = Some(images.add(img));
-        } else {
-            let arc_name = bld_name
-                .strip_suffix(".bld")
-                .unwrap_or(&bld_name)
-                .to_string()
-                + ".arc";
-            if loader.has_file(&arc_name) {
-                if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
-                    let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
-                    base_color_texture = Some(images.add(img));
-                }
-            }
+        } else if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&bld_name, None) {
+            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+            base_color_texture = Some(images.add(img));
         }
 
         let color = if base_color_texture.is_some() {
@@ -811,7 +793,8 @@ mod tests {
             chunk[0..2].copy_from_slice(&0xF800u16.to_be_bytes());
             chunk[2..4].copy_from_slice(&0x0000u16.to_be_bytes());
         }
-        create_test_archive(&arc_path, &[("level.bld", &cmpr_data)]).expect("write test arc");
+        create_test_archive(&arc_path, &[("textures/model.png.igb.tex.igz", &cmpr_data)])
+            .expect("write test arc");
 
         let mut loader = AssetLoader::default();
         loader.mount_dir(&tmp_dir).expect("mount dir");

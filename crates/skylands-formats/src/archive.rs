@@ -691,11 +691,76 @@ impl ArchiveMount {
         files
     }
 
-    pub fn has_archive(&self, pattern: &str) -> bool {
-        let lower = pattern.to_ascii_lowercase();
-        self.archives
+    fn find_matching_archive(&self, pattern: &str) -> Option<&ArchiveReader<File>> {
+        let clean = pattern.replace('\\', "/");
+        let name = clean.rsplit('/').next().unwrap_or(&clean);
+        let lower = name.to_ascii_lowercase();
+
+        if let Some(a) = self
+            .archives
             .iter()
-            .any(|a| a.source_name.to_ascii_lowercase().contains(&lower))
+            .find(|a| a.source_name.to_ascii_lowercase() == lower)
+        {
+            return Some(a);
+        }
+
+        let stem = lower
+            .strip_suffix(".bld")
+            .or_else(|| lower.strip_suffix(".arc"))
+            .unwrap_or(&lower);
+
+        if lower.ends_with(".arc") {
+            if let Some(a) = self.archives.iter().find(|a| {
+                let a_lower = a.source_name.to_ascii_lowercase();
+                a_lower.ends_with(".arc")
+                    && a_lower.strip_suffix(".arc").unwrap_or(&a_lower) == stem
+            }) {
+                return Some(a);
+            }
+        } else if lower.ends_with(".bld") {
+            if let Some(a) = self.archives.iter().find(|a| {
+                let a_lower = a.source_name.to_ascii_lowercase();
+                a_lower.ends_with(".bld")
+                    && a_lower.strip_suffix(".bld").unwrap_or(&a_lower) == stem
+            }) {
+                return Some(a);
+            }
+        }
+
+        self.archives.iter().find(|a| {
+            let a_lower = a.source_name.to_ascii_lowercase();
+            let a_stem = a_lower
+                .strip_suffix(".bld")
+                .or_else(|| a_lower.strip_suffix(".arc"))
+                .unwrap_or(&a_lower);
+            a_stem == stem || a_lower.contains(stem)
+        })
+    }
+
+    pub fn has_archive(&self, pattern: &str) -> bool {
+        self.find_matching_archive(pattern).is_some()
+    }
+
+    pub fn list_archive_files(&self, archive_pattern: &str) -> Vec<String> {
+        self.find_matching_archive(archive_pattern)
+            .map(|a| a.list_files().into_iter().map(String::from).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn find_archive_texture_files(&self, archive_pattern: &str) -> Vec<String> {
+        let files = self.list_archive_files(archive_pattern);
+        files
+            .into_iter()
+            .filter(|f| {
+                let lower = f.to_ascii_lowercase();
+                lower.ends_with(".tex.igz")
+                    || lower.ends_with(".png.igb.tex.igz")
+                    || lower.ends_with(".igb.tex")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".dds")
+                    || lower.ends_with(".cmpr")
+            })
+            .collect()
     }
 
     pub fn read_from_archive(
@@ -703,11 +768,8 @@ impl ArchiveMount {
         archive_pattern: &str,
         file_name: &str,
     ) -> Result<Vec<u8>, ArchiveError> {
-        let arch_pat = archive_pattern.to_ascii_lowercase();
-        for archive in &self.archives {
-            if archive.source_name.to_ascii_lowercase().contains(&arch_pat) {
-                return archive.read_file(file_name);
-            }
+        if let Some(archive) = self.find_matching_archive(archive_pattern) {
+            return archive.read_file(file_name);
         }
         Err(ArchiveError::FileNotFound(0))
     }
