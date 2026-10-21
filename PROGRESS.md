@@ -1,58 +1,91 @@
-# Model Extraction & Rendering Progress
+# Skylands Untrapped - Implementation Progress & Roadmap
 
-## Status
-- [x] Task 1: Fix IGZ Chunk Descriptor & Header Parsing
-- [x] Task 2: Implement RVTB Packed Integer Fixup Unpacker
-- [x] Task 3: Implement IGZ Object Registry & Type Resolution (`TEMT` / `RVTB`)
-- [x] Task 4: Extract `igWiiGeometry`, `igVertexBuffer`, `igIndexBuffer`, `igVertexFormat`
-- [x] Task 5: Bind Character Textures (`igImage2` / `TMHN` -> Bevy Material)
-- [x] Task 6: Verify Model Rendering in Viewer & Headless Mode
+## Status Overview
+- Target: EU (en) *Skylanders: Trap Team* PC reimplementation (`rom.eu.wbfs`)
+- Platform: Linux (`udev`/`hidapi-rs`) & Windows (`hidapi-winapi`)
+- Runtime: Bevy 0.15 (fixed 60Hz tick loop, decoupled render)
 
 ---
 
-## Technical Details
+## Completed Milestones
 
-### Root Cause Analysis
-1. **IGZ Header Descriptors Offset (`crates/skylands-formats/src/igb.rs:2052-2077`)**:
-   - IGZ v8 header starts chunk descriptors at `0x18`, not `0x14`.
-   - Termination sentinel is `offset == 0`, not fake section count at `0x10`.
-   - 4-byte misalignment invalidated all section offsets.
+### Formats (`crates/skylands-formats`)
+- [x] Alchemy v8.1.0 archive reader (`.arc` / `.bld`), Big & Little Endian support, Deflate/LZMA compression.
+- [x] VFS mount system (`ArchiveMount`, `AssetLoader`) with path normalization.
+- [x] IGZ object registry and directory parser (`igObjectList`, `igObject`, `RVTB` fixup decoding).
+- [x] Wii geometry extractor: `igWiiGeometry` submeshes decoded from Section 2 with quantized 16-bit vertices, UV coordinates, and normal generation.
+- [x] False GX display list injection fixed (prevented corrupted Section 3 audio streams decoded as geometry).
+- [x] Texture decoding: CMPR (DXT1 tile big wii) and DXT1 format decoder with tile untangling.
+- [x] Audio decoding: DSP ADPCM decoder and FSB5 container parser.
+- [x] Skeleton and level marker extraction from scene graph nodes (`LevelMarker`, `MarkerKind`).
 
-2. **RVTB / BTVR Fixup Table Not Unpacked**:
-   - Alchemy v8.1.0 stores all 7,145 objects behind `BTVR` (RVTB) fixup table.
-   - Offsets encoded with variable-length 3-bit / 4-bit nibbles (`IgzOffsetMapFixup`).
-   - Objects must be resolved against `TEMT` type table.
+### Portal Driver (`crates/skylands-portal`)
+- [x] USB HID driver for Traptanium Portal (VID: `0x1430`, PID: `0x0150`).
+- [x] Software `MockPortal` with virtual tag injection.
+- [x] Portal protocol: LED ring color control, trap slot light, antenna power, tag arrive/depart detection.
+- [x] 8kHz mono audio streaming protocol to Traptanium speaker.
 
-3. **Fallback to Random Float Scanning**:
-   - Misaligned section reading triggered heuristic float scanner (`igb.rs:2244-2365`).
-   - Heuristic converted random binary data into sequential triangle noise.
+### Core Gameplay Loop (`crates/skylands-core`)
+- [x] Deterministic 60Hz fixed update tick rate (`Time::<Fixed>::from_hz(60.0)`).
+- [x] State machine: `Hub`, `VillainCapture`, `ZoneTransition`.
+- [x] Tag gameplay resolution: hero spawn on ring tag, villain spawn on trap tag.
+- [x] Input mapping: dual gamepad (`gilrs`) and keyboard support.
+- [x] Character movement, gravity, jumping, ground raycasting.
+- [x] Combat mechanics: primary combo, sweep attack, projectile firing, damage events, popups.
+- [x] Collectibles: gold coins and elemental gems with pickup collision.
 
-4. **Missing Texture Binding**:
-   - `visual_sync.rs` applied flat single-color materials instead of extracting `igImage2` textures.
+### Rendering & Viewer (`crates/skylands-render`)
+- [x] Bevy 0.15 PBR render pipeline.
+- [x] Mesh converter: multi-submesh combine, bounding box normalization to standard height.
+- [x] Camera modes: third-person follow, free-fly debug camera, showcase orbit camera.
+- [x] Viewer mode (`--viewer`) with character turntable and showcase cycling.
+- [x] In-game HUD UI: health bar, coin counter, zone display, interaction prompt.
+
+### Extractor (`crates/skylands-extractor`)
+- [x] Automated initial-run extraction from `rom.eu.wbfs` via `wit` (with nix-shell fallback).
+- [x] Asset validation checks for critical files (`sys/main.dol`, `global.arc`, `global.bld`).
 
 ---
 
-## Execution Steps
+## Next Steps & Roadmap
 
-1. **Fix IGZ Descriptors Parsing**:
-   - Replace bogus `num_sections` loop with `(offset, size, unk1, unk2)` descriptor reader starting at `0x18` until `offset == 0`.
-   - Store real chunk list with exact byte slices.
+### Phase 1: Texture Binding & Visual Pipeline
+- [x] Bind decoded CMPR/DXT1 textures to Bevy `StandardMaterial.base_color_texture` instead of placeholder solid colors.
+- [ ] Correct UV coordinate decoding for character and environment submeshes.
+- [ ] Automated character texture pairing: resolve `.arc` texture bundle alongside `.bld` mesh bundle.
+- [ ] Support normal maps and specular maps where present in `igImage2` registries.
 
-2. **Port `IgzOffsetMapFixup` to Rust**:
-   - Implement bitstream reader for 3-bit packed integers with continuation bit.
-   - Compute absolute offsets across chunk descriptors (`(prev >> 0x1B) + 1` descriptor index).
-   - Unpack `BTVR` (RVTB) and `TEMT` (types).
+### Phase 2: Real Level Loading & Collision Environment
+- [ ] Level loader: load full scene geometry from `Level_Hub_2014_01.bld` and `Level_313_Tutorial.bld`.
+- [ ] Build world `EnvironmentCollision` directly from level IGB collision meshes (`col_*`, `trig_*`) via `CollisionMesh::from_igb`.
+- [ ] Scene marker instantiation: auto-spawn player at level spawn marker, doors at doorways, collectibles at pickup markers.
+- [ ] Replace synthetic courtyard startup scene with loaded level geometry.
 
-3. **Extract Real Mesh Data**:
-   - Locate `igWiiGeometry` and associated `igVertexBuffer` / `igIndexBuffer`.
-   - Parse vertex format attributes (position, normal, UV).
-   - Convert Wii GX / fixed / half-float vertex data and triangle indices into `IgbMesh`.
+### Phase 3: Trapping System & Tag Persistence
+- [ ] Villain timer / energy meter: timed villain summons, cooldowns, and return to trap.
+- [ ] RFID tag memory persistence: write updated gold, experience, level, and hat back to tag blocks.
+- [ ] Software portal tag persistence: save/load mock tags to disk (`.tag` files).
+- [ ] USB portal hotplug recovery: detect disconnection and re-enumerate device cleanly.
 
-4. **Connect Textures**:
-   - Extract `igImage2` images via `TMHN` thumbnails and `EXID` formats.
-   - Feed CMPR / DXT1 texture buffers to Bevy `Image` / `StandardMaterial`.
+### Phase 4: Enemy AI & Encounter Triggers
+- [ ] Enemy archetypes: basic melee (Chompy) and ranged enemy AI state machines.
+- [ ] Encounter arenas: lock doorway markers on combat trigger, unlock on wave clear.
+- [ ] Boss encounter & villain trapping sequence: weaken villain -> prompt trap placement -> stream villain capture voice lines to portal speaker -> capture villain entity.
 
-5. **Validation**:
-   - `cargo test -p skylands-formats`
-   - `cargo test -p skylands-render`
-   - Run headless test tick simulation and inspect vertex bounds.
+### Phase 5: Skeletal Rigging, Animation & 144Hz Interpolation
+- [ ] Map extracted `Skeleton` joint hierarchies to Bevy skinned meshes (`SkinnedMesh`).
+- [ ] Sample and evaluate keyframe curves from `AnimationClip` tracks (idle, walk, run, attacks).
+- [ ] Transform interpolation between 60Hz fixed ticks for stutter-free 144Hz+ rendering.
+
+### Phase 6: Game Progression & Save System
+- [ ] Zone transition execution: stream and swap level archives on entering doorway triggers.
+- [ ] Campaign progress tracking: level completion, collected stars, elemental gates opened.
+- [ ] Save game manager: serialize player progression to local save profile.
+
+---
+
+## Verification Commands
+- Run headless tick simulation: `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
+- Run showcase viewer: `nix-shell --run "cargo run -p skylands-app -- --viewer --character spyro"`
+- Full test suite: `nix-shell --run "cargo test"`
+- Format & lint: `nix-shell --run "cargo fmt --all && cargo clippy --all-targets --all-features"`

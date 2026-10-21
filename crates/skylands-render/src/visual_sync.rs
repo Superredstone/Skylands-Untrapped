@@ -20,6 +20,7 @@ pub struct ModelVisualRegistry {
 }
 
 impl ModelVisualRegistry {
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_load_model(
         &mut self,
         identifier: &str,
@@ -28,6 +29,7 @@ impl ModelVisualRegistry {
         asset_server: Option<&CharacterAssetServer>,
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
     ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
         let key = identifier.to_ascii_lowercase();
         if let Some(pair) = self.cache.get(&key) {
@@ -53,25 +55,30 @@ impl ModelVisualRegistry {
         let bevy_mesh = combine_or_normalize_model_meshes(&model.meshes, target_height);
         let mesh_handle = meshes.add(bevy_mesh);
 
-        let base_color_texture = None;
-        let arc_name = resolved_path
-            .strip_suffix(".bld")
-            .unwrap_or(&resolved_path)
-            .to_string()
-            + ".arc";
-        if loader.has_file(&arc_name) {
-            if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
-                let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
-                // ponytail: texture asset addition deferred; standard material with elemental color
-                let _ = img;
-            }
-        }
+        let mut base_color_texture = None;
         if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&resolved_path) {
             let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-            let _ = img;
+            base_color_texture = Some(images.add(img));
+        } else {
+            let arc_name = resolved_path
+                .strip_suffix(".bld")
+                .unwrap_or(&resolved_path)
+                .to_string()
+                + ".arc";
+            if loader.has_file(&arc_name) {
+                if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
+                    let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
+                    base_color_texture = Some(images.add(img));
+                }
+            }
         }
 
-        let color = base_color.unwrap_or(Color::srgb(0.7, 0.7, 0.7));
+        let color = if base_color_texture.is_some() {
+            Color::WHITE
+        } else {
+            base_color.unwrap_or(Color::srgb(0.7, 0.7, 0.7))
+        };
+
         let material_handle = materials.add(StandardMaterial {
             base_color: color,
             base_color_texture,
@@ -99,6 +106,7 @@ impl CharacterVisualRegistry {
         asset_server: Option<&CharacterAssetServer>,
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
     ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
         if let Some(pair) = self.cache.get(&character_id) {
             return Some(pair.clone());
@@ -122,14 +130,32 @@ impl CharacterVisualRegistry {
             element_to_color(elem)
         };
 
-        let base_color_texture = None;
+        let mut base_color_texture = None;
         if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
             let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-            let _ = img;
+            base_color_texture = Some(images.add(img));
+        } else {
+            let arc_name = bld_name
+                .strip_suffix(".bld")
+                .unwrap_or(&bld_name)
+                .to_string()
+                + ".arc";
+            if loader.has_file(&arc_name) {
+                if let Ok(rgba) = loader.load_cmpr_rgba(&arc_name, 128, 128) {
+                    let img = crate::texture_conversion::rgba8_to_bevy_image(128, 128, rgba);
+                    base_color_texture = Some(images.add(img));
+                }
+            }
         }
 
+        let color = if base_color_texture.is_some() {
+            Color::WHITE
+        } else {
+            mat_color
+        };
+
         let material_handle = materials.add(StandardMaterial {
-            base_color: mat_color,
+            base_color: color,
             base_color_texture,
             perceptual_roughness: 0.8,
             reflectance: 0.2,
@@ -262,6 +288,7 @@ pub fn actor_visual_sync_system(
     mut model_registry: Option<ResMut<ModelVisualRegistry>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     actor_query: Query<
         (
             Entity,
@@ -288,6 +315,7 @@ pub fn actor_visual_sync_system(
                     asset_server.as_deref(),
                     &mut meshes,
                     &mut materials,
+                    &mut images,
                 )
             });
 
@@ -321,6 +349,7 @@ pub fn actor_visual_sync_system(
                     asset_server.as_deref(),
                     &mut meshes,
                     &mut materials,
+                    &mut images,
                 )
             });
 
@@ -344,6 +373,7 @@ pub fn actor_visual_sync_system(
                     asset_server.as_deref(),
                     &mut meshes,
                     &mut materials,
+                    &mut images,
                 )
             });
 
@@ -408,6 +438,7 @@ mod tests {
         let mut registry = CharacterVisualRegistry::default();
         let mut meshes = Assets::<Mesh>::default();
         let mut materials = Assets::<StandardMaterial>::default();
+        let mut images = Assets::<Image>::default();
 
         // When archive missing, registry returns None gracefully
         let res = registry.get_or_load(
@@ -416,6 +447,7 @@ mod tests {
             Some(&server),
             &mut meshes,
             &mut materials,
+            &mut images,
         );
         assert!(res.is_none());
     }
@@ -427,6 +459,7 @@ mod tests {
         app.add_plugins(bevy::asset::AssetPlugin::default());
         app.init_resource::<Assets<Mesh>>();
         app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
         app.init_resource::<CharacterAssetServer>();
         app.init_resource::<CharacterVisualRegistry>();
         app.init_resource::<ModelVisualRegistry>();
@@ -557,6 +590,7 @@ mod tests {
             let mut registry = CharacterVisualRegistry::default();
             let mut meshes = Assets::<Mesh>::default();
             let mut materials = Assets::<StandardMaterial>::default();
+            let mut images = Assets::<Image>::default();
 
             let res = registry.get_or_load(
                 16,
@@ -564,6 +598,7 @@ mod tests {
                 Some(&server),
                 &mut meshes,
                 &mut materials,
+                &mut images,
             );
             assert!(
                 res.is_some(),
@@ -573,7 +608,11 @@ mod tests {
             let loaded_mesh = meshes.get(&mesh_handle).expect("mesh in assets");
             assert!(loaded_mesh.count_vertices() >= 3);
             let loaded_mat = materials.get(&mat_handle).expect("material in assets");
-            assert_eq!(loaded_mat.base_color, Color::srgb(0.42, 0.18, 0.60));
+            assert!(
+                loaded_mat.base_color_texture.is_some(),
+                "Base color texture must be bound when texture is available"
+            );
+            assert_eq!(loaded_mat.base_color, Color::WHITE);
 
             // Verify igImage2 extraction
             let loader = server.loader.lock().unwrap();
@@ -607,6 +646,7 @@ mod tests {
             let mut registry = ModelVisualRegistry::default();
             let mut meshes = Assets::<Mesh>::default();
             let mut materials = Assets::<StandardMaterial>::default();
+            let mut images = Assets::<Image>::default();
 
             // 1. Hat loading
             let hat = registry.get_or_load_model(
@@ -616,6 +656,7 @@ mod tests {
                 Some(&server),
                 &mut meshes,
                 &mut materials,
+                &mut images,
             );
             assert!(
                 hat.is_some(),
@@ -630,6 +671,7 @@ mod tests {
                 Some(&server),
                 &mut meshes,
                 &mut materials,
+                &mut images,
             );
             assert!(
                 item.is_some(),
@@ -644,11 +686,168 @@ mod tests {
                 Some(&server),
                 &mut meshes,
                 &mut materials,
+                &mut images,
             );
             assert!(
                 villain.is_some(),
                 "1001_ChompyMage.bld should be loaded by ModelVisualRegistry"
             );
         }
+    }
+
+    fn create_test_archive(
+        path: &std::path::Path,
+        files: &[(&str, &[u8])],
+    ) -> Result<(), std::io::Error> {
+        let mut buf = Vec::new();
+        let num_files = files.len() as u32;
+
+        buf.extend_from_slice(b"IGA\x1a");
+        buf.extend_from_slice(&11u32.to_le_bytes()); // version
+        buf.extend_from_slice(&100u32.to_le_bytes()); // toc_size
+        buf.extend_from_slice(&num_files.to_le_bytes()); // num_files
+        buf.extend_from_slice(&2048u32.to_le_bytes()); // sector_size
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut nt_payload = Vec::new();
+        let mut nt_offsets = Vec::new();
+        let mut cur_offset = num_files * 4;
+
+        for (name, _) in files {
+            nt_offsets.push(cur_offset);
+            let name_bytes = name.as_bytes();
+            cur_offset += name_bytes.len() as u32 + 1;
+        }
+
+        for off in &nt_offsets {
+            nt_payload.extend_from_slice(&off.to_le_bytes());
+        }
+        for (name, _) in files {
+            nt_payload.extend_from_slice(name.as_bytes());
+            nt_payload.push(0);
+        }
+
+        let mut total_file_data = 0usize;
+        for (_, data) in files {
+            total_file_data += data.len() + 64;
+        }
+        let nt_offset = (2048 + total_file_data as u64).div_ceil(2048) * 2048;
+        let nt_size = nt_payload.len() as u64;
+        buf.extend_from_slice(&nt_offset.to_le_bytes());
+        buf.extend_from_slice(&nt_size.to_le_bytes());
+
+        let mut hashed_files: Vec<(u32, &str, &[u8])> = files
+            .iter()
+            .map(|(name, data)| (skylands_formats::hash_path(name), *name, *data))
+            .collect();
+        hashed_files.sort_by_key(|(h, _, _)| *h);
+
+        for (h, _, _) in &hashed_files {
+            buf.extend_from_slice(&h.to_le_bytes());
+        }
+
+        let mut cur_file_offset = 2048u32;
+        for (_, _, data) in &hashed_files {
+            buf.extend_from_slice(&cur_file_offset.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+            cur_file_offset += 64 + data.len() as u32;
+        }
+
+        buf.resize(2048, 0);
+
+        let mut cur_write_offset = 2048;
+        for (_, _, data) in &hashed_files {
+            buf.resize(cur_write_offset, 0);
+            buf.extend_from_slice(data);
+            cur_write_offset += 64 + data.len();
+        }
+
+        buf.resize(nt_offset as usize, 0);
+        buf.extend_from_slice(&nt_payload);
+
+        std::fs::write(path, &buf)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_visual_registry_binds_decoded_texture() {
+        let tmp_dir = std::env::temp_dir().join("skylands_texture_bind_test");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let bld_path = tmp_dir.join("test_model.bld");
+        let arc_path = tmp_dir.join("test_model.arc");
+
+        // Simple IGB model with 1 vertex
+        let mut igb_bytes = Vec::new();
+        igb_bytes.extend_from_slice(b"IGBF");
+        igb_bytes.extend_from_slice(&8u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0u32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        igb_bytes.extend_from_slice(&1.0f32.to_le_bytes());
+
+        create_test_archive(&bld_path, &[("level.bld", &igb_bytes)]).expect("write test bld");
+
+        // 8x8 tile = 32 bytes CMPR (red color)
+        let mut cmpr_data = vec![0u8; 32 * 16 * 16]; // sufficient for 128x128
+        for chunk in cmpr_data.as_chunks_mut::<8>().0 {
+            chunk[0..2].copy_from_slice(&0xF800u16.to_be_bytes());
+            chunk[2..4].copy_from_slice(&0x0000u16.to_be_bytes());
+        }
+        create_test_archive(&arc_path, &[("level.bld", &cmpr_data)]).expect("write test arc");
+
+        let mut loader = AssetLoader::default();
+        loader.mount_dir(&tmp_dir).expect("mount dir");
+        let server = CharacterAssetServer::new(loader);
+
+        let mut registry = ModelVisualRegistry::default();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut images = Assets::<Image>::default();
+
+        let res = registry.get_or_load_model(
+            "test_model.bld",
+            Some(1.0),
+            Some(Color::srgb(0.5, 0.5, 0.5)),
+            Some(&server),
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        );
+
+        assert!(res.is_some(), "Model must load");
+        let (_mesh_handle, mat_handle) = res.unwrap();
+        let mat = materials.get(&mat_handle).expect("material exists");
+        assert!(
+            mat.base_color_texture.is_some(),
+            "Decoded texture must be bound to base_color_texture"
+        );
+        assert_eq!(mat.base_color, Color::WHITE);
+
+        let tex_handle = mat.base_color_texture.as_ref().unwrap();
+        let image = images
+            .get(tex_handle)
+            .expect("image exists in Assets<Image>");
+        assert_eq!(image.texture_descriptor.size.width, 128);
+        assert_eq!(image.texture_descriptor.size.height, 128);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

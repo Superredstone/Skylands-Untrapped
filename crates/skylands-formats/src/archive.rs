@@ -555,7 +555,15 @@ impl ArchiveMount {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
 
-        // 1. Direct match on archive name (e.g. "Level_Hub_2014_01.bld" -> inner "level.bld")
+        // 1. Direct exact match on archive name (e.g. "Level_Hub_2014_01.bld" -> inner "level.bld")
+        for archive in &self.archives {
+            let arch_name = archive.source_name.to_ascii_lowercase();
+            if arch_name == lower && archive.contains_path("level.bld") {
+                return archive.read_file("level.bld");
+            }
+        }
+
+        // Direct stem match fallback on archive name
         for archive in &self.archives {
             let arch_name = archive.source_name.to_ascii_lowercase();
             if !arch_name.is_empty() {
@@ -570,8 +578,7 @@ impl ArchiveMount {
                     .unwrap_or(&lower);
                 let target_stem = cand_stem.rsplit('/').next().unwrap_or(cand_stem);
 
-                if (arch_name == lower || target_stem == stem) && archive.contains_path("level.bld")
-                {
+                if target_stem == stem && archive.contains_path("level.bld") {
                     return archive.read_file("level.bld");
                 }
             }

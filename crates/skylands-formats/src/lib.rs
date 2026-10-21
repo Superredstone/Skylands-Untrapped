@@ -5,7 +5,7 @@ pub mod igb;
 pub mod loader;
 pub mod texture;
 
-pub use archive::{ArchiveMount, ArchiveReader, FileEntry};
+pub use archive::{hash_path, ArchiveMount, ArchiveReader, FileEntry};
 pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use igb::{
