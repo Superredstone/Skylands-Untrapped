@@ -56,10 +56,10 @@
 - [ ] Support normal maps and specular maps where present in `igImage2` registries.
 
 ### Phase 2: Real Level Loading & Collision Environment
-- [ ] Level loader: load full scene geometry from `Level_Hub_2014_01.bld` and `Level_313_Tutorial.bld`.
-- [ ] Build world `EnvironmentCollision` directly from level IGB collision meshes (`col_*`, `trig_*`) via `CollisionMesh::from_igb`.
-- [ ] Scene marker instantiation: auto-spawn player at level spawn marker, doors at doorways, collectibles at pickup markers.
-- [ ] Replace synthetic courtyard startup scene with loaded level geometry.
+- [x] Level loader: load full scene geometry from `Level_Hub_2014_01.bld` and `Level_313_Tutorial.bld` (fixed `igWiiGeometry` AABB offsets w[18..23] vs w[24..29]).
+- [x] Build world `EnvironmentCollision` directly from level IGB collision meshes (`col_*`, `trig_*`) via `CollisionMesh::from_igb` with 2D XZ spatial grid broadphase.
+- [x] Scene marker instantiation: auto-spawn player at level spawn marker or ground raycast, doors at doorways, collectibles at pickup markers, kill plane at -350.0.
+- [x] Replace synthetic courtyard startup scene with loaded level geometry.
 
 ### Phase 3: Trapping System & Tag Persistence
 - [ ] Villain timer / energy meter: timed villain summons, cooldowns, and return to trap.

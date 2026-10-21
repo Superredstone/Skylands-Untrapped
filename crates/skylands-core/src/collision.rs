@@ -1,4 +1,8 @@
 use skylands_formats::igb::IgbModel;
+use std::collections::HashMap;
+
+// ponytail: basic uniform XZ grid cell size. Upgrade to BVH if static mesh topology warrants hierarchy.
+const GRID_CELL_SIZE: f32 = 4.0;
 
 #[inline]
 pub fn vec3_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -291,6 +295,7 @@ impl Triangle {
 pub struct CollisionMesh {
     pub triangles: Vec<Triangle>,
     pub bounds: Aabb,
+    spatial_grid: HashMap<(i32, i32), Vec<usize>>,
 }
 
 impl CollisionMesh {
@@ -298,16 +303,34 @@ impl CollisionMesh {
         Self {
             triangles: Vec::new(),
             bounds: Aabb::empty(),
+            spatial_grid: HashMap::new(),
         }
     }
 
     pub fn from_triangles(triangles: Vec<Triangle>) -> Self {
         let mut bounds = Aabb::empty();
-        for t in &triangles {
+        let mut spatial_grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+
+        for (idx, t) in triangles.iter().enumerate() {
             bounds.extend(t.aabb.min);
             bounds.extend(t.aabb.max);
+
+            let min_gx = (t.aabb.min[0] / GRID_CELL_SIZE).floor() as i32;
+            let max_gx = (t.aabb.max[0] / GRID_CELL_SIZE).floor() as i32;
+            let min_gz = (t.aabb.min[2] / GRID_CELL_SIZE).floor() as i32;
+            let max_gz = (t.aabb.max[2] / GRID_CELL_SIZE).floor() as i32;
+
+            for gx in min_gx..=max_gx {
+                for gz in min_gz..=max_gz {
+                    spatial_grid.entry((gx, gz)).or_default().push(idx);
+                }
+            }
         }
-        Self { triangles, bounds }
+        Self {
+            triangles,
+            bounds,
+            spatial_grid,
+        }
     }
 
     pub fn from_vertices_and_indices(
@@ -444,14 +467,20 @@ impl CollisionMesh {
 
     pub fn raycast_down(&self, origin: [f32; 3], max_dist: f32) -> Option<(f32, [f32; 3])> {
         let (x, z) = (origin[0], origin[2]);
+        let gx = (x / GRID_CELL_SIZE).floor() as i32;
+        let gz = (z / GRID_CELL_SIZE).floor() as i32;
+
         let mut best_hit = None;
         let mut highest_y = f32::NEG_INFINITY;
 
-        for tri in &self.triangles {
-            if let Some((y, normal)) = tri.raycast_vertical(x, z, origin[1], max_dist) {
-                if y > highest_y {
-                    highest_y = y;
-                    best_hit = Some((y, normal));
+        if let Some(indices) = self.spatial_grid.get(&(gx, gz)) {
+            for &idx in indices {
+                let tri = &self.triangles[idx];
+                if let Some((y, normal)) = tri.raycast_vertical(x, z, origin[1], max_dist) {
+                    if y > highest_y {
+                        highest_y = y;
+                        best_hit = Some((y, normal));
+                    }
                 }
             }
         }
@@ -467,13 +496,29 @@ impl CollisionMesh {
         let mut total_push = [0.0f32; 3];
         let mut collided = false;
 
-        // Wall & obstacle collision (steep surfaces: |normal.y| < 0.7)
-        for tri in &self.triangles {
-            if tri.normal[1].abs() < 0.7 {
-                if let Some(push) = tri.resolve_sphere(center, radius) {
-                    total_push[0] += push[0];
-                    total_push[2] += push[2];
-                    collided = true;
+        let min_gx = ((center[0] - radius) / GRID_CELL_SIZE).floor() as i32;
+        let max_gx = ((center[0] + radius) / GRID_CELL_SIZE).floor() as i32;
+        let min_gz = ((center[2] - radius) / GRID_CELL_SIZE).floor() as i32;
+        let max_gz = ((center[2] + radius) / GRID_CELL_SIZE).floor() as i32;
+
+        let mut tested = std::collections::HashSet::new();
+
+        for gx in min_gx..=max_gx {
+            for gz in min_gz..=max_gz {
+                if let Some(indices) = self.spatial_grid.get(&(gx, gz)) {
+                    for &idx in indices {
+                        if tested.insert(idx) {
+                            let tri = &self.triangles[idx];
+                            // Wall & obstacle collision (steep surfaces: |normal.y| < 0.7)
+                            if tri.normal[1].abs() < 0.7 {
+                                if let Some(push) = tri.resolve_sphere(center, radius) {
+                                    total_push[0] += push[0];
+                                    total_push[2] += push[2];
+                                    collided = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

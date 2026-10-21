@@ -27,7 +27,9 @@ pub fn portal_gameplay_system(
     mut capture_progress: ResMut<CaptureProgress>,
     mut audio_streaming: ResMut<PortalAudioStreaming>,
     actors: Query<(Entity, &ActorIdentity)>,
+    env: Option<Res<EnvironmentCollision>>,
 ) {
+    let spawn_origin = env.map(|e| e.spawn_point).unwrap_or(Vec3::ZERO);
     for event in portal_events.read() {
         match event {
             PortalEvent::TagArrived { tag_index, zone } => {
@@ -73,6 +75,7 @@ pub fn portal_gameplay_system(
                     }
 
                     // Spawn villain entity
+                    let villain_pos = spawn_origin + Vec3::new(2.5, 0.2, 0.0);
                     commands.spawn((
                         ActorIdentity {
                             id: 1000 + char_id as u32,
@@ -83,7 +86,7 @@ pub fn portal_gameplay_system(
                             texture_path: tex_path.map(|s| s.to_string()),
                         },
                         Villain,
-                        Transform::from_xyz(2.5, 0.2, 0.0),
+                        Transform::from_translation(villain_pos),
                         CharacterCollider {
                             radius: 0.6,
                             height: 1.8,
@@ -108,6 +111,7 @@ pub fn portal_gameplay_system(
                     }
 
                     // Spawn hero entity
+                    let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
                     commands.spawn((
                         ActorIdentity {
                             id: char_id as u32,
@@ -118,7 +122,7 @@ pub fn portal_gameplay_system(
                             texture_path: tex_path.map(|s| s.to_string()),
                         },
                         Hero,
-                        Transform::from_xyz(0.0, 0.2, 0.0),
+                        Transform::from_translation(hero_pos),
                         CharacterCollider {
                             radius: 0.5,
                             height: 1.8,
@@ -773,6 +777,7 @@ pub fn setup_default_scene(
                     if !col_mesh.triangles.is_empty() {
                         if let Some(ref mut env) = env_col {
                             env.mesh = col_mesh;
+                            env.kill_plane_y = -350.0;
                         }
                     }
 
@@ -868,6 +873,15 @@ pub fn setup_default_scene(
                                 marker_id_counter += 1;
                             }
                             _ => {}
+                        }
+                    }
+
+                    if !has_spawn {
+                        if let Some(ref mut env) = env_col {
+                            if let Some((hit_y, _)) = env.mesh.raycast_down([0.0, 50.0, 0.0], 500.0)
+                            {
+                                env.spawn_point = Vec3::new(0.0, hit_y, 0.0);
+                            }
                         }
                     }
 

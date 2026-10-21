@@ -2794,16 +2794,43 @@ impl IgbModel {
                                 (Self::read_u32(slice, 5 * 4, endian) & 0x07FF_FFFF) as usize;
                             let vtx_cnt = Self::read_u32(slice, 12 * 4, endian) as usize;
 
-                            let min_pt = [
-                                f32::from_bits(Self::read_u32(slice, 24 * 4, endian)),
-                                f32::from_bits(Self::read_u32(slice, 25 * 4, endian)),
-                                f32::from_bits(Self::read_u32(slice, 26 * 4, endian)),
-                            ];
-                            let max_pt = [
-                                f32::from_bits(Self::read_u32(slice, 27 * 4, endian)),
-                                f32::from_bits(Self::read_u32(slice, 28 * 4, endian)),
-                                f32::from_bits(Self::read_u32(slice, 29 * 4, endian)),
-                            ];
+                            let aabb_18 = (
+                                [
+                                    f32::from_bits(Self::read_u32(slice, 18 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 19 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 20 * 4, endian)),
+                                ],
+                                [
+                                    f32::from_bits(Self::read_u32(slice, 21 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 22 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 23 * 4, endian)),
+                                ],
+                            );
+                            let aabb_24 = (
+                                [
+                                    f32::from_bits(Self::read_u32(slice, 24 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 25 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 26 * 4, endian)),
+                                ],
+                                [
+                                    f32::from_bits(Self::read_u32(slice, 27 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 28 * 4, endian)),
+                                    f32::from_bits(Self::read_u32(slice, 29 * 4, endian)),
+                                ],
+                            );
+
+                            let is_valid_aabb = |min: [f32; 3], max: [f32; 3]| -> bool {
+                                min.iter().chain(max.iter()).all(|f| f.is_finite())
+                                    && min[0] < max[0]
+                                    && min[1] < max[1]
+                                    && min[2] < max[2]
+                            };
+
+                            let (min_pt, max_pt) = if is_valid_aabb(aabb_18.0, aabb_18.1) {
+                                aabb_18
+                            } else {
+                                aabb_24
+                            };
 
                             if vtx_cnt >= 3
                                 && buf_a_off + buf_a_sz <= sec2_data.len()
