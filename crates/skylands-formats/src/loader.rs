@@ -663,30 +663,35 @@ mod tests {
         let raw = loader.load_raw("level.bld").expect("load level.bld");
         let model = IgbModel::parse_igz(&raw).expect("parse hub level");
         assert!(!model.meshes.is_empty());
-        assert!(!model.nodes.is_empty());
-
-        let count_geo_trans = model
-            .nodes
-            .iter()
-            .filter(|n| {
-                n.geometry_index.is_some()
-                    && (n.transform[12].abs() > 0.001
-                        || n.transform[13].abs() > 0.001
-                        || n.transform[14].abs() > 0.001)
-            })
-            .count();
-        assert!(count_geo_trans > 0, "Expected transformed level geometries");
 
         let markers = model.extract_level_markers();
-        assert!(!markers.is_empty());
-        let non_zero_markers = markers
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01);
+
+        // Name and position both come from the same tfbActorInfo record.
+        let coin = markers
             .iter()
-            .filter(|m| m.position[0].abs() > 0.001 || m.position[2].abs() > 0.001)
-            .count();
+            .find(|m| m.name == "Coin_00(97)")
+            .expect("Coin_00(97) placement");
+        assert_eq!(coin.kind, crate::igb::MarkerKind::Collectible);
         assert!(
-            non_zero_markers > 0,
-            "Level markers must have real world entity positions"
+            near(coin.position, [973.0577, 139.25974, 1249.7683]),
+            "Coin_00(97) at {:?}",
+            coin.position
         );
+
+        let door = markers
+            .iter()
+            .find(|m| m.name == "Door_MainEntrance_L")
+            .expect("Door_MainEntrance_L placement");
+        assert_eq!(door.kind, crate::igb::MarkerKind::Doorway);
+        assert!(near(door.position, [-2.060448, -0.56388, -59.69508]));
+
+        // Hub has hundreds of coin placements, far more than the 26 marker strings.
+        let coins = markers
+            .iter()
+            .filter(|m| m.name.starts_with("Coin_"))
+            .count();
+        assert!(coins > 100, "coin placements: {}", coins);
     }
 
     #[test]

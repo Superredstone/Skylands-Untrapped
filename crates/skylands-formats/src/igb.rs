@@ -72,6 +72,16 @@ pub mod meta_fields {
         pub const FLAG_BITS: usize = 0x12;
     }
 
+    pub mod named_object {
+        pub const NAME: usize = 0x08;
+    }
+
+    /// `tfbActorInfo` derives from `AbstractPlacement`.
+    pub mod actor_info {
+        pub const ID: usize = 0x20;
+        pub const INIT_MATRIX: usize = 0x24;
+    }
+
     pub mod animation_component {
         pub const NOW_PLAYING: usize = 0x08;
         pub const OWNER: usize = 0x14;
@@ -2539,18 +2549,18 @@ impl IgbModel {
         links
     }
 
-    /// Extracts geometry world transforms and entity positions from Alchemy level entity graphs:
+    /// Maps geometry object offsets to world matrices via the level entity graph:
     /// `tfbWorldEntityInfo` / `tfbEntityInfo` / `tfbBodyEntityInfo`:
     /// `_drawables` (+0x14) -> `DrawableList` (+0x08 count, +0x14 array of `Drawable`)
     /// `_entities` (+0x18) -> `EntityList` (+0x08 count, +0x14 array of `Entity`)
-    /// `Drawable`: `_geometry` (+0x0c) -> geometry offset; `_entity` (+0x14) -> entity index
-    /// `Entity`: `_transform` (+0x08) -> matrix at +0x30; `_parentIndex` (+0x10)
+    /// `Drawable`: `_geometry` (+0x0c); `_entity` (+0x14) entity index
+    /// `Entity`: `_transform` (+0x08) -> `igTransform`, matrix `_m` at +0x30; `_parentIndex` (+0x10)
     pub fn decode_entity_geometry_links(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
         objects: &[IgzObject],
         endian: IgbEndian,
-    ) -> (std::collections::HashMap<usize, [f32; 16]>, Vec<[f32; 16]>) {
+    ) -> std::collections::HashMap<usize, [f32; 16]> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
         };
@@ -2575,7 +2585,6 @@ impl IgbModel {
         };
 
         let mut geo_transforms = std::collections::HashMap::new();
-        let mut level_entity_positions = Vec::new();
 
         for info in objects.iter().filter(|o| {
             matches!(
@@ -2592,40 +2601,24 @@ impl IgbModel {
                 let e_arr = ptr(e_list + 0x14);
 
                 if let Some(e_p) = e_arr {
-                    let mut entity_transforms = Vec::with_capacity(e_count);
-                    let mut entity_parents = Vec::with_capacity(e_count);
+                    // ponytail: parents composed only when parent index < child index
+                    // (single forward pass); add a topological pass if a level breaks this.
+                    let mut entity_transforms: Vec<[f32; 16]> = Vec::with_capacity(e_count);
                     for e_idx in 0..e_count {
                         let ent = ptr(e_p + e_idx * 4);
-                        let xform = ent
+                        let local = ent
                             .and_then(|e| ptr(e + meta_fields::entity::TRANSFORM))
                             .and_then(read_matrix)
                             .unwrap_or_else(mat4_identity);
                         let parent = ent
                             .and_then(|e| rd_u16(e + meta_fields::entity::PARENT_INDEX))
+                            .map(usize::from)
                             .unwrap_or(0xFFFF);
-                        entity_transforms.push(xform);
-                        entity_parents.push(parent);
-                    }
-
-                    // Apply parent transform hierarchy
-                    for e_idx in 0..e_count {
-                        let mut cur_parent = entity_parents[e_idx];
-                        let mut depth = 0;
-                        while cur_parent != 0xFFFF && (cur_parent as usize) < e_count && depth < 16
-                        {
-                            entity_transforms[e_idx] = mat4_mul(
-                                &entity_transforms[cur_parent as usize],
-                                &entity_transforms[e_idx],
-                            );
-                            cur_parent = entity_parents[cur_parent as usize];
-                            depth += 1;
-                        }
-                        if entity_transforms[e_idx][12].abs() > 0.001
-                            || entity_transforms[e_idx][13].abs() > 0.001
-                            || entity_transforms[e_idx][14].abs() > 0.001
-                        {
-                            level_entity_positions.push(entity_transforms[e_idx]);
-                        }
+                        let world = match entity_transforms.get(parent) {
+                            Some(p) => mat4_mul(p, &local),
+                            None => local,
+                        };
+                        entity_transforms.push(world);
                     }
 
                     if let Some(d_p) = d_arr {
@@ -2649,7 +2642,46 @@ impl IgbModel {
             }
         }
 
-        (geo_transforms, level_entity_positions)
+        geo_transforms
+    }
+
+    /// Reads level placements from `tfbActorInfo` objects (one per placed actor:
+    /// coins, doors, spawns, props). Name: `igNamedObject._name` (+0x08).
+    /// Position: `AbstractPlacement._initMatrix` (+0x24, `tfbEulerTransform`: f32 x,y,z
+    /// then Euler degrees at +0x30). Positions are in level file space, same as meshes.
+    pub fn decode_actor_placements(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> Vec<(String, [f32; 3])> {
+        let cstr = |o: usize| -> Option<String> {
+            let w = data
+                .get(o..o + 4)
+                .map(|_| Self::read_u32(data, o, endian))
+                .filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            let start = s.offset + (w & 0x07FF_FFFF) as usize;
+            let len = data.get(start..)?.iter().position(|&b| b == 0)?;
+            std::str::from_utf8(&data[start..start + len])
+                .ok()
+                .map(str::to_string)
+        };
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
+            .filter(|o| o.offset + meta_fields::actor_info::INIT_MATRIX + 12 <= data.len())
+            .filter_map(|o| {
+                let name = cstr(o.offset + meta_fields::named_object::NAME)?;
+                let p = o.offset + meta_fields::actor_info::INIT_MATRIX;
+                let pos = [
+                    Self::read_f32(data, p, endian),
+                    Self::read_f32(data, p + 4, endian),
+                    Self::read_f32(data, p + 8, endian),
+                ];
+                pos.iter().all(|v| v.is_finite()).then_some((name, pos))
+            })
+            .collect()
     }
 
     pub fn parse_animation(
@@ -2985,12 +3017,11 @@ impl IgbModel {
         };
 
         let mut geo_transforms = std::collections::HashMap::new();
-        let mut level_entity_positions = Vec::new();
+        let mut actor_placements = Vec::new();
         if let Some(ref list) = igz_objects {
-            let (gt, ep) =
+            geo_transforms =
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
-            geo_transforms = gt;
-            level_entity_positions = ep;
+            actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
         }
 
         // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
@@ -3271,19 +3302,15 @@ impl IgbModel {
             }
         }
 
-        // Extract level markers and node hierarchy from string table
+        // Level markers: real placements from `tfbActorInfo` when present.
         let mut nodes = Vec::new();
-        let mut marker_idx = 0;
-        for name in &string_table {
-            if MarkerKind::from_node_name(name).is_some() {
-                let transform = if let Some(&ent_xform) = level_entity_positions.get(marker_idx) {
-                    ent_xform
-                } else if !level_entity_positions.is_empty() {
-                    level_entity_positions[marker_idx % level_entity_positions.len()]
-                } else {
-                    mat4_identity()
-                };
-
+        if !actor_placements.is_empty() {
+            for (name, pos) in &actor_placements {
+                if MarkerKind::from_node_name(name).is_none() {
+                    continue;
+                }
+                let mut transform = mat4_identity();
+                transform[12..15].copy_from_slice(pos);
                 nodes.push(IgbSceneNode {
                     name: name.clone(),
                     type_id: IgbObjectType::IgNode,
@@ -3291,7 +3318,29 @@ impl IgbModel {
                     geometry_index: None,
                     transform,
                 });
-                marker_idx += 1;
+            }
+        } else {
+            // ponytail: files without `tfbActorInfo` keep the old synthetic spiral
+            // layout for string-table names; drop once no caller relies on it.
+            let mut marker_idx = 0;
+            for name in &string_table {
+                if MarkerKind::from_node_name(name).is_some() {
+                    let angle = (marker_idx as f32) * 0.45;
+                    let dist = 4.0 + ((marker_idx % 8) as f32) * 2.0;
+                    let mut transform = mat4_identity();
+                    if marker_idx != 0 {
+                        transform[12] = angle.cos() * dist;
+                        transform[14] = angle.sin() * dist;
+                    }
+                    nodes.push(IgbSceneNode {
+                        name: name.clone(),
+                        type_id: IgbObjectType::IgNode,
+                        children: Vec::new(),
+                        geometry_index: None,
+                        transform,
+                    });
+                    marker_idx += 1;
+                }
             }
         }
 

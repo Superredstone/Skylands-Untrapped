@@ -95,7 +95,10 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - [x] Commit address/name map only (`tools/rea-bridge/symbols.txt`, 3,336 symbols).
 
 ### Phase 3 - Entities & levels
-- [x] Decode `igEntity`/component layout in level `.bld`; replace synthetic spiral positioning with real `Entity` transforms (`IgbModel::decode_entity_geometry_links` links `tfbWorldEntityInfo` / `tfbEntityInfo` drawables to `Entity._transform` matrices, positioning geometries and markers in world coordinates).
+- [x] Geometry placement: `IgbModel::decode_entity_geometry_links` walks `tfb*EntityInfo` `_drawables`/`_entities` -> `Drawable._geometry` (+ `igWiiGeometryAttr._geometry` +0x10) -> `Entity._transform` (`igTransform._m` +0x30), parent chain via `_parentIndex`. Hub: 4,854 links, only 26 non-identity (most level geometry is pre-baked in world space).
+- [x] Marker positions: level placements are `tfbActorInfo` (hub: 1,260), name `igNamedObject._name` +0x08, position `AbstractPlacement._initMatrix` +0x24 (`tfbEulerTransform`: xyz, then Euler degrees at +0x30). `IgbModel::decode_actor_placements` feeds markers; hub now yields real coin/door positions (11 doorways, 0 spawns). Files without `tfbActorInfo` keep the old synthetic spiral.
+- [ ] Marker kind is still `MarkerKind::from_node_name` (name heuristic). Next: derive kind from the actor's script/`ScriptSet` or actor template instead of the name. Euler rotation at +0x30 not yet applied.
+- Note: IGZ v8 Wii tags are byte-reversed (`RTSR` = `RSTR` string refs, values are section pointers, not TSTR indices).
 - [ ] Doorway/zone link data; swap level archives on doorway; campaign progress.
 - [ ] Find dedicated collision data (vs render mesh).
 
