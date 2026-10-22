@@ -1,4 +1,7 @@
 # Skylands Untrapped
+
+[![AI Ready](https://img.shields.io/badge/AI--Ready-yes-brightgreen?style=flat)](https://github.com/johnpapa/ai-ready)
+
 Skylanders Trap Team PC reimplementation (AI assisted)
 
 ## Objectives
@@ -47,3 +50,11 @@ are not responsible for any misuse of this project or for any damages arising
 from its use. If you are a rights holder and believe that any content in this
 repository infringes your rights, please open an issue or contact the
 maintainers, and it will be promptly reviewed and, if appropriate, removed.
+
+## Contributing
+
+Contributions are welcome! Please make sure:
+1. No copyrighted game assets or ROM files are submitted.
+2. Code passes formatting and clippy lints (`nix-shell --run "cargo fmt --all && cargo clippy --all-targets --all-features"`).
+3. Changes include tests verifying new behavior.
+4. Review [`AGENTS.md`](./AGENTS.md) for full development workflow and architecture details.
