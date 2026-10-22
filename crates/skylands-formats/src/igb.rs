@@ -333,6 +333,71 @@ pub fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Rotates a direction by the upper 3x3 of a column-major matrix and normalizes.
+/// ponytail: ignores non-uniform scale; use inverse-transpose if skewed instances appear.
+pub fn transform_dir(m: &[f32; 16], n: [f32; 3]) -> [f32; 3] {
+    let r = [
+        m[0] * n[0] + m[4] * n[1] + m[8] * n[2],
+        m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
+        m[2] * n[0] + m[6] * n[1] + m[10] * n[2],
+    ];
+    let len = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+    if len > 1e-12 {
+        [r[0] / len, r[1] / len, r[2] / len]
+    } else {
+        n
+    }
+}
+
+/// Decodes one GX vertex color (RGB565, RGB8, RGBX8, RGBA4, RGBA6, RGBA8) to RGBA floats.
+fn gx_color(b: &[u8], o: usize, fmt: u32) -> Option<[f32; 4]> {
+    let px = |n: usize| b.get(o..o + n);
+    let f = |v: u32, max: u32| v as f32 / max as f32;
+    Some(match fmt {
+        0 => {
+            let v = u16::from_be_bytes(px(2)?.try_into().ok()?) as u32;
+            [f(v >> 11, 31), f((v >> 5) & 63, 63), f(v & 31, 31), 1.0]
+        }
+        1 | 2 => {
+            let s = px(if fmt == 1 { 3 } else { 4 })?;
+            [
+                f(s[0] as u32, 255),
+                f(s[1] as u32, 255),
+                f(s[2] as u32, 255),
+                1.0,
+            ]
+        }
+        3 => {
+            let v = u16::from_be_bytes(px(2)?.try_into().ok()?) as u32;
+            [
+                f(v >> 12, 15),
+                f((v >> 8) & 15, 15),
+                f((v >> 4) & 15, 15),
+                f(v & 15, 15),
+            ]
+        }
+        4 => {
+            let s = px(3)?;
+            let v = ((s[0] as u32) << 16) | ((s[1] as u32) << 8) | s[2] as u32;
+            [
+                f(v >> 18, 63),
+                f((v >> 12) & 63, 63),
+                f((v >> 6) & 63, 63),
+                f(v & 63, 63),
+            ]
+        }
+        _ => {
+            let s = px(4)?;
+            [
+                f(s[0] as u32, 255),
+                f(s[1] as u32, 255),
+                f(s[2] as u32, 255),
+                f(s[3] as u32, 255),
+            ]
+        }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgzImage2 {
     pub offset: usize,
@@ -3498,11 +3563,23 @@ impl IgbModel {
                             }
                         }
 
-                        for (c, shift) in [(13u32, 14u32), (15, 18)] {
-                            match (vcd_lo >> c) & 3 {
-                                1 => p += color_size((a >> shift) & 7),
-                                kind => {
-                                    read_idx(kind, &mut p);
+                        let mut color = [0.8, 0.8, 0.82, 1.0];
+                        for (slot, (c, shift)) in [(13u32, 14u32), (15, 18)].into_iter().enumerate()
+                        {
+                            let cfmt = (a >> shift) & 7;
+                            let src = match (vcd_lo >> c) & 3 {
+                                1 => {
+                                    let o = p;
+                                    p += color_size(cfmt);
+                                    Some((dl, o))
+                                }
+                                kind => read_idx(kind, &mut p)
+                                    .map(|idx| (vb, base[2 + slot] + idx * stride[2 + slot])),
+                            };
+                            // ponytail: CLR1 (specular/second channel) parsed past, not stored.
+                            if slot == 0 {
+                                if let Some(rgba) = src.and_then(|(s, o)| gx_color(s, o, cfmt)) {
+                                    color = rgba;
                                 }
                             }
                         }
@@ -3544,7 +3621,7 @@ impl IgbModel {
                             position,
                             normal,
                             uv,
-                            color: [0.8, 0.8, 0.82, 1.0],
+                            color,
                             bone_indices: [0, 0, 0, 0],
                             bone_weights: [1.0, 0.0, 0.0, 0.0],
                         });
@@ -5038,6 +5115,57 @@ mod tests {
             ]
         );
         assert_eq!(mesh.indices, vec![0, 1, 2, 2, 1, 3]);
+    }
+
+    #[test]
+    fn test_wii_display_list_indexed_clr0() {
+        // VAT0: pos xyz s16 shift 0, CLR0 RGBA8; VCD: pos idx8, clr0 idx8.
+        let mut dl = Vec::new();
+        let cp = |dl: &mut Vec<u8>, reg: u8, val: u32| {
+            dl.push(0x08);
+            dl.push(reg);
+            dl.extend_from_slice(&val.to_be_bytes());
+        };
+        cp(&mut dl, 0x70, 1 | (3 << 1) | (5 << 14));
+        cp(&mut dl, 0xA0, 0);
+        cp(&mut dl, 0xB0, 6);
+        cp(&mut dl, 0xA2, 18);
+        cp(&mut dl, 0xB2, 4);
+        cp(&mut dl, 0x50, (2 << 9) | (2 << 13));
+        cp(&mut dl, 0x60, 0);
+        dl.extend_from_slice(&[0x90, 0x00, 0x03]);
+        for idx in [0u8, 1, 2] {
+            dl.extend_from_slice(&[idx, 2 - idx]);
+        }
+
+        let mut vb = Vec::new();
+        for p in [[0i16, 0, 0], [1, 0, 0], [0, 0, 1]] {
+            for c in p {
+                vb.extend_from_slice(&c.to_be_bytes());
+            }
+        }
+        vb.extend_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0]);
+
+        let mesh = IgbModel::decode_wii_display_list(&dl, &vb).expect("decodes");
+        let colors: Vec<_> = mesh.vertices.iter().map(|v| v.color).collect();
+        assert_eq!(
+            colors,
+            vec![
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn test_gx_color_rgb565_and_transform_dir() {
+        assert_eq!(gx_color(&[0xF8, 0x00], 0, 0), Some([1.0, 0.0, 0.0, 1.0]));
+        // 90 deg about Y, column-major: +X maps to -Z.
+        let m = [
+            0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 1.0,
+        ];
+        assert_eq!(transform_dir(&m, [2.0, 0.0, 0.0]), [0.0, 0.0, -1.0]);
     }
 
     #[test]

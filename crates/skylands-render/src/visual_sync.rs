@@ -337,7 +337,12 @@ pub fn setup_environment_and_assets(
                                                             v.position,
                                                         ),
                                                     );
-                                                    normals.push(v.normal);
+                                                    normals.push(
+                                                        skylands_formats::igb::transform_dir(
+                                                            &inst.world_transform,
+                                                            v.normal,
+                                                        ),
+                                                    );
                                                     uvs.push(v.uv);
                                                     colors.push(v.color);
                                                 }

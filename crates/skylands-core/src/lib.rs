@@ -3,6 +3,7 @@ pub mod collision;
 pub mod components;
 pub mod events;
 pub mod input;
+pub mod interpolation;
 pub mod portal_gameplay;
 pub mod resources;
 pub mod states;
@@ -48,6 +49,13 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
             .add_systems(Startup, systems::setup_default_scene)
+            .add_systems(FixedFirst, interpolation::restore_tick_transform)
+            .add_systems(FixedPostUpdate, interpolation::record_tick_transform)
+            .add_systems(
+                RunFixedMainLoop,
+                interpolation::blend_tick_transform
+                    .in_set(RunFixedMainLoopSystem::AfterFixedMainLoop),
+            )
             .add_systems(
                 FixedUpdate,
                 (
