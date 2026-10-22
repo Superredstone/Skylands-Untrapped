@@ -2539,6 +2539,119 @@ impl IgbModel {
         links
     }
 
+    /// Extracts geometry world transforms and entity positions from Alchemy level entity graphs:
+    /// `tfbWorldEntityInfo` / `tfbEntityInfo` / `tfbBodyEntityInfo`:
+    /// `_drawables` (+0x14) -> `DrawableList` (+0x08 count, +0x14 array of `Drawable`)
+    /// `_entities` (+0x18) -> `EntityList` (+0x08 count, +0x14 array of `Entity`)
+    /// `Drawable`: `_geometry` (+0x0c) -> geometry offset; `_entity` (+0x14) -> entity index
+    /// `Entity`: `_transform` (+0x08) -> matrix at +0x30; `_parentIndex` (+0x10)
+    pub fn decode_entity_geometry_links(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> (std::collections::HashMap<usize, [f32; 16]>, Vec<[f32; 16]>) {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let rd_u16 = |o: usize| -> Option<u16> {
+            data.get(o..o + 2).map(|b| match endian {
+                IgbEndian::Big => u16::from_be_bytes([b[0], b[1]]),
+                IgbEndian::Little => u16::from_le_bytes([b[0], b[1]]),
+            })
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let read_matrix = |xform_off: usize| -> Option<[f32; 16]> {
+            let mut m = mat4_identity();
+            for (i, val) in m.iter_mut().enumerate() {
+                let w = rd(xform_off + 0x30 + i * 4)?;
+                *val = f32::from_bits(w);
+            }
+            Some(m)
+        };
+
+        let mut geo_transforms = std::collections::HashMap::new();
+        let mut level_entity_positions = Vec::new();
+
+        for info in objects.iter().filter(|o| {
+            matches!(
+                o.type_name.as_deref(),
+                Some("tfbEntityInfo") | Some("tfbWorldEntityInfo") | Some("tfbBodyEntityInfo")
+            )
+        }) {
+            let drawables = ptr(info.offset + 0x14);
+            let entities = ptr(info.offset + 0x18);
+            if let (Some(d_list), Some(e_list)) = (drawables, entities) {
+                let d_count = rd(d_list + 0x08).unwrap_or(0) as usize;
+                let d_arr = ptr(d_list + 0x14);
+                let e_count = rd(e_list + 0x08).unwrap_or(0) as usize;
+                let e_arr = ptr(e_list + 0x14);
+
+                if let Some(e_p) = e_arr {
+                    let mut entity_transforms = Vec::with_capacity(e_count);
+                    let mut entity_parents = Vec::with_capacity(e_count);
+                    for e_idx in 0..e_count {
+                        let ent = ptr(e_p + e_idx * 4);
+                        let xform = ent
+                            .and_then(|e| ptr(e + meta_fields::entity::TRANSFORM))
+                            .and_then(read_matrix)
+                            .unwrap_or_else(mat4_identity);
+                        let parent = ent
+                            .and_then(|e| rd_u16(e + meta_fields::entity::PARENT_INDEX))
+                            .unwrap_or(0xFFFF);
+                        entity_transforms.push(xform);
+                        entity_parents.push(parent);
+                    }
+
+                    // Apply parent transform hierarchy
+                    for e_idx in 0..e_count {
+                        let mut cur_parent = entity_parents[e_idx];
+                        let mut depth = 0;
+                        while cur_parent != 0xFFFF && (cur_parent as usize) < e_count && depth < 16
+                        {
+                            entity_transforms[e_idx] = mat4_mul(
+                                &entity_transforms[cur_parent as usize],
+                                &entity_transforms[e_idx],
+                            );
+                            cur_parent = entity_parents[cur_parent as usize];
+                            depth += 1;
+                        }
+                        if entity_transforms[e_idx][12].abs() > 0.001
+                            || entity_transforms[e_idx][13].abs() > 0.001
+                            || entity_transforms[e_idx][14].abs() > 0.001
+                        {
+                            level_entity_positions.push(entity_transforms[e_idx]);
+                        }
+                    }
+
+                    if let Some(d_p) = d_arr {
+                        for d_idx in 0..d_count {
+                            if let Some(drawable) = ptr(d_p + d_idx * 4) {
+                                if let Some(geo) = ptr(drawable + 0x0c) {
+                                    let ent_idx =
+                                        rd_u16(drawable + 0x14).unwrap_or(0xFFFF) as usize;
+                                    if let Some(&xform) = entity_transforms.get(ent_idx) {
+                                        geo_transforms.insert(geo, xform);
+                                        // igWiiGeometryAttr has _geometry at +0x10 pointing to igWiiGeometry
+                                        if let Some(inner_geo) = ptr(geo + 0x10) {
+                                            geo_transforms.insert(inner_geo, xform);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (geo_transforms, level_entity_positions)
+    }
+
     pub fn parse_animation(
         data: &[u8],
         name: &str,
@@ -2871,11 +2984,21 @@ impl IgbModel {
             None
         };
 
+        let mut geo_transforms = std::collections::HashMap::new();
+        let mut level_entity_positions = Vec::new();
+        if let Some(ref list) = igz_objects {
+            let (gt, ep) =
+                Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
+            geo_transforms = gt;
+            level_entity_positions = ep;
+        }
+
         // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
         let mut vertex_buffers = Vec::new();
         let mut index_buffers = Vec::new();
         let mut attr_lists = Vec::new();
         let mut geometries = Vec::new();
+        let mut geo_offsets = Vec::new();
 
         let mut skeletons = Vec::new();
         let mut skeleton_by_offset = std::collections::HashMap::new();
@@ -3043,6 +3166,7 @@ impl IgbModel {
                                 m
                             });
                             if mesh.is_some() {
+                                geo_offsets.push(obj.offset);
                                 geometries.push(IgbGeometryNode {
                                     name,
                                     vertex_buffer_index: None,
@@ -3105,6 +3229,7 @@ impl IgbModel {
                             });
                         }
 
+                        geo_offsets.push(obj.offset);
                         geometries.push(IgbGeometryNode {
                             name: geo_name,
                             vertex_buffer_index: Some(vertex_buffers.len().saturating_sub(1)),
@@ -3151,18 +3276,13 @@ impl IgbModel {
         let mut marker_idx = 0;
         for name in &string_table {
             if MarkerKind::from_node_name(name).is_some() {
-                let angle = (marker_idx as f32) * 0.45;
-                let dist = 4.0 + ((marker_idx % 8) as f32) * 2.0;
-                let (px, py, pz) = if marker_idx == 0 {
-                    (0.0, 0.0, 0.0)
+                let transform = if let Some(&ent_xform) = level_entity_positions.get(marker_idx) {
+                    ent_xform
+                } else if !level_entity_positions.is_empty() {
+                    level_entity_positions[marker_idx % level_entity_positions.len()]
                 } else {
-                    (angle.cos() * dist, 0.0, angle.sin() * dist)
+                    mat4_identity()
                 };
-
-                let mut transform = mat4_identity();
-                transform[12] = px;
-                transform[13] = py;
-                transform[14] = pz;
 
                 nodes.push(IgbSceneNode {
                     name: name.clone(),
@@ -3180,12 +3300,17 @@ impl IgbModel {
         for (geo_idx, geo) in geometries.iter().enumerate() {
             if let Some(ref m) = geo.mesh {
                 meshes.push(m.clone());
+                let transform = geo_offsets
+                    .get(geo_idx)
+                    .and_then(|off| geo_transforms.get(off))
+                    .copied()
+                    .unwrap_or_else(mat4_identity);
                 nodes.push(IgbSceneNode {
                     name: format!("node_{}", geo.name),
                     type_id: IgbObjectType::IgNode,
                     children: Vec::new(),
                     geometry_index: Some(geo_idx),
-                    transform: mat4_identity(),
+                    transform,
                 });
             }
         }

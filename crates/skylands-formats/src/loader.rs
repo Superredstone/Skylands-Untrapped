@@ -651,6 +651,45 @@ mod tests {
     }
 
     #[test]
+    fn test_hub_level_entity_decoding_and_markers() {
+        let p1 = Path::new("assets/files/level/Level_Hub_2014_01.bld");
+        let p2 = Path::new("../../assets/files/level/Level_Hub_2014_01.bld");
+        let path = if p1.exists() { p1 } else { p2 };
+        if !path.exists() {
+            return;
+        }
+        let mut loader = AssetLoader::default();
+        loader.mount(path).expect("mount hub");
+        let raw = loader.load_raw("level.bld").expect("load level.bld");
+        let model = IgbModel::parse_igz(&raw).expect("parse hub level");
+        assert!(!model.meshes.is_empty());
+        assert!(!model.nodes.is_empty());
+
+        let count_geo_trans = model
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.geometry_index.is_some()
+                    && (n.transform[12].abs() > 0.001
+                        || n.transform[13].abs() > 0.001
+                        || n.transform[14].abs() > 0.001)
+            })
+            .count();
+        assert!(count_geo_trans > 0, "Expected transformed level geometries");
+
+        let markers = model.extract_level_markers();
+        assert!(!markers.is_empty());
+        let non_zero_markers = markers
+            .iter()
+            .filter(|m| m.position[0].abs() > 0.001 || m.position[2].abs() > 0.001)
+            .count();
+        assert!(
+            non_zero_markers > 0,
+            "Level markers must have real world entity positions"
+        );
+    }
+
+    #[test]
     fn test_level_hub_geometry_and_texture_filtering() {
         let bld_path = std::path::Path::new("../../assets/files/level/Level_Hub_2014_01.bld");
         if !bld_path.exists() {

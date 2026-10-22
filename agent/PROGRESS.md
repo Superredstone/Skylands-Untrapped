@@ -95,7 +95,7 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - [x] Commit address/name map only (`tools/rea-bridge/symbols.txt`, 3,336 symbols).
 
 ### Phase 3 - Entities & levels
-- [ ] Decode `igEntity`/component layout in level `.bld`; replace name-heuristic `MarkerKind::from_node_name`.
+- [x] Decode `igEntity`/component layout in level `.bld`; replace synthetic spiral positioning with real `Entity` transforms (`IgbModel::decode_entity_geometry_links` links `tfbWorldEntityInfo` / `tfbEntityInfo` drawables to `Entity._transform` matrices, positioning geometries and markers in world coordinates).
 - [ ] Doorway/zone link data; swap level archives on doorway; campaign progress.
 - [ ] Find dedicated collision data (vs render mesh).
 
