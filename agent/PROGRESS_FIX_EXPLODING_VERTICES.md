@@ -24,3 +24,10 @@
 
 ## Not done
 Normals NBT3, vertex colors, and skinning matrix indices are parsed past but not decoded.
+
+## Performance follow-up
+- `Cargo.toml`: dev profile `opt-level = 1`, deps `opt-level = 3`.
+- `parse_igz`: synthetic bone weighting skipped for levels (`LEVEL_GEOMETRY_THRESHOLD` = 64 geometries).
+  It cost 337 bones x 1.18M verts plus a Vec sort per vertex. Characters now use a fixed top-4 array.
+- `visual_sync`: level instances merged into one mesh/material (was 3214 meshes, materials, texture lookups).
+- Hub headless load: 91 s -> 15 s (debug). Remaining time: LZMA decompression and GX decoding.

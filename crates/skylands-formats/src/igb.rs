@@ -301,6 +301,9 @@ pub struct SceneInstance {
     pub world_transform: [f32; 16],
 }
 
+/// Models with more geometries than this are treated as static levels.
+pub const LEVEL_GEOMETRY_THRESHOLD: usize = 64;
+
 pub fn mat4_identity() -> [f32; 16] {
     [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -3266,26 +3269,32 @@ impl IgbModel {
 
         let skeleton = Skeleton::new(bones, 0);
 
-        for mesh in &mut meshes {
+        // ponytail: >64 geometries is treated as an unskinned level and keeps default weights;
+        // replace with real skin data (matrix indices in the GX display list) once decoded.
+        let is_level = geometries.len() > LEVEL_GEOMETRY_THRESHOLD;
+        for mesh in meshes.iter_mut().filter(|_| !is_level) {
             for v in &mut mesh.vertices {
                 let p = v.position;
-                let mut dists: Vec<(usize, f32)> = bone_world_pos
-                    .iter()
-                    .enumerate()
-                    .map(|(bi, bw)| {
-                        let dx = p[0] - bw[0];
-                        let dy = p[1] - bw[1];
-                        let dz = p[2] - bw[2];
-                        (bi, (dx * dx + dy * dy + dz * dz).sqrt())
-                    })
-                    .collect();
-                dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                // Keep the 4 nearest bones (ascending, stable on ties).
+                let mut near = [(0usize, f32::INFINITY); 4];
+                for (bi, bw) in bone_world_pos.iter().enumerate() {
+                    let dist =
+                        ((p[0] - bw[0]).powi(2) + (p[1] - bw[1]).powi(2) + (p[2] - bw[2]).powi(2))
+                            .sqrt();
+                    if let Some(slot) = near.iter().position(|&(_, d)| dist < d) {
+                        near.copy_within(slot..3, slot + 1);
+                        near[slot] = (bi, dist);
+                    }
+                }
 
                 let mut b_indices = [0u32; 4];
                 let mut b_weights = [0.0f32; 4];
                 let mut total_w = 0.0f32;
 
-                for (slot, &(b_idx, dist)) in dists.iter().take(4).enumerate() {
+                for (slot, &(b_idx, dist)) in near.iter().enumerate() {
+                    if !dist.is_finite() {
+                        break;
+                    }
                     b_indices[slot] = b_idx as u32;
                     let w = 1.0 / (dist + 0.05);
                     b_weights[slot] = w;
@@ -5045,6 +5054,14 @@ mod tests {
         let data = mount.read_file("level.bld").expect("read level.bld");
         let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
         assert!(model.meshes.len() > 3000, "got {}", model.meshes.len());
+        assert!(
+            model
+                .meshes
+                .iter()
+                .flat_map(|m| &m.vertices)
+                .all(|v| v.bone_weights == [1.0, 0.0, 0.0, 0.0]),
+            "static level must not get synthetic skinning"
+        );
 
         let mut edges: Vec<f32> = Vec::new();
         for m in &model.meshes {

@@ -27,3 +27,9 @@ skylands-portal = { path = "crates/skylands-portal" }
 skylands-extractor = { path = "crates/skylands-extractor" }
 skylands-render = { path = "crates/skylands-render" }
 skylands-core = { path = "crates/skylands-core" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

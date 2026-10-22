@@ -238,11 +238,17 @@ pub fn setup_environment_and_assets(
                             if !instances.is_empty() && !model.geometries.is_empty() {
                                 for inst in &instances {
                                     if let Some(geo) = model.geometries.get(inst.geometry_index) {
-                                        let mat_name = geo
-                                            .mesh
-                                            .as_ref()
-                                            .and_then(|m| m.material_name.clone())
-                                            .unwrap_or_else(|| format!("mat_{}", geo.name));
+                                        // ponytail: per-geometry material names never match a
+                                        // texture file, so levels merge into one draw call; split by
+                                        // real texture once tfbRuntimeMaterial pairing exists.
+                                        let mat_name = if is_level {
+                                            "level".to_string()
+                                        } else {
+                                            geo.mesh
+                                                .as_ref()
+                                                .and_then(|m| m.material_name.clone())
+                                                .unwrap_or_else(|| format!("mat_{}", geo.name))
+                                        };
                                         material_groups.entry(mat_name).or_default().push(inst);
                                     }
                                 }
