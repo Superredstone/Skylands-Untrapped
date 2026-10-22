@@ -646,12 +646,14 @@ pub fn zone_trigger_system(
             if input.is_down(WiiButton::A) {
                 transition_events.send(ZoneTransitionEvent {
                     target_zone: trigger.target_zone.clone(),
+                    target_level: trigger.target_level.clone(),
                     target_spawn: trigger.target_spawn,
                 });
                 audio_events.send(WorldAudioCueEvent(WorldAudioCue::ZoneEntered(
                     trigger.target_zone.clone(),
                 )));
                 transition_progress.target_zone = trigger.target_zone.clone();
+                transition_progress.target_level = trigger.target_level.clone();
                 transition_progress.target_spawn = trigger.target_spawn;
                 transition_progress.timer = 0.0;
                 transition_progress.duration = 1.0;
@@ -714,7 +716,9 @@ pub fn portal_audio_stream_system(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn state_transition_update_system(
+    mut commands: Commands,
     time: Res<Time<Fixed>>,
     current_state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -722,6 +726,12 @@ pub fn state_transition_update_system(
     mut transition_progress: ResMut<ZoneTransitionProgress>,
     mut stats: ResMut<GameStats>,
     mut hero_query: Query<&mut Transform, With<Hero>>,
+    mut active_level: Option<ResMut<ActiveLevel>>,
+    mut campaign_progress: Option<ResMut<CampaignProgress>>,
+    mut env_col: Option<ResMut<EnvironmentCollision>>,
+    asset_server: Option<Res<GameAssetServer>>,
+    level_entities_query: Query<Entity, With<LevelEntity>>,
+    mut level_changed_events: EventWriter<LevelChangedEvent>,
 ) {
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
@@ -740,14 +750,285 @@ pub fn state_transition_update_system(
             transition_progress.timer += dt;
             if transition_progress.timer >= transition_progress.duration {
                 stats.active_zone = transition_progress.target_zone.clone();
-                for mut tf in &mut hero_query {
-                    tf.translation = transition_progress.target_spawn;
+
+                let current_level_name = active_level
+                    .as_ref()
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default();
+
+                let needs_level_swap =
+                    if let Some(ref target_lvl) = transition_progress.target_level {
+                        !target_lvl.eq_ignore_ascii_case(&current_level_name)
+                    } else {
+                        false
+                    };
+
+                if needs_level_swap {
+                    let target_lvl = transition_progress.target_level.take().unwrap();
+                    let prev_level = current_level_name.clone();
+
+                    if let Some(ref mut camp) = campaign_progress {
+                        if let Some(ch) = camp.chapter_for_level(&current_level_name) {
+                            camp.complete_chapter(ch);
+                        }
+                        camp.record_level_visit(&target_lvl);
+                    }
+
+                    for ent in &level_entities_query {
+                        commands.entity(ent).despawn_recursive();
+                    }
+
+                    if let Some(ref mut lvl) = active_level {
+                        lvl.name = target_lvl.clone();
+                    }
+
+                    let default_camp = CampaignProgress::default();
+                    let camp_ref = campaign_progress.as_deref().unwrap_or(&default_camp);
+                    let mut spawned_real = false;
+
+                    if let Some(ref server) = asset_server {
+                        if let Ok(loader) = server.loader.lock() {
+                            spawned_real = spawn_level_content(
+                                &mut commands,
+                                &loader,
+                                &target_lvl,
+                                env_col.as_deref_mut(),
+                                camp_ref,
+                            );
+                        }
+                    }
+
+                    if !spawned_real {
+                        spawn_fallback_courtyard_content(&mut commands);
+                    }
+
+                    level_changed_events.send(LevelChangedEvent {
+                        previous_level: prev_level,
+                        new_level: target_lvl,
+                    });
                 }
+
+                let spawn_pos = if transition_progress.target_spawn != Vec3::ZERO {
+                    transition_progress.target_spawn
+                } else if let Some(ref env) = env_col {
+                    env.spawn_point
+                } else {
+                    Vec3::ZERO
+                };
+
+                for mut tf in &mut hero_query {
+                    tf.translation = spawn_pos;
+                }
+
                 next_state.set(GameState::Hub);
             }
         }
         _ => {}
     }
+}
+
+pub fn spawn_level_content(
+    commands: &mut Commands,
+    loader: &skylands_formats::AssetLoader,
+    level_name: &str,
+    mut env_col: Option<&mut EnvironmentCollision>,
+    campaign: &CampaignProgress,
+) -> bool {
+    let resolved = if loader.has_file(level_name) {
+        Some(level_name.to_string())
+    } else {
+        crate::portal_gameplay::resolve_model_archive("level", level_name)
+    };
+
+    let Some(path) = resolved else {
+        return false;
+    };
+
+    let Ok(model) = loader.load_igb(&path) else {
+        return false;
+    };
+
+    let col_mesh = crate::collision::CollisionMesh::from_igb(&model);
+    if !col_mesh.triangles.is_empty() {
+        if let Some(ref mut env) = env_col {
+            env.mesh = col_mesh;
+            env.kill_plane_y = -350.0;
+        }
+    }
+
+    let markers = model.extract_level_markers();
+    let mut marker_id_counter = 5000u32;
+    let mut has_spawn = false;
+
+    for marker in &markers {
+        match marker.kind {
+            skylands_formats::igb::MarkerKind::Spawn => {
+                if !has_spawn {
+                    if let Some(ref mut env) = env_col {
+                        env.spawn_point =
+                            Vec3::new(marker.position[0], marker.position[1], marker.position[2]);
+                    }
+                    has_spawn = true;
+                }
+            }
+            skylands_formats::igb::MarkerKind::Doorway
+            | skylands_formats::igb::MarkerKind::TriggerZone => {
+                let dest = crate::doorway::resolve_doorway_destination(
+                    level_name,
+                    &marker.name,
+                    marker.position,
+                    &markers,
+                    campaign,
+                );
+                commands.spawn((
+                    LevelEntity,
+                    ZoneTrigger {
+                        id: marker_id_counter,
+                        prompt: dest.prompt,
+                        target_zone: dest.target_zone,
+                        target_level: dest.target_level,
+                        target_spawn: dest.target_spawn,
+                        radius: 2.5,
+                    },
+                    Transform::from_xyz(marker.position[0], marker.position[1], marker.position[2]),
+                ));
+                marker_id_counter += 1;
+            }
+            skylands_formats::igb::MarkerKind::Prop => {
+                commands.spawn((
+                    LevelEntity,
+                    ActorIdentity {
+                        id: marker_id_counter,
+                        character_id: 0,
+                        name: marker.name.clone(),
+                        is_villain: false,
+                        model_path: None,
+                        texture_path: None,
+                    },
+                    Prop { destructible: true },
+                    Health {
+                        current: 50,
+                        max: 50,
+                    },
+                    Transform::from_xyz(marker.position[0], marker.position[1], marker.position[2]),
+                    CharacterCollider {
+                        radius: 0.5,
+                        height: 1.0,
+                        step_height: 0.0,
+                        grounded: true,
+                    },
+                ));
+                marker_id_counter += 1;
+            }
+            skylands_formats::igb::MarkerKind::Collectible => {
+                commands.spawn((
+                    LevelEntity,
+                    ActorIdentity {
+                        id: marker_id_counter,
+                        character_id: 0,
+                        name: marker.name.clone(),
+                        is_villain: false,
+                        model_path: None,
+                        texture_path: None,
+                    },
+                    Collectible {
+                        value: 1,
+                        collected: false,
+                    },
+                    Transform::from_xyz(
+                        marker.position[0],
+                        marker.position[1] + 0.5,
+                        marker.position[2],
+                    ),
+                ));
+                marker_id_counter += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if !has_spawn {
+        if let Some(ref mut env) = env_col {
+            if let Some((hit_y, _)) = env.mesh.raycast_down([0.0, 50.0, 0.0], 500.0) {
+                env.spawn_point = Vec3::new(0.0, hit_y, 0.0);
+            }
+        }
+    }
+
+    true
+}
+
+pub fn spawn_fallback_courtyard_content(commands: &mut Commands) {
+    commands.spawn((
+        LevelEntity,
+        ZoneTrigger {
+            id: 1,
+            prompt: "Press A to Enter Academy".into(),
+            target_zone: "Academy Library".into(),
+            target_level: None,
+            target_spawn: Vec3::new(0.0, 0.0, 5.0),
+            radius: 2.5,
+        },
+        Transform::from_xyz(0.0, 0.0, -8.0),
+    ));
+
+    commands.spawn((
+        LevelEntity,
+        ActorIdentity {
+            id: 2001,
+            character_id: 0,
+            name: "prop_wooden_barrel".into(),
+            is_villain: false,
+            model_path: None,
+            texture_path: None,
+        },
+        Prop { destructible: true },
+        Health {
+            current: 50,
+            max: 50,
+        },
+        Transform::from_xyz(5.0, 0.0, 0.0),
+        CharacterCollider {
+            radius: 0.5,
+            height: 1.0,
+            step_height: 0.0,
+            grounded: true,
+        },
+    ));
+
+    commands.spawn((
+        LevelEntity,
+        ActorIdentity {
+            id: 3001,
+            character_id: 0,
+            name: "pickup_coin_gold".into(),
+            is_villain: false,
+            model_path: None,
+            texture_path: None,
+        },
+        Collectible {
+            value: 1,
+            collected: false,
+        },
+        Transform::from_xyz(0.0, 0.5, -2.0),
+    ));
+
+    commands.spawn((
+        LevelEntity,
+        ActorIdentity {
+            id: 3002,
+            character_id: 0,
+            name: "pickup_gem_emerald".into(),
+            is_villain: false,
+            model_path: None,
+            texture_path: None,
+        },
+        Collectible {
+            value: 5,
+            collected: false,
+        },
+        Transform::from_xyz(0.0, 0.5, -10.0),
+    ));
 }
 
 pub fn setup_default_scene(
@@ -756,215 +1037,41 @@ pub fn setup_default_scene(
     active_level: Option<Res<ActiveLevel>>,
     mut env_col: Option<ResMut<EnvironmentCollision>>,
     mut game_stats: Option<ResMut<GameStats>>,
+    mut campaign_progress: Option<ResMut<CampaignProgress>>,
 ) {
     let level_name = active_level
         .map(|l| l.name.clone())
         .unwrap_or_else(|| "Level_Hub_2014_01.bld".to_string());
 
+    let default_campaign = CampaignProgress::default();
+    let campaign_ref = campaign_progress.as_deref().unwrap_or(&default_campaign);
+
     let mut loaded_real_level = false;
 
     if let Some(server) = asset_server {
         if let Ok(loader) = server.loader.lock() {
-            let resolved = if loader.has_file(&level_name) {
-                Some(level_name.clone())
-            } else {
-                crate::portal_gameplay::resolve_model_archive("level", &level_name)
-            };
-
-            if let Some(path) = resolved {
-                if let Ok(model) = loader.load_igb(&path) {
-                    let col_mesh = crate::collision::CollisionMesh::from_igb(&model);
-                    if !col_mesh.triangles.is_empty() {
-                        if let Some(ref mut env) = env_col {
-                            env.mesh = col_mesh;
-                            env.kill_plane_y = -350.0;
-                        }
-                    }
-
-                    let markers = model.extract_level_markers();
-                    let mut marker_id_counter = 5000u32;
-                    let mut has_spawn = false;
-
-                    for marker in &markers {
-                        match marker.kind {
-                            skylands_formats::igb::MarkerKind::Spawn => {
-                                if !has_spawn {
-                                    if let Some(ref mut env) = env_col {
-                                        env.spawn_point = Vec3::new(
-                                            marker.position[0],
-                                            marker.position[1],
-                                            marker.position[2],
-                                        );
-                                    }
-                                    has_spawn = true;
-                                }
-                            }
-                            skylands_formats::igb::MarkerKind::Doorway
-                            | skylands_formats::igb::MarkerKind::TriggerZone => {
-                                commands.spawn((
-                                    ZoneTrigger {
-                                        id: marker_id_counter,
-                                        prompt: format!("Press A to enter {}", marker.name),
-                                        target_zone: marker.name.clone(),
-                                        target_spawn: Vec3::new(
-                                            marker.position[0],
-                                            marker.position[1],
-                                            marker.position[2] + 2.0,
-                                        ),
-                                        radius: 2.5,
-                                    },
-                                    Transform::from_xyz(
-                                        marker.position[0],
-                                        marker.position[1],
-                                        marker.position[2],
-                                    ),
-                                ));
-                                marker_id_counter += 1;
-                            }
-                            skylands_formats::igb::MarkerKind::Prop => {
-                                commands.spawn((
-                                    ActorIdentity {
-                                        id: marker_id_counter,
-                                        character_id: 0,
-                                        name: marker.name.clone(),
-                                        is_villain: false,
-                                        model_path: None,
-                                        texture_path: None,
-                                    },
-                                    Prop { destructible: true },
-                                    Health {
-                                        current: 50,
-                                        max: 50,
-                                    },
-                                    Transform::from_xyz(
-                                        marker.position[0],
-                                        marker.position[1],
-                                        marker.position[2],
-                                    ),
-                                    CharacterCollider {
-                                        radius: 0.5,
-                                        height: 1.0,
-                                        step_height: 0.0,
-                                        grounded: true,
-                                    },
-                                ));
-                                marker_id_counter += 1;
-                            }
-                            skylands_formats::igb::MarkerKind::Collectible => {
-                                commands.spawn((
-                                    ActorIdentity {
-                                        id: marker_id_counter,
-                                        character_id: 0,
-                                        name: marker.name.clone(),
-                                        is_villain: false,
-                                        model_path: None,
-                                        texture_path: None,
-                                    },
-                                    Collectible {
-                                        value: 1,
-                                        collected: false,
-                                    },
-                                    Transform::from_xyz(
-                                        marker.position[0],
-                                        marker.position[1] + 0.5,
-                                        marker.position[2],
-                                    ),
-                                ));
-                                marker_id_counter += 1;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if !has_spawn {
-                        if let Some(ref mut env) = env_col {
-                            if let Some((hit_y, _)) = env.mesh.raycast_down([0.0, 50.0, 0.0], 500.0)
-                            {
-                                env.spawn_point = Vec3::new(0.0, hit_y, 0.0);
-                            }
-                        }
-                    }
-
-                    if let Some(ref mut stats) = game_stats {
-                        stats.active_zone = level_name
-                            .strip_suffix(".bld")
-                            .unwrap_or(&level_name)
-                            .to_string();
-                    }
-
-                    loaded_real_level = true;
-                }
-            }
+            loaded_real_level = spawn_level_content(
+                &mut commands,
+                &loader,
+                &level_name,
+                env_col.as_deref_mut(),
+                campaign_ref,
+            );
         }
     }
 
-    if !loaded_real_level {
-        // Fallback synthetic courtyard scene
-        commands.spawn((
-            ZoneTrigger {
-                id: 1,
-                prompt: "Press A to Enter Academy".into(),
-                target_zone: "Academy Library".into(),
-                target_spawn: Vec3::new(0.0, 0.0, 5.0),
-                radius: 2.5,
-            },
-            Transform::from_xyz(0.0, 0.0, -8.0),
-        ));
-
-        commands.spawn((
-            ActorIdentity {
-                id: 2001,
-                character_id: 0,
-                name: "prop_wooden_barrel".into(),
-                is_villain: false,
-                model_path: None,
-                texture_path: None,
-            },
-            Prop { destructible: true },
-            Health {
-                current: 50,
-                max: 50,
-            },
-            Transform::from_xyz(5.0, 0.0, 0.0),
-            CharacterCollider {
-                radius: 0.5,
-                height: 1.0,
-                step_height: 0.0,
-                grounded: true,
-            },
-        ));
-
-        commands.spawn((
-            ActorIdentity {
-                id: 3001,
-                character_id: 0,
-                name: "pickup_coin_gold".into(),
-                is_villain: false,
-                model_path: None,
-                texture_path: None,
-            },
-            Collectible {
-                value: 1,
-                collected: false,
-            },
-            Transform::from_xyz(0.0, 0.5, -2.0),
-        ));
-
-        commands.spawn((
-            ActorIdentity {
-                id: 3002,
-                character_id: 0,
-                name: "pickup_gem_emerald".into(),
-                is_villain: false,
-                model_path: None,
-                texture_path: None,
-            },
-            Collectible {
-                value: 5,
-                collected: false,
-            },
-            Transform::from_xyz(0.0, 0.5, -10.0),
-        ));
+    if loaded_real_level {
+        if let Some(ref mut stats) = game_stats {
+            stats.active_zone = level_name
+                .strip_suffix(".bld")
+                .unwrap_or(&level_name)
+                .to_string();
+        }
+        if let Some(ref mut camp) = campaign_progress {
+            camp.record_level_visit(&level_name);
+        }
+    } else {
+        spawn_fallback_courtyard_content(&mut commands);
     }
 }
 
@@ -1209,5 +1316,98 @@ mod tests {
         assert_eq!(lvl.name, "Level_Hub_2014_01.bld");
         let custom = ActiveLevel::new("Level_313_Tutorial.bld");
         assert_eq!(custom.name, "Level_313_Tutorial.bld");
+    }
+
+    #[test]
+    fn test_level_swap_despawns_level_entities_and_preserves_hero() {
+        let mut app = build_test_app();
+        app.update();
+
+        // Courtyard spawned 4 LevelEntities: 1 trigger, 1 prop, 2 collectibles
+        let initial_level_entities = app
+            .world_mut()
+            .query_filtered::<Entity, With<LevelEntity>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(initial_level_entities, 4);
+
+        // Spawn hero at (0, 0, 0)
+        let hero_entity = app
+            .world_mut()
+            .spawn((
+                Hero,
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                AttackCombo::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+
+        // Initiate level swap transition to Chapter 1
+        let mut transition_progress = app.world_mut().resource_mut::<ZoneTransitionProgress>();
+        transition_progress.target_zone = "Soda Springs".to_string();
+        transition_progress.target_level = Some("Level_313_Tutorial.bld".to_string());
+        transition_progress.target_spawn = Vec3::new(10.0, 5.0, -20.0);
+        transition_progress.timer = 0.0;
+        transition_progress.duration = 0.1;
+
+        app.world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::ZoneTransition);
+
+        // Tick past transition duration
+        for _ in 0..10 {
+            step_fixed(&mut app);
+        }
+
+        // Active level must have changed
+        let active_level = app.world().resource::<ActiveLevel>();
+        assert_eq!(active_level.name, "Level_313_Tutorial.bld");
+
+        // Hero entity must still exist and be placed at target_spawn
+        let hero_tf = app
+            .world()
+            .get::<Transform>(hero_entity)
+            .expect("Hero survived level swap");
+        assert_eq!(hero_tf.translation.x, 10.0);
+        assert!((hero_tf.translation.y - 5.0).abs() < 0.2);
+        assert_eq!(hero_tf.translation.z, -20.0);
+
+        // State returned to Hub
+        let state = app.world().resource::<State<GameState>>();
+        assert_eq!(*state.get(), GameState::Hub);
+
+        // New level entities were spawned (fallback or real)
+        let new_level_entities = app
+            .world_mut()
+            .query_filtered::<Entity, With<LevelEntity>>()
+            .iter(app.world())
+            .count();
+        assert!(new_level_entities > 0);
+    }
+
+    #[test]
+    fn test_campaign_progress_progression() {
+        let mut campaign = CampaignProgress::default();
+        assert_eq!(campaign.highest_unlocked_chapter, 1);
+        assert!(campaign.is_chapter_unlocked(1));
+        assert!(!campaign.is_chapter_unlocked(2));
+
+        campaign.record_level_visit("Level_313_Tutorial.bld");
+        assert_eq!(campaign.current_chapter, Some(1));
+        assert!(campaign
+            .visited_levels
+            .contains(&"Level_313_Tutorial.bld".to_string()));
+
+        campaign.complete_chapter(1);
+        assert!(campaign.completed_chapters.contains(&1));
+        assert_eq!(campaign.highest_unlocked_chapter, 2);
+        assert!(campaign.is_chapter_unlocked(2));
+
+        // Completing final chapter caps at 18
+        campaign.complete_chapter(18);
+        assert_eq!(campaign.highest_unlocked_chapter, 18);
     }
 }

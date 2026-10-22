@@ -248,9 +248,121 @@ pub struct CaptureProgress {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct ZoneTransitionProgress {
     pub target_zone: String,
+    pub target_level: Option<String>,
     pub target_spawn: Vec3,
     pub timer: f32,
     pub duration: f32,
+}
+
+/// Official Skylanders: Trap Team campaign chapter metadata.
+pub const CHAPTER_LEVELS: &[(u8, &str, &str)] = &[
+    (1, "Soda Springs", "Level_313_Tutorial.bld"),
+    (2, "Know-It-All Island", "Level_300_BirdCage.bld"),
+    (3, "Chompy Mountain", "Level_301_The_Machine.bld"),
+    (4, "Phoenix Sanctuary", "Level_302_Chompywurm.bld"),
+    (5, "Chef Zeppelin", "Level_303_DOTA.bld"),
+    (6, "Rainfish Riviera", "Level_304_Water_Wave.bld"),
+    (7, "Monster Marsh", "Level_305_WilikinFactory.bld"),
+    (8, "Telescope Towers", "Level_306_Copter.bld"),
+    (9, "Mystic Mill", "Level_307_clockworks.bld"),
+    (
+        10,
+        "Secret Sewers of Supreme Stink",
+        "Level_308_NiteLite.bld",
+    ),
+    (11, "Wilikin Workshop", "Level_309_Sewers.bld"),
+    (12, "Time Town", "Level_310_DreamLand.bld"),
+    (
+        13,
+        "The Future of Skylands",
+        "Level_311_Arkeyan_Mechanism.bld",
+    ),
+    (
+        14,
+        "Operation: Troll Rocket Steal",
+        "Level_312_Starlands.bld",
+    ),
+    (15, "Skyhighlands", "Level_316_PirateFortress.bld"),
+    (16, "The Golden Desert", "Level_318_DOTAFortress.bld"),
+    (17, "Lair of the Golden Queen", "Level_319_Pyramid.bld"),
+    (18, "The Ultimate Weapon", "Level_317_FinalBattle.bld"),
+];
+
+pub fn chapter_title(chapter: u8) -> Option<&'static str> {
+    CHAPTER_LEVELS
+        .iter()
+        .find(|(ch, _, _)| *ch == chapter)
+        .map(|(_, title, _)| *title)
+}
+
+pub fn chapter_level_archive(chapter: u8) -> Option<&'static str> {
+    CHAPTER_LEVELS
+        .iter()
+        .find(|(ch, _, _)| *ch == chapter)
+        .map(|(_, _, archive)| *archive)
+}
+
+pub fn chapter_from_level_archive(archive_name: &str) -> Option<u8> {
+    let norm = archive_name.to_ascii_lowercase();
+    CHAPTER_LEVELS
+        .iter()
+        .find(|(_, _, archive)| archive.to_ascii_lowercase() == norm)
+        .map(|(ch, _, _)| *ch)
+}
+
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct CampaignProgress {
+    /// Highest unlocked chapter (1..=18).
+    pub highest_unlocked_chapter: u8,
+    /// Active chapter (None when in Hub or arena).
+    pub current_chapter: Option<u8>,
+    /// Completed chapter IDs.
+    pub completed_chapters: Vec<u8>,
+    /// Set of visited level archive names.
+    pub visited_levels: Vec<String>,
+}
+
+impl Default for CampaignProgress {
+    fn default() -> Self {
+        Self {
+            highest_unlocked_chapter: 1,
+            current_chapter: None,
+            completed_chapters: Vec::new(),
+            visited_levels: vec!["Level_Hub_2014_01.bld".to_string()],
+        }
+    }
+}
+
+impl CampaignProgress {
+    pub fn is_chapter_unlocked(&self, chapter: u8) -> bool {
+        chapter <= self.highest_unlocked_chapter
+    }
+
+    pub fn complete_chapter(&mut self, chapter: u8) {
+        if !self.completed_chapters.contains(&chapter) {
+            self.completed_chapters.push(chapter);
+            self.completed_chapters.sort_unstable();
+        }
+        let next_chapter = (chapter + 1).min(18);
+        if next_chapter > self.highest_unlocked_chapter {
+            self.highest_unlocked_chapter = next_chapter;
+        }
+    }
+
+    pub fn record_level_visit(&mut self, level: &str) {
+        if !self
+            .visited_levels
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(level))
+        {
+            self.visited_levels.push(level.to_string());
+        }
+        self.current_chapter = chapter_from_level_archive(level);
+    }
+
+    pub fn chapter_for_level(&self, level: &str) -> Option<u8> {
+        chapter_from_level_archive(level)
+    }
 }
 
 #[derive(Resource, Debug, Default)]

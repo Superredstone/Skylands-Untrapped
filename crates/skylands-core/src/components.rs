@@ -128,11 +128,15 @@ pub struct DamagePopup {
     pub color: [f32; 4],
 }
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelEntity;
+
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct ZoneTrigger {
     pub id: u32,
     pub radius: f32,
     pub target_zone: String,
+    pub target_level: Option<String>,
     pub target_spawn: Vec3,
     pub prompt: String,
 }

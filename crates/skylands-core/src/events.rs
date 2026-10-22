@@ -87,5 +87,12 @@ pub struct WorldAudioCueEvent(pub WorldAudioCue);
 #[derive(Event, Debug, Clone, PartialEq)]
 pub struct ZoneTransitionEvent {
     pub target_zone: String,
+    pub target_level: Option<String>,
     pub target_spawn: Vec3,
+}
+
+#[derive(Event, Debug, Clone, PartialEq)]
+pub struct LevelChangedEvent {
+    pub previous_level: String,
+    pub new_level: String,
 }

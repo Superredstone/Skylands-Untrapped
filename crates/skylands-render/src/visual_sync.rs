@@ -257,6 +257,260 @@ pub struct RenderMeshAssets {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelRenderMesh;
+
+pub fn spawn_level_render_mesh(
+    commands: &mut Commands,
+    loader: &skylands_formats::AssetLoader,
+    level_name: &str,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> bool {
+    let resolved = if loader.has_file(level_name) {
+        Some(level_name.to_string())
+    } else {
+        resolve_model_archive("level", level_name)
+    };
+
+    let Some(path) = resolved else {
+        return false;
+    };
+
+    let Ok(model) = loader.load_igb(&path) else {
+        return false;
+    };
+
+    if model.meshes.is_empty() {
+        return false;
+    }
+
+    let is_level = path.to_ascii_lowercase().contains("level");
+    let instances = model.evaluate_scene_graph();
+
+    let mut material_groups: HashMap<String, Vec<&skylands_formats::igb::SceneInstance>> =
+        HashMap::new();
+    if !instances.is_empty() && !model.geometries.is_empty() {
+        for inst in &instances {
+            if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                let mat_name = if is_level {
+                    "level".to_string()
+                } else {
+                    geo.mesh
+                        .as_ref()
+                        .and_then(|m| m.material_name.clone())
+                        .unwrap_or_else(|| format!("mat_{}", geo.name))
+                };
+                material_groups.entry(mat_name).or_default().push(inst);
+            }
+        }
+    }
+
+    let mut spawned_any = false;
+
+    if material_groups.is_empty() {
+        let mut base_color_texture = None;
+        if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&path, None) {
+            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+            base_color_texture = Some(images.add(img));
+        } else if !is_level {
+            if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&path) {
+                let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                base_color_texture = Some(images.add(img));
+            }
+        }
+
+        let mat_color = if base_color_texture.is_some() {
+            Color::WHITE
+        } else {
+            Color::srgb(0.72, 0.70, 0.65)
+        };
+
+        let level_material = materials.add(StandardMaterial {
+            base_color: mat_color,
+            base_color_texture,
+            perceptual_roughness: 0.85,
+            reflectance: 0.20,
+            cull_mode: None,
+            double_sided: true,
+            ..default()
+        });
+
+        let mut combined_mesh = combine_or_normalize_model_meshes(&model.meshes, None);
+        combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+        combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+        let mesh_handle = meshes.add(combined_mesh);
+
+        commands.spawn((
+            LevelRenderMesh,
+            Mesh3d(mesh_handle),
+            MeshMaterial3d(level_material),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        spawned_any = true;
+    } else {
+        for (mat_name, group_instances) in material_groups {
+            let mut total_verts = 0;
+            let mut total_idxs = 0;
+            for inst in &group_instances {
+                if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                    if let Some(ref m) = geo.mesh {
+                        total_verts += m.vertices.len();
+                        total_idxs += m.indices.len();
+                    }
+                }
+            }
+
+            if total_verts == 0 || total_idxs == 0 {
+                continue;
+            }
+
+            let mut positions = Vec::with_capacity(total_verts);
+            let mut normals = Vec::with_capacity(total_verts);
+            let mut uvs = Vec::with_capacity(total_verts);
+            let mut colors = Vec::with_capacity(total_verts);
+            let mut indices = Vec::with_capacity(total_idxs);
+            let mut vert_offset = 0u32;
+
+            for inst in &group_instances {
+                if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                    if let Some(ref m) = geo.mesh {
+                        if m.vertices.is_empty() || m.indices.is_empty() {
+                            continue;
+                        }
+                        for v in &m.vertices {
+                            positions.push(skylands_formats::igb::transform_point(
+                                &inst.world_transform,
+                                v.position,
+                            ));
+                            normals.push(skylands_formats::igb::transform_dir(
+                                &inst.world_transform,
+                                v.normal,
+                            ));
+                            uvs.push(v.uv);
+                            colors.push(v.color);
+                        }
+                        for &idx in &m.indices {
+                            indices.push(vert_offset + idx);
+                        }
+                        vert_offset += m.vertices.len() as u32;
+                    }
+                }
+            }
+
+            if indices.is_empty() {
+                continue;
+            }
+
+            let mut bevy_mesh = Mesh::new(
+                bevy::render::mesh::PrimitiveTopology::TriangleList,
+                bevy::render::render_asset::RenderAssetUsages::default(),
+            );
+            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+            bevy_mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
+
+            let mut base_color_texture = None;
+            if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&path, Some(&mat_name)) {
+                let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                base_color_texture = Some(images.add(img));
+            }
+
+            let mat_color = if base_color_texture.is_some() {
+                Color::WHITE
+            } else {
+                Color::srgb(0.72, 0.70, 0.65)
+            };
+
+            let submesh_mat = materials.add(StandardMaterial {
+                base_color: mat_color,
+                base_color_texture,
+                perceptual_roughness: 0.85,
+                reflectance: 0.20,
+                cull_mode: None,
+                double_sided: true,
+                ..default()
+            });
+
+            let mesh_handle = meshes.add(bevy_mesh);
+            commands.spawn((
+                LevelRenderMesh,
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(submesh_mat),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ));
+
+            spawned_any = true;
+        }
+    }
+
+    spawned_any
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn level_render_mesh_sync_system(
+    mut commands: Commands,
+    active_level: Option<Res<ActiveLevel>>,
+    asset_server: Option<Res<CharacterAssetServer>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    render_assets: Option<Res<RenderMeshAssets>>,
+    existing_level_meshes: Query<Entity, With<LevelRenderMesh>>,
+    mut last_level: Local<Option<String>>,
+) {
+    let Some(ref active) = active_level else {
+        return;
+    };
+    if last_level.is_none() {
+        *last_level = Some(active.name.clone());
+        return;
+    }
+    if last_level.as_deref() == Some(&active.name) {
+        return;
+    }
+    *last_level = Some(active.name.clone());
+
+    for ent in &existing_level_meshes {
+        commands.entity(ent).despawn_recursive();
+    }
+
+    let mut loaded = false;
+    if let Some(ref server) = asset_server {
+        if let Ok(loader) = server.loader.lock() {
+            loaded = spawn_level_render_mesh(
+                &mut commands,
+                &loader,
+                &active.name,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+            );
+        }
+    }
+
+    if !loaded {
+        let (courtyard_mesh, courtyard_mat) = if let Some(ref ra) = render_assets {
+            (ra.courtyard_mesh.clone(), ra.courtyard_material.clone())
+        } else {
+            (
+                meshes.add(ProceduralMesh::synthetic_courtyard().to_bevy()),
+                create_colored_material(Color::srgb(0.5, 0.5, 0.48), &mut materials),
+            )
+        };
+        commands.spawn((
+            LevelRenderMesh,
+            Mesh3d(courtyard_mesh),
+            MeshMaterial3d(courtyard_mat),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+    }
+}
+
 pub fn setup_environment_and_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -304,211 +558,27 @@ pub fn setup_environment_and_assets(
     if !is_viewer {
         if let Some(ref server) = asset_server {
             if let Ok(loader) = server.loader.lock() {
-                let resolved = if loader.has_file(&level_name) {
-                    Some(level_name.clone())
-                } else {
-                    resolve_model_archive("level", &level_name)
-                };
-
-                if let Some(path) = resolved {
-                    if let Ok(model) = loader.load_igb(&path) {
-                        if !model.meshes.is_empty() {
-                            let is_level = path.to_ascii_lowercase().contains("level");
-                            let instances = model.evaluate_scene_graph();
-
-                            let mut material_groups: HashMap<
-                                String,
-                                Vec<&skylands_formats::igb::SceneInstance>,
-                            > = HashMap::new();
-                            if !instances.is_empty() && !model.geometries.is_empty() {
-                                for inst in &instances {
-                                    if let Some(geo) = model.geometries.get(inst.geometry_index) {
-                                        // ponytail: per-geometry material names never match a
-                                        // texture file, so levels merge into one draw call; split by
-                                        // real texture once tfbRuntimeMaterial pairing exists.
-                                        let mat_name = if is_level {
-                                            "level".to_string()
-                                        } else {
-                                            geo.mesh
-                                                .as_ref()
-                                                .and_then(|m| m.material_name.clone())
-                                                .unwrap_or_else(|| format!("mat_{}", geo.name))
-                                        };
-                                        material_groups.entry(mat_name).or_default().push(inst);
-                                    }
-                                }
-                            }
-
-                            if material_groups.is_empty() {
-                                let mut base_color_texture = None;
-                                if let Ok((w, h, rgba)) =
-                                    loader.load_companion_texture_rgba(&path, None)
-                                {
-                                    let img =
-                                        crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                                    base_color_texture = Some(images.add(img));
-                                } else if !is_level {
-                                    if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&path) {
-                                        let img = crate::texture_conversion::rgba8_to_bevy_image(
-                                            w, h, rgba,
-                                        );
-                                        base_color_texture = Some(images.add(img));
-                                    }
-                                }
-
-                                let mat_color = if base_color_texture.is_some() {
-                                    Color::WHITE
-                                } else {
-                                    Color::srgb(0.72, 0.70, 0.65)
-                                };
-
-                                let level_material = materials.add(StandardMaterial {
-                                    base_color: mat_color,
-                                    base_color_texture,
-                                    perceptual_roughness: 0.85,
-                                    reflectance: 0.20,
-                                    cull_mode: None,
-                                    double_sided: true,
-                                    ..default()
-                                });
-
-                                let mut combined_mesh =
-                                    combine_or_normalize_model_meshes(&model.meshes, None);
-                                combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
-                                combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
-                                let mesh_handle = meshes.add(combined_mesh);
-
-                                commands.spawn((
-                                    Mesh3d(mesh_handle),
-                                    MeshMaterial3d(level_material),
-                                    Transform::from_xyz(0.0, 0.0, 0.0),
-                                ));
-
-                                loaded_real_level = true;
-                            } else {
-                                for (mat_name, group_instances) in material_groups {
-                                    let mut total_verts = 0;
-                                    let mut total_idxs = 0;
-                                    for inst in &group_instances {
-                                        if let Some(geo) = model.geometries.get(inst.geometry_index)
-                                        {
-                                            if let Some(ref m) = geo.mesh {
-                                                total_verts += m.vertices.len();
-                                                total_idxs += m.indices.len();
-                                            }
-                                        }
-                                    }
-
-                                    if total_verts == 0 || total_idxs == 0 {
-                                        continue;
-                                    }
-
-                                    let mut positions = Vec::with_capacity(total_verts);
-                                    let mut normals = Vec::with_capacity(total_verts);
-                                    let mut uvs = Vec::with_capacity(total_verts);
-                                    let mut colors = Vec::with_capacity(total_verts);
-                                    let mut indices = Vec::with_capacity(total_idxs);
-                                    let mut vert_offset = 0u32;
-
-                                    for inst in &group_instances {
-                                        if let Some(geo) = model.geometries.get(inst.geometry_index)
-                                        {
-                                            if let Some(ref m) = geo.mesh {
-                                                if m.vertices.is_empty() || m.indices.is_empty() {
-                                                    continue;
-                                                }
-                                                for v in &m.vertices {
-                                                    positions.push(
-                                                        skylands_formats::igb::transform_point(
-                                                            &inst.world_transform,
-                                                            v.position,
-                                                        ),
-                                                    );
-                                                    normals.push(
-                                                        skylands_formats::igb::transform_dir(
-                                                            &inst.world_transform,
-                                                            v.normal,
-                                                        ),
-                                                    );
-                                                    uvs.push(v.uv);
-                                                    colors.push(v.color);
-                                                }
-                                                for &idx in &m.indices {
-                                                    indices.push(vert_offset + idx);
-                                                }
-                                                vert_offset += m.vertices.len() as u32;
-                                            }
-                                        }
-                                    }
-
-                                    if indices.is_empty() {
-                                        continue;
-                                    }
-
-                                    let mut bevy_mesh = Mesh::new(
-                                        bevy::render::mesh::PrimitiveTopology::TriangleList,
-                                        bevy::render::render_asset::RenderAssetUsages::default(),
-                                    );
-                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-                                    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-                                    bevy_mesh
-                                        .insert_indices(bevy::render::mesh::Indices::U32(indices));
-
-                                    let mut base_color_texture = None;
-                                    if let Ok((w, h, rgba)) =
-                                        loader.load_companion_texture_rgba(&path, Some(&mat_name))
-                                    {
-                                        let img = crate::texture_conversion::rgba8_to_bevy_image(
-                                            w, h, rgba,
-                                        );
-                                        base_color_texture = Some(images.add(img));
-                                    }
-
-                                    let mat_color = if base_color_texture.is_some() {
-                                        Color::WHITE
-                                    } else {
-                                        Color::srgb(0.72, 0.70, 0.65)
-                                    };
-
-                                    let submesh_mat = materials.add(StandardMaterial {
-                                        base_color: mat_color,
-                                        base_color_texture,
-                                        perceptual_roughness: 0.85,
-                                        reflectance: 0.20,
-                                        cull_mode: None,
-                                        double_sided: true,
-                                        ..default()
-                                    });
-
-                                    let mesh_handle = meshes.add(bevy_mesh);
-                                    commands.spawn((
-                                        Mesh3d(mesh_handle),
-                                        MeshMaterial3d(submesh_mat),
-                                        Transform::from_xyz(0.0, 0.0, 0.0),
-                                    ));
-
-                                    loaded_real_level = true;
-                                }
-                            }
-                        }
-                    }
-                }
+                loaded_real_level = spawn_level_render_mesh(
+                    &mut commands,
+                    &loader,
+                    &level_name,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                );
             }
         }
     }
 
     if !loaded_real_level {
-        // Spawn courtyard ground fallback
         commands.spawn((
+            LevelRenderMesh,
             Mesh3d(courtyard_mesh.clone()),
             MeshMaterial3d(courtyard_material.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
     }
 
-    // Spawn pedestal in world
     commands.spawn((
         Mesh3d(pedestal_mesh.clone()),
         MeshMaterial3d(pedestal_material.clone()),
@@ -1484,12 +1554,38 @@ mod tests {
         app.insert_resource(server);
         app.insert_resource(ActiveLevel::new("Level_Hub_2014_01.bld"));
         app.add_systems(Startup, setup_environment_and_assets);
+        app.add_systems(Update, level_render_mesh_sync_system);
 
         app.update();
 
         assert!(app.world().get_resource::<RenderMeshAssets>().is_some());
         let mesh_count = app.world_mut().query::<&Mesh3d>().iter(app.world()).count();
         assert!(mesh_count >= 2, "Must spawn level geometry and pedestal");
+
+        let level_render_count = app
+            .world_mut()
+            .query_filtered::<Entity, With<LevelRenderMesh>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            level_render_count, 1,
+            "Level mesh must have LevelRenderMesh"
+        );
+
+        // Change active level to a new level
+        app.world_mut().resource_mut::<ActiveLevel>().name = "Level_313_Tutorial.bld".to_string();
+        app.update();
+
+        // Level render mesh system ran and maintained level mesh
+        let level_render_after = app
+            .world_mut()
+            .query_filtered::<Entity, With<LevelRenderMesh>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            level_render_after, 1,
+            "Level render mesh updated on level swap"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

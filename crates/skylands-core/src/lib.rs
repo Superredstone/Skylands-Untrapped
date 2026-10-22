@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod collision;
 pub mod components;
+pub mod doorway;
 pub mod events;
 pub mod input;
 pub mod interpolation;
@@ -12,6 +13,7 @@ pub mod systems;
 pub use audio::{resample_to_8khz_u8, PortalSpeakerSink};
 pub use collision::{Aabb, CollisionMesh, Triangle};
 pub use components::*;
+pub use doorway::*;
 pub use events::*;
 pub use input::{InputMapper, KeyCode, WiiButton, WiiInputState};
 pub use portal_gameplay::{
@@ -38,6 +40,7 @@ impl Plugin for SkylandsCorePlugin {
             .add_event::<DamageEvent>()
             .add_event::<WorldAudioCueEvent>()
             .add_event::<ZoneTransitionEvent>()
+            .add_event::<LevelChangedEvent>()
             .init_resource::<PortalGameplayState>()
             .init_resource::<GameStats>()
             .init_resource::<WiiInputState>()
@@ -46,6 +49,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<ZoneTransitionProgress>()
             .init_resource::<EnvironmentCollision>()
             .init_resource::<ActiveLevel>()
+            .init_resource::<CampaignProgress>()
             .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
             .add_systems(Startup, systems::setup_default_scene)

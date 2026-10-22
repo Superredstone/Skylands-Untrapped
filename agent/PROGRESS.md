@@ -105,7 +105,11 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - [x] Marker kind from script: `tfbActorInfo` (0xf8) derives from `Placement` (0xd8); `Placement._script` +0xa8 -> `tfbScriptInfo`, `_name` = `.ai` path (hub: 792/1260 actors scripted, e.g. `2D_Coin.ai` x248, `TransitCrystal.ai` x10). `MarkerKind::from_script` decides when a script exists; `from_node_name` only for script-less actors. +0xec -> `tfbPhysicsModel` (`.mdl` path, 259 script-less actors), unused so far.
 - [x] Euler rotation (`_initMatrix` +0x30, degrees) applied via `mat4_from_euler_deg` (order `Rz*Ry*Rx` assumed; hub is yaw-only except ~10 actors, unverified).
 - Note: IGZ v8 Wii tags are byte-reversed (`RTSR` = `RSTR` string refs, values are section pointers, not TSTR indices).
-- [ ] Doorway/zone link data; swap level archives on doorway; campaign progress.
+- [x] Doorway/zone link data; swap level archives on doorway; campaign progress:
+  - Doorway resolution (`doorway.rs`): transit crystal reciprocal pairing (`Transit_XX_<A>-<B>` matches partner `<B>-<A>` and teleports directly to target crystal position), hub main entrance/Persephone room/horde arena routes, chapter gate level resolution, and non-hub level exits returning to hub.
+  - Campaign progress (`CampaignProgress`): canonical chapter table for Chapters 1..=18, unlocks chapter upon completing previous chapter, tracks visited levels and active chapter.
+  - Level swapping lifecycle (`state_transition_update_system`): tagged level entities (`LevelEntity`) despawned on level change, new level geometry/collision/markers loaded via `spawn_level_content`, player teleported to destination spawn while preserving hero/villain state across swap.
+  - Visual sync (`LevelRenderMesh` & `level_render_mesh_sync_system`): detects `ActiveLevel` changes, cleans up old level meshes/materials, and instantiates the new level scene graph and textures.
 - [ ] Find dedicated collision data (vs render mesh).
 
 ### Phase 4 - Gameplay logic from DOL
