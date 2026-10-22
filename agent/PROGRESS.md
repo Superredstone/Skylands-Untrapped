@@ -97,7 +97,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 ### Phase 3 - Entities & levels
 - [x] Geometry placement: `IgbModel::decode_entity_geometry_links` walks `tfb*EntityInfo` `_drawables`/`_entities` -> `Drawable._geometry` (+ `igWiiGeometryAttr._geometry` +0x10) -> `Entity._transform` (`igTransform._m` +0x30), parent chain via `_parentIndex`. Hub: 4,854 links, only 26 non-identity (most level geometry is pre-baked in world space).
 - [x] Marker positions: level placements are `tfbActorInfo` (hub: 1,260), name `igNamedObject._name` +0x08, position `AbstractPlacement._initMatrix` +0x24 (`tfbEulerTransform`: xyz, then Euler degrees at +0x30). `IgbModel::decode_actor_placements` feeds markers; hub now yields real coin/door positions (11 doorways, 0 spawns). Files without `tfbActorInfo` keep the old synthetic spiral.
-- [ ] Marker kind is still `MarkerKind::from_node_name` (name heuristic). Next: derive kind from the actor's script/`ScriptSet` or actor template instead of the name. Euler rotation at +0x30 not yet applied.
+- [x] Marker kind from script: `tfbActorInfo` (0xf8) derives from `Placement` (0xd8); `Placement._script` +0xa8 -> `tfbScriptInfo`, `_name` = `.ai` path (hub: 792/1260 actors scripted, e.g. `2D_Coin.ai` x248, `TransitCrystal.ai` x10). `MarkerKind::from_script` decides when a script exists; `from_node_name` only for script-less actors. +0xec -> `tfbPhysicsModel` (`.mdl` path, 259 script-less actors), unused so far.
+- [x] Euler rotation (`_initMatrix` +0x30, degrees) applied via `mat4_from_euler_deg` (order `Rz*Ry*Rx` assumed; hub is yaw-only except ~10 actors, unverified).
 - Note: IGZ v8 Wii tags are byte-reversed (`RTSR` = `RSTR` string refs, values are section pointers, not TSTR indices).
 - [ ] Doorway/zone link data; swap level archives on doorway; campaign progress.
 - [ ] Find dedicated collision data (vs render mesh).

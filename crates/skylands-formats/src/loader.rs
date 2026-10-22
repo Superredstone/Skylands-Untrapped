@@ -692,6 +692,27 @@ mod tests {
             .filter(|m| m.name.starts_with("Coin_"))
             .count();
         assert!(coins > 100, "coin placements: {}", coins);
+
+        // Kind from script, not name: `TransitCrystal.ai` has no door-like name.
+        let transit = markers
+            .iter()
+            .find(|m| m.name == "Transit_01_LandingArea-MainHall")
+            .expect("transit crystal placement");
+        assert_eq!(transit.kind, crate::igb::MarkerKind::Doorway);
+
+        // Script-driven controllers/cameras are not markers even if named like one.
+        assert!(!markers.iter().any(
+            |m| m.name.starts_with("Door_Opener_") && m.kind == crate::igb::MarkerKind::Doorway
+        ));
+
+        // Euler yaw at `_initMatrix` +0x30 is applied: Coin_Layer(11) has y = 90 deg.
+        let layer = markers
+            .iter()
+            .find(|m| m.name == "Coin_Layer(11)")
+            .expect("Coin_Layer(11)");
+        assert_eq!(layer.kind, crate::igb::MarkerKind::Collectible);
+        assert!(layer.world_transform[0].abs() < 1e-4);
+        assert!((layer.world_transform[8] - 1.0).abs() < 1e-4);
     }
 
     #[test]

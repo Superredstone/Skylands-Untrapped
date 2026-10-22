@@ -80,6 +80,13 @@ pub mod meta_fields {
     pub mod actor_info {
         pub const ID: usize = 0x20;
         pub const INIT_MATRIX: usize = 0x24;
+        /// `tfbEulerTransform` rotation, Euler degrees x,y,z.
+        pub const INIT_ROTATION: usize = 0x30;
+    }
+
+    /// `tfbActorInfo` (0xf8) derives from `Placement` (0xd8).
+    pub mod placement {
+        pub const SCRIPT: usize = 0xa8;
     }
 
     pub mod animation_component {
@@ -259,6 +266,8 @@ pub struct IgbSceneNode {
     pub children: Vec<usize>,
     pub geometry_index: Option<usize>,
     pub transform: [f32; 16],
+    /// Explicit marker kind (from `tfbActorInfo` script); `None` = derive from name.
+    pub marker: Option<MarkerKind>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,6 +328,34 @@ pub enum MarkerKind {
 }
 
 impl MarkerKind {
+    /// Kind from the actor's `.ai` script path (`Placement._script` -> `tfbScriptInfo._name`).
+    /// `None` = script known but not a marker we spawn (cameras, controllers, NPCs, ...).
+    // ponytail: table built from hub scripts only; extend as other levels show new ones.
+    pub fn from_script(path: &str) -> Option<Self> {
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let stem = file
+            .strip_suffix(".ai")
+            .unwrap_or(file)
+            .to_ascii_lowercase();
+        match stem.as_str() {
+            "2d_coin"
+            | "2d_coin_layer"
+            | "hub_coins"
+            | "placed_loot_spinning"
+            | "bauble_pickup"
+            | "healing_food"
+            | "leveluptoken"
+            | "coin_dropped" => Some(MarkerKind::Collectible),
+            "transitcrystal" => Some(MarkerKind::Doorway),
+            "big_pot" | "practice_dummy" | "lid" | "bauble_lid" | "chandelier" => {
+                Some(MarkerKind::Prop)
+            }
+            _ if stem.contains("teleporter") => Some(MarkerKind::Doorway),
+            _ if stem.starts_with("door_opener") => Some(MarkerKind::TriggerZone),
+            _ => None,
+        }
+    }
+
     pub fn from_node_name(name: &str) -> Option<Self> {
         let lower = name.to_ascii_lowercase();
         if lower.starts_with("sp_")
@@ -347,6 +384,32 @@ impl MarkerKind {
         } else {
             None
         }
+    }
+}
+
+/// One `tfbActorInfo` level placement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorPlacement {
+    pub name: String,
+    pub position: [f32; 3],
+    pub rotation_deg: [f32; 3],
+    /// `.ai` script path, if the actor has one.
+    pub script: Option<String>,
+}
+
+impl ActorPlacement {
+    /// Script decides when present; name heuristic only for script-less actors.
+    pub fn kind(&self) -> Option<MarkerKind> {
+        match &self.script {
+            Some(s) => MarkerKind::from_script(s),
+            None => MarkerKind::from_node_name(&self.name),
+        }
+    }
+
+    pub fn transform(&self) -> [f32; 16] {
+        let mut m = mat4_from_euler_deg(self.rotation_deg);
+        m[12..15].copy_from_slice(&self.position);
+        m
     }
 }
 
@@ -388,6 +451,26 @@ pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
         }
     }
     out
+}
+
+/// Column-major rotation from Euler degrees, applied X then Y then Z (`Rz * Ry * Rx`).
+// ponytail: order assumed; hub placements are yaw-only except ~10, so it is unverified.
+// Confirm against a non-identity `Entity._transform` if a tilted actor looks wrong.
+pub fn mat4_from_euler_deg(deg: [f32; 3]) -> [f32; 16] {
+    let axis = |i: usize, a: f32| {
+        let (s, c) = a.to_radians().sin_cos();
+        let mut m = mat4_identity();
+        let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+        m[j * 4 + j] = c;
+        m[j * 4 + k] = s;
+        m[k * 4 + j] = -s;
+        m[k * 4 + k] = c;
+        m
+    };
+    mat4_mul(
+        &axis(2, deg[2]),
+        &mat4_mul(&axis(1, deg[1]), &axis(0, deg[0])),
+    )
 }
 
 pub fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
@@ -2163,6 +2246,7 @@ impl IgbModel {
             children,
             geometry_index,
             transform,
+            marker: None,
         })
     }
 
@@ -2647,39 +2731,61 @@ impl IgbModel {
 
     /// Reads level placements from `tfbActorInfo` objects (one per placed actor:
     /// coins, doors, spawns, props). Name: `igNamedObject._name` (+0x08).
-    /// Position: `AbstractPlacement._initMatrix` (+0x24, `tfbEulerTransform`: f32 x,y,z
-    /// then Euler degrees at +0x30). Positions are in level file space, same as meshes.
+    /// `AbstractPlacement._initMatrix` (+0x24, `tfbEulerTransform`): f32 x,y,z then
+    /// Euler degrees x,y,z at +0x30. `Placement._script` (+0xa8) -> `tfbScriptInfo`
+    /// whose `_name` is the `.ai` script path. Positions are in level file space.
     pub fn decode_actor_placements(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
         objects: &[IgzObject],
         endian: IgbEndian,
-    ) -> Vec<(String, [f32; 3])> {
-        let cstr = |o: usize| -> Option<String> {
+    ) -> Vec<ActorPlacement> {
+        let ptr = |o: usize| -> Option<usize> {
             let w = data
                 .get(o..o + 4)
                 .map(|_| Self::read_u32(data, o, endian))
                 .filter(|&w| w != 0)?;
             let s = sections.get(((w >> 27) + 1) as usize)?;
-            let start = s.offset + (w & 0x07FF_FFFF) as usize;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> Option<String> {
+            let start = ptr(o)?;
             let len = data.get(start..)?.iter().position(|&b| b == 0)?;
             std::str::from_utf8(&data[start..start + len])
                 .ok()
                 .map(str::to_string)
         };
+        let vec3 = |o: usize| -> [f32; 3] {
+            [
+                Self::read_f32(data, o, endian),
+                Self::read_f32(data, o + 4, endian),
+                Self::read_f32(data, o + 8, endian),
+            ]
+        };
+        let script_infos: std::collections::HashSet<usize> = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbScriptInfo"))
+            .map(|o| o.offset)
+            .collect();
         objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
-            .filter(|o| o.offset + meta_fields::actor_info::INIT_MATRIX + 12 <= data.len())
+            .filter(|o| o.offset + meta_fields::placement::SCRIPT + 4 <= data.len())
             .filter_map(|o| {
                 let name = cstr(o.offset + meta_fields::named_object::NAME)?;
-                let p = o.offset + meta_fields::actor_info::INIT_MATRIX;
-                let pos = [
-                    Self::read_f32(data, p, endian),
-                    Self::read_f32(data, p + 4, endian),
-                    Self::read_f32(data, p + 8, endian),
-                ];
-                pos.iter().all(|v| v.is_finite()).then_some((name, pos))
+                let position = vec3(o.offset + meta_fields::actor_info::INIT_MATRIX);
+                let rotation_deg = vec3(o.offset + meta_fields::actor_info::INIT_ROTATION);
+                let script = ptr(o.offset + meta_fields::placement::SCRIPT)
+                    .filter(|p| script_infos.contains(p))
+                    .and_then(|p| cstr(p + meta_fields::named_object::NAME));
+                (position.iter().chain(&rotation_deg).all(|v| v.is_finite())).then_some(
+                    ActorPlacement {
+                        name,
+                        position,
+                        rotation_deg,
+                        script,
+                    },
+                )
             })
             .collect()
     }
@@ -2799,7 +2905,10 @@ impl IgbModel {
         let node = &self.nodes[node_idx];
         let world_transform = mat4_mul(parent_transform, &node.transform);
 
-        if let Some(kind) = MarkerKind::from_node_name(&node.name) {
+        if let Some(kind) = node
+            .marker
+            .or_else(|| MarkerKind::from_node_name(&node.name))
+        {
             let position = [
                 world_transform[12],
                 world_transform[13],
@@ -3305,18 +3414,15 @@ impl IgbModel {
         // Level markers: real placements from `tfbActorInfo` when present.
         let mut nodes = Vec::new();
         if !actor_placements.is_empty() {
-            for (name, pos) in &actor_placements {
-                if MarkerKind::from_node_name(name).is_none() {
-                    continue;
-                }
-                let mut transform = mat4_identity();
-                transform[12..15].copy_from_slice(pos);
+            for actor in &actor_placements {
+                let Some(kind) = actor.kind() else { continue };
                 nodes.push(IgbSceneNode {
-                    name: name.clone(),
+                    name: actor.name.clone(),
                     type_id: IgbObjectType::IgNode,
                     children: Vec::new(),
                     geometry_index: None,
-                    transform,
+                    transform: actor.transform(),
+                    marker: Some(kind),
                 });
             }
         } else {
@@ -3338,6 +3444,7 @@ impl IgbModel {
                         children: Vec::new(),
                         geometry_index: None,
                         transform,
+                        marker: None,
                     });
                     marker_idx += 1;
                 }
@@ -3360,6 +3467,7 @@ impl IgbModel {
                     children: Vec::new(),
                     geometry_index: Some(geo_idx),
                     transform,
+                    marker: None,
                 });
             }
         }
@@ -3529,6 +3637,7 @@ impl IgbModel {
                         children: Vec::new(),
                         geometry_index: Some(geo_idx),
                         transform: mat4_identity(),
+                        marker: None,
                     });
                 }
             }
@@ -4161,6 +4270,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_actor_placement_kind_and_transform() {
+        let actor = |name: &str, script: Option<&str>| ActorPlacement {
+            name: name.into(),
+            position: [1.0, 2.0, 3.0],
+            rotation_deg: [0.0, 90.0, 0.0],
+            script: script.map(Into::into),
+        };
+        let s = "C:/tfb/Content/Levels/Level_Hub_2014/Scripts/";
+        let crystal = actor("Transit_01", Some(&format!("{s}TransitCrystal.ai")));
+        assert_eq!(crystal.kind(), Some(MarkerKind::Doorway));
+        let cam = actor("spawn_cam", Some(&format!("{s}2014_Camera.ai")));
+        assert_eq!(cam.kind(), None, "script overrides name");
+        assert_eq!(actor("Door_X", None).kind(), Some(MarkerKind::Doorway));
+
+        // +90 deg yaw maps +X to -Z (right-handed, Y up).
+        let m = crystal.transform();
+        let x = transform_point(&m, [1.0, 0.0, 0.0]);
+        assert!(
+            (x[0] - 1.0).abs() < 1e-5 && (x[2] - 2.0).abs() < 1e-5,
+            "{x:?}"
+        );
+    }
+
+    #[test]
     fn test_igb_parse() {
         let mut data = Vec::new();
         data.extend_from_slice(b"IGBF");
@@ -4560,6 +4693,7 @@ mod tests {
             children: vec![1],
             geometry_index: None,
             transform: parent_trans,
+            marker: None,
         };
 
         let child_node = IgbSceneNode {
@@ -4568,6 +4702,7 @@ mod tests {
             children: vec![],
             geometry_index: Some(0),
             transform: child_trans,
+            marker: None,
         };
 
         let geo = IgbGeometryNode {
@@ -4640,6 +4775,7 @@ mod tests {
             children: vec![1, 2, 3],
             geometry_index: None,
             transform: root_trans,
+            marker: None,
         };
 
         let spawn_node = IgbSceneNode {
@@ -4648,6 +4784,7 @@ mod tests {
             children: vec![],
             geometry_index: None,
             transform: spawn_trans,
+            marker: None,
         };
 
         let prop_node = IgbSceneNode {
@@ -4656,6 +4793,7 @@ mod tests {
             children: vec![],
             geometry_index: Some(0),
             transform: prop_trans,
+            marker: None,
         };
 
         let pickup_node = IgbSceneNode {
@@ -4664,6 +4802,7 @@ mod tests {
             children: vec![],
             geometry_index: None,
             transform: pickup_trans,
+            marker: None,
         };
 
         let test_mesh = IgbMesh {
@@ -4932,6 +5071,7 @@ mod tests {
             children: vec![1],
             geometry_index: None,
             transform: mat4_identity(),
+            marker: None,
         };
         let node1 = IgbSceneNode {
             name: "node1".to_string(),
@@ -4939,6 +5079,7 @@ mod tests {
             children: vec![],
             geometry_index: Some(0),
             transform: trans(0.0, 2.0, 0.0),
+            marker: None,
         };
         let anim_model = IgbModel {
             header: IgbHeader {
