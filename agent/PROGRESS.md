@@ -86,6 +86,11 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - [x] Decode real character animation tracks: character files use Havok 2013 (`hk_2013.1.0-r1`) spline compressed animations inside `tfbPhysicsAnimation`. Implemented B-spline NURBS curve & quaternion evaluation (POLAR32, THREECOMP40, THREECOMP48).
 - [x] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`. Spawn joint hierarchy, bind `SkinnedMeshInverseBindposes`, add `CharacterAnimator` updating GPU skinning transforms.
 - [x] Enable skinning and animation for villains (`Villain`) via `CharacterVisualRegistry` and sanitize unskinned meshes (`ensure_unskinned_mesh`) to avoid WGPU bind group layout mismatch crashes in Bevy PBR prepass.
+- [x] Fix character model deformation and multi-material skinning (`agent/CHARACTER_RENDERING.md`):
+  - Primary skeleton resolution (`IgbModel::primary_skeleton_index`): picks the primary character rig (e.g. Spyro 50 bones, Snap Shot 43 bones, Kaos 46 bones, Food Fight 33 bones) instead of picking `skeletons.first()` (which picked 2-bone or 20-bone accessory/minigame rigs).
+  - Preserved native model coordinates for skinned meshes: removed bounding-box rescale/shift that broke `Joint * IBP * vertex` alignment; initial joint world transforms set to `mat4_affine_inverse(&b.inverse_bind_pose)` ensuring mathematical identity `Joint * IBP = I` at bind pose.
+  - Multi-material extraction (`decode_drawable_materials` / `load_image_rgba`): links `Drawable` -> `tfbRuntimeMaterial` -> `igCachedAttrList` -> `tfbTextureBindAttr` -> `igImage2` offset -> image index in `model.images`. Spawns child `SkinnedMesh` entities per submesh, binding distinct diffuse textures (e.g. Spyro body vs wings) and diffuse tint colors.
+  - Submesh filtering: protected skinned submeshes from auxiliary billboard/ring heuristics so wings and details are preserved.
 - Done: Spyro idle animates in `--viewer`.
 
 ### Phase 2 - DOL tooling & Alchemy metadata

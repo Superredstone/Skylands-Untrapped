@@ -596,6 +596,31 @@ pub fn igb_mesh_to_bevy(igb_mesh: &IgbMesh) -> BevyMesh {
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    if igb_mesh
+        .vertices
+        .iter()
+        .any(|v| v.bone_weights.iter().any(|&w| w > 0.0))
+    {
+        let joint_indices: Vec<[u16; 4]> = igb_mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                [
+                    v.bone_indices[0] as u16,
+                    v.bone_indices[1] as u16,
+                    v.bone_indices[2] as u16,
+                    v.bone_indices[3] as u16,
+                ]
+            })
+            .collect();
+        let joint_weights: Vec<[f32; 4]> =
+            igb_mesh.vertices.iter().map(|v| v.bone_weights).collect();
+        bevy_mesh.insert_attribute(
+            BevyMesh::ATTRIBUTE_JOINT_INDEX,
+            VertexAttributeValues::Uint16x4(joint_indices),
+        );
+        bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_JOINT_WEIGHT, joint_weights);
+    }
     bevy_mesh.insert_indices(Indices::U32(igb_mesh.indices.clone()));
 
     bevy_mesh
@@ -667,7 +692,7 @@ pub fn combine_or_normalize_model_meshes(
         let filtered: Vec<&IgbMesh> = non_empty
             .iter()
             .copied()
-            .filter(|m| !is_auxiliary_character_submesh(&m.vertices))
+            .filter(|m| m.skeleton.is_some() || !is_auxiliary_character_submesh(&m.vertices))
             .collect();
         if !filtered.is_empty() {
             non_empty = filtered;
@@ -849,12 +874,19 @@ pub fn combine_scene_instances_to_bevy(
 pub fn igb_model_to_bevy_mesh(model: &IgbModel, target_height: Option<f32>) -> BevyMesh {
     let instances = model.evaluate_scene_graph();
 
+    let primary_skel = model.primary_skeleton_index();
     let valid_instances: Vec<&skylands_formats::igb::SceneInstance> = if target_height.is_some() {
         let mut filtered = Vec::new();
         for inst in &instances {
             if let Some(geo) = model.geometries.get(inst.geometry_index) {
                 if let Some(ref m) = geo.mesh {
-                    if !is_auxiliary_character_submesh(&m.vertices) {
+                    if let Some(ps) = primary_skel {
+                        if m.skeleton == Some(ps) {
+                            filtered.push(inst);
+                            continue;
+                        }
+                    }
+                    if m.skeleton.is_none() && !is_auxiliary_character_submesh(&m.vertices) {
                         filtered.push(inst);
                     }
                 }
@@ -1018,6 +1050,59 @@ pub fn igb_model_to_bevy_meshes(model: &IgbModel) -> Vec<BevyMesh> {
     out
 }
 
+#[derive(Debug, Clone)]
+pub struct CharacterSubmesh {
+    pub mesh: BevyMesh,
+    pub image_index: Option<usize>,
+    pub base_color: Option<[f32; 4]>,
+    pub material_name: Option<String>,
+}
+
+pub fn igb_character_submeshes(model: &IgbModel) -> Vec<CharacterSubmesh> {
+    let primary_skel = model.primary_skeleton_index();
+    let skinned_meshes: Vec<&IgbMesh> = if let Some(skel_idx) = primary_skel {
+        let matching: Vec<&IgbMesh> = model
+            .meshes
+            .iter()
+            .filter(|m| m.skeleton == Some(skel_idx) && !m.vertices.is_empty())
+            .collect();
+        if !matching.is_empty() {
+            matching
+        } else {
+            model
+                .meshes
+                .iter()
+                .filter(|m| !m.vertices.is_empty() && !is_auxiliary_character_submesh(&m.vertices))
+                .collect()
+        }
+    } else {
+        model
+            .meshes
+            .iter()
+            .filter(|m| !m.vertices.is_empty() && !is_auxiliary_character_submesh(&m.vertices))
+            .collect()
+    };
+
+    if skinned_meshes.is_empty() {
+        return vec![CharacterSubmesh {
+            mesh: Mesh::prop_cube(0.5).to_bevy(),
+            image_index: None,
+            base_color: None,
+            material_name: None,
+        }];
+    }
+
+    skinned_meshes
+        .iter()
+        .map(|m| CharacterSubmesh {
+            mesh: igb_mesh_to_bevy(m),
+            image_index: m.image_index,
+            base_color: m.base_color,
+            material_name: m.material_name.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,6 +1149,8 @@ mod tests {
             indices: vec![0, 1, 2],
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         };
 
         let bevy_mesh = igb_mesh_to_bevy(&igb);
@@ -1088,6 +1175,8 @@ mod tests {
             indices: vec![0, 1],
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         };
 
         let normalized = normalize_model_mesh(&igb, 1.8);
@@ -1194,6 +1283,8 @@ mod tests {
             indices: vec![0, 1],
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         };
         let sub2 = IgbMesh {
             name: "hat".to_string(),
@@ -1216,6 +1307,8 @@ mod tests {
             indices: vec![0, 1],
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         };
 
         let combined = combine_or_normalize_model_meshes(&[sub1, sub2], Some(2.0));

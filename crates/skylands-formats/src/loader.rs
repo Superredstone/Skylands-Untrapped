@@ -273,6 +273,41 @@ impl AssetLoader {
         Ok((128, 128, rgba))
     }
 
+    pub fn load_image_rgba(
+        &self,
+        model_path: &str,
+        image_index: usize,
+    ) -> Result<(u32, u32, Vec<u8>), AssetError> {
+        let model = self.load_igb(model_path)?;
+        let target_img = model.images.get(image_index).ok_or_else(|| {
+            AssetError::NotFound(format!(
+                "Image index {} not found in {}",
+                image_index, model_path
+            ))
+        })?;
+        let width = target_img.width as u32;
+        let height = target_img.height as u32;
+        if width == 0 || height == 0 || target_img.texture_size == 0 {
+            return Err(AssetError::NotFound("Empty image".into()));
+        }
+        let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
+            if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
+                Arc::new(inner)
+            } else {
+                self.load_raw(model_path)?
+            }
+        } else {
+            self.load_raw(model_path)?
+        };
+        let end = (target_img.texture_offset + target_img.texture_size).min(raw.len());
+        if target_img.texture_offset >= end {
+            return Err(AssetError::NotFound("Texture offset out of bounds".into()));
+        }
+        let slice = &raw[target_img.texture_offset..end];
+        let rgba = decode_cmpr(slice, width, height)?;
+        Ok((width, height, rgba))
+    }
+
     pub fn load_first_image_rgba(
         &self,
         model_path: &str,

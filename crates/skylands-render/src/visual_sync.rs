@@ -104,9 +104,15 @@ impl ModelVisualRegistry {
     }
 }
 
+#[derive(Component)]
+pub struct CharacterSubmeshEntity;
+
+pub type SubmeshVisual = (Handle<Mesh>, Handle<StandardMaterial>);
+
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
-    pub cache: HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>,
+    pub cache: HashMap<String, SubmeshVisual>,
+    pub submeshes: HashMap<String, Vec<SubmeshVisual>>,
     pub models: HashMap<String, std::sync::Arc<skylands_formats::igb::IgbModel>>,
 }
 
@@ -121,6 +127,18 @@ impl CharacterVisualRegistry {
             .or_else(|| resolve_character_model_archive(character_id))?;
         let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
         self.models.get(&cache_key).cloned()
+    }
+
+    pub fn get_submeshes(
+        &self,
+        character_id: u16,
+        model_path: Option<&str>,
+    ) -> Option<Vec<SubmeshVisual>> {
+        let bld_name = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))?;
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+        self.submeshes.get(&cache_key).cloned()
     }
 
     pub fn get_or_load(
@@ -145,8 +163,6 @@ impl CharacterVisualRegistry {
         let loader = asset_server.loader.lock().ok()?;
 
         let model = loader.load_igb(&bld_name).ok()?;
-        let normalized_bevy_mesh = igb_model_to_bevy_mesh(&model, Some(1.8));
-        let mesh_handle = meshes.add(normalized_bevy_mesh);
 
         let mat_color = if character_id == 16 {
             Color::srgb(0.42, 0.18, 0.60)
@@ -155,35 +171,68 @@ impl CharacterVisualRegistry {
             element_to_color(elem)
         };
 
-        let mut base_color_texture = None;
-        if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
-            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-            base_color_texture = Some(images.add(img));
-        } else if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&bld_name, None) {
-            let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-            base_color_texture = Some(images.add(img));
+        // Extract submeshes in model space (preserving joint / IBP skinning alignment)
+        let submesh_defs = crate::mesh_conversion::igb_character_submeshes(&model);
+        let mut loaded_submeshes = Vec::new();
+
+        for sub in &submesh_defs {
+            let mut sub_texture = None;
+            if let Some(img_idx) = sub.image_index {
+                if let Ok((w, h, rgba)) = loader.load_image_rgba(&bld_name, img_idx) {
+                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                    sub_texture = Some(images.add(img));
+                }
+            }
+            if sub_texture.is_none() {
+                if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
+                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                    sub_texture = Some(images.add(img));
+                } else if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&bld_name, None)
+                {
+                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
+                    sub_texture = Some(images.add(img));
+                }
+            }
+
+            let sub_color = if sub_texture.is_some() {
+                Color::WHITE
+            } else if let Some(c) = sub.base_color {
+                Color::srgb(c[0], c[1], c[2])
+            } else {
+                mat_color
+            };
+
+            let sub_mat = materials.add(StandardMaterial {
+                base_color: sub_color,
+                base_color_texture: sub_texture,
+                perceptual_roughness: 0.8,
+                reflectance: 0.2,
+                cull_mode: None,
+                double_sided: true,
+                ..default()
+            });
+
+            let sub_mesh_handle = meshes.add(sub.mesh.clone());
+            loaded_submeshes.push((sub_mesh_handle, sub_mat));
         }
 
-        let color = if base_color_texture.is_some() {
-            Color::WHITE
-        } else {
-            mat_color
-        };
-
-        let material_handle = materials.add(StandardMaterial {
-            base_color: color,
-            base_color_texture,
-            perceptual_roughness: 0.8,
-            reflectance: 0.2,
-            cull_mode: None,
-            double_sided: true,
-            ..default()
+        let first_pair = loaded_submeshes.first().cloned().unwrap_or_else(|| {
+            let fallback_mesh = meshes.add(igb_model_to_bevy_mesh(&model, None));
+            let fallback_mat = materials.add(StandardMaterial {
+                base_color: mat_color,
+                perceptual_roughness: 0.8,
+                reflectance: 0.2,
+                cull_mode: None,
+                double_sided: true,
+                ..default()
+            });
+            (fallback_mesh, fallback_mat)
         });
 
-        let pair = (mesh_handle, material_handle);
-        self.cache.insert(cache_key.clone(), pair.clone());
+        self.submeshes.insert(cache_key.clone(), loaded_submeshes);
+        self.cache.insert(cache_key.clone(), first_pair.clone());
         self.models.insert(cache_key, model);
-        Some(pair)
+        Some(first_pair)
     }
 }
 
@@ -543,6 +592,7 @@ pub fn actor_visual_sync_system(
     mut ibp_assets: Option<ResMut<Assets<SkinnedMeshInverseBindposes>>>,
     mut viewer_settings: Option<ResMut<crate::ViewerSettings>>,
     anim_query: Query<&CharacterAnimator>,
+    submesh_query: Query<(Entity, &Parent), With<CharacterSubmeshEntity>>,
     actor_query: Query<
         (
             Entity,
@@ -587,11 +637,36 @@ pub fn actor_visual_sync_system(
                     commands.entity(entity).remove::<SkinnedMesh>();
                     commands.entity(entity).remove::<CharacterAnimator>();
                 }
+                for (child, parent) in &submesh_query {
+                    if parent.get() == entity {
+                        commands.entity(child).despawn();
+                    }
+                }
+
+                let submeshes = visual_registry
+                    .as_ref()
+                    .and_then(|reg| {
+                        reg.get_submeshes(ident.character_id, ident.model_path.as_deref())
+                    })
+                    .unwrap_or_default();
 
                 if is_hero {
                     if let Some(ref mut vs) = viewer_settings {
                         if vs.viewer_mode {
-                            if let Some(m) = meshes.get(&mesh) {
+                            if !submeshes.is_empty() {
+                                let mut total_v = 0;
+                                let mut total_t = 0;
+                                for (sm, _) in &submeshes {
+                                    if let Some(m) = meshes.get(sm) {
+                                        let v = m.count_vertices();
+                                        total_v += v;
+                                        total_t +=
+                                            m.indices().map(|idx| idx.len() / 3).unwrap_or(v / 3);
+                                    }
+                                }
+                                vs.vert_count = total_v;
+                                vs.tri_count = total_t;
+                            } else if let Some(m) = meshes.get(&mesh) {
                                 vs.vert_count = m.count_vertices();
                                 vs.tri_count = m
                                     .indices()
@@ -600,7 +675,7 @@ pub fn actor_visual_sync_system(
                             }
                             if let Some(ref md) = model_data {
                                 vs.bone_count =
-                                    md.skeletons.first().map(|s| s.bones.len()).unwrap_or(0);
+                                    md.primary_skeleton().map(|s| s.bones.len()).unwrap_or(0);
                             }
                         }
                     }
@@ -608,7 +683,7 @@ pub fn actor_visual_sync_system(
 
                 let mut skinned_applied = false;
                 if let (Some(ref md), Some(ref mut ibp_res)) = (&model_data, &mut ibp_assets) {
-                    if let Some(skeleton) = md.skeletons.first() {
+                    if let Some(skeleton) = md.primary_skeleton() {
                         if !skeleton.bones.is_empty() {
                             let ibp_mats: Vec<Mat4> = skeleton
                                 .bones
@@ -621,10 +696,13 @@ pub fn actor_visual_sync_system(
                                 .bones
                                 .iter()
                                 .map(|b| {
+                                    let bind_world = skylands_formats::igb::mat4_affine_inverse(
+                                        &b.inverse_bind_pose,
+                                    );
                                     commands
                                         .spawn((
                                             Transform::from_matrix(Mat4::from_cols_array(
-                                                &b.local_transform,
+                                                &bind_world,
                                             )),
                                             Visibility::default(),
                                         ))
@@ -632,21 +710,49 @@ pub fn actor_visual_sync_system(
                                 })
                                 .collect();
 
-                            commands.entity(entity).insert((
-                                Mesh3d(mesh.clone()),
-                                MeshMaterial3d(mat.clone()),
-                                SkinnedMesh {
-                                    inverse_bindposes: ibp_handle,
-                                    joints: joints.clone(),
-                                },
-                                CharacterAnimator {
-                                    skeleton: skeleton.clone(),
-                                    animations: md.animations.clone(),
-                                    current_clip: "idle".to_string(),
-                                    elapsed: 0.0,
-                                    joints: joints.clone(),
-                                },
-                            ));
+                            if submeshes.len() > 1 {
+                                for (sub_m, sub_mat) in &submeshes {
+                                    let child = commands
+                                        .spawn((
+                                            Mesh3d(sub_m.clone()),
+                                            MeshMaterial3d(sub_mat.clone()),
+                                            SkinnedMesh {
+                                                inverse_bindposes: ibp_handle.clone(),
+                                                joints: joints.clone(),
+                                            },
+                                            CharacterSubmeshEntity,
+                                            Visibility::default(),
+                                        ))
+                                        .id();
+                                    commands.entity(entity).add_child(child);
+                                }
+                                commands.entity(entity).insert((
+                                    CharacterAnimator {
+                                        skeleton: skeleton.clone(),
+                                        animations: md.animations.clone(),
+                                        current_clip: "idle".to_string(),
+                                        elapsed: 0.0,
+                                        joints: joints.clone(),
+                                    },
+                                    Visibility::default(),
+                                ));
+                            } else {
+                                commands.entity(entity).insert((
+                                    Mesh3d(mesh.clone()),
+                                    MeshMaterial3d(mat.clone()),
+                                    SkinnedMesh {
+                                        inverse_bindposes: ibp_handle,
+                                        joints: joints.clone(),
+                                    },
+                                    CharacterAnimator {
+                                        skeleton: skeleton.clone(),
+                                        animations: md.animations.clone(),
+                                        current_clip: "idle".to_string(),
+                                        elapsed: 0.0,
+                                        joints: joints.clone(),
+                                    },
+                                ));
+                            }
                             commands.entity(entity).add_children(&joints);
                             skinned_applied = true;
                         }
@@ -1524,5 +1630,69 @@ mod tests {
             animator.is_some(),
             "Villain entity must receive CharacterAnimator"
         );
+    }
+
+    #[test]
+    fn test_character_multi_submesh_rendering_and_bind_pose_identity() {
+        let targets = [
+            "assets/files/character/016_Spyro.bld",
+            "../../assets/files/character/016_Spyro.bld",
+        ];
+        let p = match targets
+            .iter()
+            .map(std::path::Path::new)
+            .find(|p| p.exists())
+        {
+            Some(p) => p,
+            None => return,
+        };
+
+        let server = CharacterAssetServer::default();
+        {
+            let mut loader = server.loader.lock().unwrap();
+            let dir = p.parent().unwrap();
+            loader.mount_dir(dir).expect("mount character dir");
+        }
+
+        let mut registry = CharacterVisualRegistry::default();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut images = Assets::<Image>::default();
+
+        let _ = registry.get_or_load(
+            16,
+            Some("016_Spyro.bld"),
+            Some(&server),
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        );
+
+        let submeshes = registry
+            .get_submeshes(16, Some("016_Spyro.bld"))
+            .expect("submeshes loaded");
+        assert_eq!(
+            submeshes.len(),
+            4,
+            "Spyro has 4 submeshes (body, head, details, wings)"
+        );
+
+        let model = registry.get_model(16, Some("016_Spyro.bld")).unwrap();
+        let skel = model.primary_skeleton().expect("primary skeleton");
+        assert_eq!(skel.bones.len(), 50);
+
+        // Verify mathematical identity: joint world * IBP == Identity at bind pose
+        for (i, b) in skel.bones.iter().enumerate() {
+            let bind_world = skylands_formats::igb::mat4_affine_inverse(&b.inverse_bind_pose);
+            let id = skylands_formats::igb::mat4_mul(&bind_world, &b.inverse_bind_pose);
+            for (k, &val) in id.iter().enumerate() {
+                let expected = if k % 5 == 0 { 1.0 } else { 0.0 };
+                assert!(
+                    (val - expected).abs() < 1e-4,
+                    "bone {i} ({}) bind_world * IBP must be Identity, got {id:?}",
+                    b.name
+                );
+            }
+        }
     }
 }

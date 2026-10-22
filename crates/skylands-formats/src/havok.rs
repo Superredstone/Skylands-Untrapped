@@ -382,7 +382,7 @@ impl HavokSplineTrack {
 pub fn parse_havok_animation(
     data: &[u8],
     clip_name: &str,
-    skeleton: Option<&Skeleton>,
+    skeletons: &[Skeleton],
 ) -> Option<AnimationClip> {
     if data.len() < 0x200 || data.get(0..8)? != HAVOK_TAG {
         return None;
@@ -511,7 +511,13 @@ pub fn parse_havok_animation(
         }
     }
 
-    let bone_offset = if let Some(skel) = skeleton {
+    let target_skel = skeletons
+        .iter()
+        .filter(|s| s.bones.len() > num_tracks)
+        .min_by_key(|s| s.bones.len() - num_tracks)
+        .or_else(|| skeletons.first());
+
+    let bone_offset = if let Some(skel) = target_skel {
         if !skel.bones.is_empty()
             && skel.bones[0].name.eq_ignore_ascii_case("unnamed bone")
             && skel.bones.len() > num_tracks
@@ -916,7 +922,7 @@ mod tests {
         let mut pos = 0;
         while pos + 8 <= bld_data.len() {
             if bld_data[pos..pos + 8] == raw_tag {
-                if let Some(clip) = parse_havok_animation(&bld_data[pos..], "test", None) {
+                if let Some(clip) = parse_havok_animation(&bld_data[pos..], "test", &[]) {
                     if clip.tracks.len() == 49 {
                         clips.push(clip);
                     }

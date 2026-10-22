@@ -315,6 +315,10 @@ pub struct IgbMesh {
     pub material_name: Option<String>,
     /// Index into `IgbModel::skeletons` that `bone_indices` refer to.
     pub skeleton: Option<usize>,
+    /// Index into `IgbModel::images` for this mesh's primary diffuse texture.
+    pub image_index: Option<usize>,
+    /// Base diffuse tint color `[r, g, b, a]` from `igColorAttr`.
+    pub base_color: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1403,6 +1407,44 @@ impl Default for IgbModel {
 }
 
 impl IgbModel {
+    /// Returns the index of the primary character skeleton.
+    ///
+    /// Character files often contain secondary rigs (e.g. separate tails,
+    /// minigame/cinematic heads, accessories). The primary character rig is the
+    /// one that skins character geometry with the highest bone count.
+    pub fn primary_skeleton_index(&self) -> Option<usize> {
+        if self.skeletons.is_empty() {
+            return None;
+        }
+        let mut counts = vec![0usize; self.skeletons.len()];
+        for m in &self.meshes {
+            if let Some(s) = m.skeleton {
+                if s < counts.len() {
+                    counts[s] += m.vertices.len();
+                }
+            }
+        }
+        self.skeletons
+            .iter()
+            .enumerate()
+            .filter(|&(idx, _)| counts[idx] > 0)
+            .max_by_key(|&(idx, skel)| (skel.bones.len(), counts[idx]))
+            .map(|(idx, _)| idx)
+            .or_else(|| {
+                self.skeletons
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|&(_, skel)| skel.bones.len())
+                    .map(|(idx, _)| idx)
+            })
+    }
+
+    /// Returns a reference to the primary character skeleton, if any.
+    pub fn primary_skeleton(&self) -> Option<&Skeleton> {
+        self.primary_skeleton_index()
+            .and_then(|idx| self.skeletons.get(idx))
+    }
+
     pub fn parse<R: Read>(mut reader: R) -> Result<Self, IgbError> {
         let mut full_file = Vec::new();
         reader.read_to_end(&mut full_file)?;
@@ -1625,6 +1667,8 @@ impl IgbModel {
                     indices,
                     material_name,
                     skeleton: None,
+                    image_index: None,
+                    base_color: None,
                 };
                 geo.mesh = Some(mesh.clone());
                 meshes.push(mesh);
@@ -2346,6 +2390,8 @@ impl IgbModel {
             indices,
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         })
     }
 
@@ -2727,6 +2773,124 @@ impl IgbModel {
         }
 
         geo_transforms
+    }
+
+    /// Extracts material attributes for geometries:
+    /// Maps geometry offset -> (image_offset, base_color, material_name)
+    #[allow(clippy::type_complexity)]
+    pub fn decode_drawable_materials(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> std::collections::HashMap<usize, (Option<usize>, Option<[f32; 4]>, Option<String>)> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let rd_f32 = |o: usize| -> Option<f32> {
+            data.get(o..o + 4).map(|_| Self::read_f32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> Option<String> {
+            let p = ptr(o)?;
+            let s = data.get(p..)?;
+            let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+            Some(String::from_utf8_lossy(&s[..end]).into_owned())
+        };
+
+        let mut out = std::collections::HashMap::new();
+
+        for info in objects.iter().filter(|o| {
+            matches!(
+                o.type_name.as_deref(),
+                Some("tfbEntityInfo") | Some("tfbWorldEntityInfo") | Some("tfbBodyEntityInfo")
+            )
+        }) {
+            let Some(drawables) = ptr(info.offset + 0x14) else {
+                continue;
+            };
+            let (Some(d_count), Some(d_arr)) = (rd(drawables + 0x08), ptr(drawables + 0x14)) else {
+                continue;
+            };
+
+            for d_idx in 0..d_count as usize {
+                let Some(d) = ptr(d_arr + d_idx * 4) else {
+                    continue;
+                };
+                let Some(geo) = ptr(d + 0x0c) else {
+                    continue;
+                };
+                let Some(mat) = ptr(d + 0x08) else {
+                    continue;
+                };
+
+                let mat_name = cstr(mat + 0x08);
+                let mut found_image = None;
+                let mut found_color = None;
+
+                let mat_lists = [ptr(mat + 0x18), ptr(mat + 0x24)];
+                for mlist in mat_lists.into_iter().flatten() {
+                    let (Some(list_count), Some(list_arr)) = (rd(mlist + 0x08), ptr(mlist + 0x14))
+                    else {
+                        continue;
+                    };
+                    for l_idx in 0..list_count as usize {
+                        let Some(attr_list) = ptr(list_arr + l_idx * 4) else {
+                            continue;
+                        };
+                        let (Some(attr_count), Some(attr_arr)) = (
+                            rd(attr_list + 0x08),
+                            ptr(attr_list + 0x10).or_else(|| ptr(attr_list + 0x14)),
+                        ) else {
+                            continue;
+                        };
+                        for a_idx in 0..attr_count as usize {
+                            let Some(attr) = ptr(attr_arr + a_idx * 4) else {
+                                continue;
+                            };
+                            if found_image.is_none() {
+                                for tex_slot in [0x10, 0x14, 0x18] {
+                                    if let Some(tex_attr) = ptr(attr + tex_slot) {
+                                        if let Some(img) = ptr(tex_attr + 0x30) {
+                                            found_image = Some(img);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if found_color.is_none() {
+                                if let (Some(r), Some(g), Some(b), Some(a)) = (
+                                    rd_f32(attr + 0x10),
+                                    rd_f32(attr + 0x14),
+                                    rd_f32(attr + 0x18),
+                                    rd_f32(attr + 0x1c),
+                                ) {
+                                    if (0.0..=2.0).contains(&r)
+                                        && (0.0..=2.0).contains(&g)
+                                        && (0.0..=2.0).contains(&b)
+                                        && (0.0..=1.0).contains(&a)
+                                        && (r + g + b) > 0.05
+                                    {
+                                        found_color = Some([r, g, b, a]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                out.insert(geo, (found_image, found_color, mat_name.clone()));
+                if let Some(inner_geo) = ptr(geo + 0x10) {
+                    out.insert(inner_geo, (found_image, found_color, mat_name));
+                }
+            }
+        }
+
+        out
     }
 
     /// Reads level placements from `tfbActorInfo` objects (one per placed actor:
@@ -3127,10 +3291,12 @@ impl IgbModel {
 
         let mut geo_transforms = std::collections::HashMap::new();
         let mut actor_placements = Vec::new();
+        let mut geo_materials = std::collections::HashMap::new();
         if let Some(ref list) = igz_objects {
             geo_transforms =
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
+            geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
         }
 
         // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
@@ -3451,10 +3617,26 @@ impl IgbModel {
             }
         }
 
+        let image_index_by_offset: std::collections::HashMap<usize, usize> = images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| (img.offset, i))
+            .collect();
+
         // Collect meshes from extracted geometries
         let mut meshes = Vec::new();
-        for (geo_idx, geo) in geometries.iter().enumerate() {
-            if let Some(ref m) = geo.mesh {
+        for (geo_idx, geo) in geometries.iter_mut().enumerate() {
+            if let Some(ref mut m) = geo.mesh {
+                if let Some(&geo_off) = geo_offsets.get(geo_idx) {
+                    if let Some((img_off, base_col, mat_name)) = geo_materials.get(&geo_off) {
+                        m.image_index =
+                            img_off.and_then(|off| image_index_by_offset.get(&off).copied());
+                        m.base_color = *base_col;
+                        if let Some(name) = mat_name {
+                            m.material_name = Some(name.clone());
+                        }
+                    }
+                }
                 meshes.push(m.clone());
                 let transform = geo_offsets
                     .get(geo_idx)
@@ -3619,6 +3801,8 @@ impl IgbModel {
                         indices,
                         material_name: Some(format!("mat_igz_{}", sec_idx)),
                         skeleton: None,
+                        image_index: None,
+                        base_color: None,
                     };
                     let geo_node = IgbGeometryNode {
                         name: format!("geo_{}", mesh_name),
@@ -3691,7 +3875,7 @@ impl IgbModel {
                 let norm_name = name.to_ascii_lowercase();
 
                 if let Some(clip) =
-                    crate::havok::parse_havok_animation(hk_data, &norm_name, skeletons.first())
+                    crate::havok::parse_havok_animation(hk_data, &norm_name, &skeletons)
                 {
                     animations.push(clip);
                 }
@@ -3998,6 +4182,8 @@ impl IgbModel {
             indices,
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         })
     }
 
@@ -4261,6 +4447,8 @@ impl IgbModel {
             indices: tris,
             material_name: Some("mat_gx".to_string()),
             skeleton: None,
+            image_index: None,
+            base_color: None,
         })
     }
 }
@@ -4811,6 +4999,8 @@ mod tests {
             indices: vec![],
             material_name: None,
             skeleton: None,
+            image_index: None,
+            base_color: None,
         };
 
         let geo = IgbGeometryNode {
@@ -5795,5 +5985,56 @@ mod tests {
         let median = edges[edges.len() / 2];
         assert!(edges.len() > 500_000, "got {} triangles", edges.len());
         assert!(median < 3.0, "median edge {median}");
+    }
+
+    #[test]
+    fn test_character_primary_skeleton_and_material_extraction() {
+        // Test Spyro
+        if let Some(bytes) = read_character_bld("016_Spyro") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+            assert_eq!(model.primary_skeleton_index(), Some(0));
+            let primary_skel = model.primary_skeleton().expect("primary skel");
+            assert_eq!(primary_skel.bones.len(), 50);
+
+            let body_meshes: Vec<_> = model
+                .meshes
+                .iter()
+                .filter(|m| m.skeleton == Some(0))
+                .collect();
+            assert_eq!(body_meshes.len(), 4, "4 body submeshes in Spyro");
+            // Spyro body meshes must have materials and image indices
+            assert!(body_meshes.iter().all(|m| m.image_index.is_some()));
+            let body_imgs: std::collections::HashSet<_> =
+                body_meshes.iter().map(|m| m.image_index.unwrap()).collect();
+            assert!(
+                body_imgs.len() >= 2,
+                "Spyro has distinct textures for body and wings"
+            );
+        }
+
+        // Test Snap Shot (CrocWarrior)
+        if let Some(bytes) = read_character_bld("462_Water_Crocky") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse snap shot");
+            assert_eq!(model.primary_skeleton_index(), Some(1));
+            let primary_skel = model.primary_skeleton().expect("primary skel");
+            assert_eq!(primary_skel.bones.len(), 43);
+            assert!(primary_skel.bones.iter().any(|b| b.name.contains("J_root")));
+        }
+
+        // Test Kaos
+        if let Some(bytes) = read_character_bld("1010_Kaos") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
+            assert_eq!(model.primary_skeleton_index(), Some(1));
+            let primary_skel = model.primary_skeleton().expect("primary skel");
+            assert_eq!(primary_skel.bones.len(), 46);
+        }
+
+        // Test Food Fight (Artichoke)
+        if let Some(bytes) = read_character_bld("476_Artichoke") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse artichoke");
+            assert_eq!(model.primary_skeleton_index(), Some(1));
+            let primary_skel = model.primary_skeleton().expect("primary skel");
+            assert_eq!(primary_skel.bones.len(), 33);
+        }
     }
 }
