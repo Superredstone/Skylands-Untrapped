@@ -2785,295 +2785,30 @@ impl IgbModel {
                         let geo_name = format!("igWiiGeometry_{}", idx);
 
                         let mut decoded_mesh: Option<IgbMesh> = None;
-                        if !slice.is_empty() && sections.len() > 2 {
-                            let sec2 = &sections[2];
-                            let sec2_data = if sec2.offset < data.len() {
-                                let end = (sec2.offset + sec2.size).min(data.len());
-                                &data[sec2.offset..end]
-                            } else {
-                                &[]
+                        if !slice.is_empty() {
+                            let resolve = |size_word: u32, ptr_word: u32| -> &[u8] {
+                                let sec_idx = ((ptr_word >> 27) + 1) as usize;
+                                let rel = (ptr_word & 0x07FF_FFFF) as usize;
+                                let len = (size_word & 0x00FF_FFFF) as usize;
+                                sections
+                                    .get(sec_idx)
+                                    .map(|s| s.offset + rel)
+                                    .and_then(|start| data.get(start..start + len))
+                                    .unwrap_or(&[])
                             };
-
-                            let buf_a_sz =
-                                (Self::read_u32(slice, 2 * 4, endian) & 0x00FF_FFFF) as usize;
-                            let buf_a_off =
-                                (Self::read_u32(slice, 3 * 4, endian) & 0x07FF_FFFF) as usize;
-                            let buf_b_sz =
-                                (Self::read_u32(slice, 4 * 4, endian) & 0x00FF_FFFF) as usize;
-                            let buf_b_off =
-                                (Self::read_u32(slice, 5 * 4, endian) & 0x07FF_FFFF) as usize;
-                            let vtx_cnt = Self::read_u32(slice, 12 * 4, endian) as usize;
-
-                            let aabb_18 = (
-                                [
-                                    f32::from_bits(Self::read_u32(slice, 18 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 19 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 20 * 4, endian)),
-                                ],
-                                [
-                                    f32::from_bits(Self::read_u32(slice, 21 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 22 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 23 * 4, endian)),
-                                ],
+                            let dl = resolve(
+                                Self::read_u32(slice, 2 * 4, endian),
+                                Self::read_u32(slice, 3 * 4, endian),
                             );
-                            let aabb_24 = (
-                                [
-                                    f32::from_bits(Self::read_u32(slice, 24 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 25 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 26 * 4, endian)),
-                                ],
-                                [
-                                    f32::from_bits(Self::read_u32(slice, 27 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 28 * 4, endian)),
-                                    f32::from_bits(Self::read_u32(slice, 29 * 4, endian)),
-                                ],
+                            let vb = resolve(
+                                Self::read_u32(slice, 4 * 4, endian),
+                                Self::read_u32(slice, 5 * 4, endian),
                             );
-
-                            let is_valid_aabb = |min: [f32; 3], max: [f32; 3]| -> bool {
-                                min.iter().chain(max.iter()).all(|f| f.is_finite())
-                                    && min[0] < max[0]
-                                    && min[1] < max[1]
-                                    && min[2] < max[2]
-                            };
-
-                            let (min_pt, max_pt) = if is_valid_aabb(aabb_18.0, aabb_18.1) {
-                                aabb_18
-                            } else if is_valid_aabb(aabb_24.0, aabb_24.1) {
-                                aabb_24
-                            } else {
-                                ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-                            };
-
-                            if vtx_cnt >= 3
-                                && buf_a_off + buf_a_sz <= sec2_data.len()
-                                && min_pt.iter().chain(max_pt.iter()).all(|f| f.is_finite())
-                            {
-                                let a_data = &sec2_data[buf_a_off..buf_a_off + buf_a_sz];
-                                let b_data = if buf_b_off + buf_b_sz <= sec2_data.len() {
-                                    &sec2_data[buf_b_off..buf_b_off + buf_b_sz]
-                                } else {
-                                    &[]
-                                };
-
-                                let count = vtx_cnt.min(a_data.len() / 6);
-                                if count >= 3 {
-                                    let mut raw_min = [i16::MAX; 3];
-                                    let mut raw_max = [i16::MIN; 3];
-                                    for k in 0..count {
-                                        let off = k * 6;
-                                        let rx = match endian {
-                                            IgbEndian::Big => {
-                                                i16::from_be_bytes([a_data[off], a_data[off + 1]])
-                                            }
-                                            IgbEndian::Little => {
-                                                i16::from_le_bytes([a_data[off], a_data[off + 1]])
-                                            }
-                                        };
-                                        let ry = match endian {
-                                            IgbEndian::Big => i16::from_be_bytes([
-                                                a_data[off + 2],
-                                                a_data[off + 3],
-                                            ]),
-                                            IgbEndian::Little => i16::from_le_bytes([
-                                                a_data[off + 2],
-                                                a_data[off + 3],
-                                            ]),
-                                        };
-                                        let rz = match endian {
-                                            IgbEndian::Big => i16::from_be_bytes([
-                                                a_data[off + 4],
-                                                a_data[off + 5],
-                                            ]),
-                                            IgbEndian::Little => i16::from_le_bytes([
-                                                a_data[off + 4],
-                                                a_data[off + 5],
-                                            ]),
-                                        };
-                                        raw_min[0] = raw_min[0].min(rx);
-                                        raw_max[0] = raw_max[0].max(rx);
-                                        raw_min[1] = raw_min[1].min(ry);
-                                        raw_max[1] = raw_max[1].max(ry);
-                                        raw_min[2] = raw_min[2].min(rz);
-                                        raw_max[2] = raw_max[2].max(rz);
-                                    }
-
-                                    let mut vertices = Vec::with_capacity(count);
-                                    for k in 0..count {
-                                        let off = k * 6;
-                                        let rx = match endian {
-                                            IgbEndian::Big => {
-                                                i16::from_be_bytes([a_data[off], a_data[off + 1]])
-                                            }
-                                            IgbEndian::Little => {
-                                                i16::from_le_bytes([a_data[off], a_data[off + 1]])
-                                            }
-                                        };
-                                        let ry = match endian {
-                                            IgbEndian::Big => i16::from_be_bytes([
-                                                a_data[off + 2],
-                                                a_data[off + 3],
-                                            ]),
-                                            IgbEndian::Little => i16::from_le_bytes([
-                                                a_data[off + 2],
-                                                a_data[off + 3],
-                                            ]),
-                                        };
-                                        let rz = match endian {
-                                            IgbEndian::Big => i16::from_be_bytes([
-                                                a_data[off + 4],
-                                                a_data[off + 5],
-                                            ]),
-                                            IgbEndian::Little => i16::from_le_bytes([
-                                                a_data[off + 4],
-                                                a_data[off + 5],
-                                            ]),
-                                        };
-
-                                        let map_c = |c: usize, val: i16| -> f32 {
-                                            let span_raw =
-                                                (raw_max[c] as f32 - raw_min[c] as f32).max(1.0);
-                                            min_pt[c]
-                                                + ((val as f32 - raw_min[c] as f32) / span_raw)
-                                                    * (max_pt[c] - min_pt[c])
-                                        };
-
-                                        let pos = [map_c(0, rx), map_c(1, ry), map_c(2, rz)];
-
-                                        let uv = if k * 4 + 4 <= b_data.len() {
-                                            let tu = match endian {
-                                                IgbEndian::Big => i16::from_be_bytes([
-                                                    b_data[k * 4],
-                                                    b_data[k * 4 + 1],
-                                                ]),
-                                                IgbEndian::Little => i16::from_le_bytes([
-                                                    b_data[k * 4],
-                                                    b_data[k * 4 + 1],
-                                                ]),
-                                            };
-                                            let tv = match endian {
-                                                IgbEndian::Big => i16::from_be_bytes([
-                                                    b_data[k * 4 + 2],
-                                                    b_data[k * 4 + 3],
-                                                ]),
-                                                IgbEndian::Little => i16::from_le_bytes([
-                                                    b_data[k * 4 + 2],
-                                                    b_data[k * 4 + 3],
-                                                ]),
-                                            };
-                                            let u = tu as f32 / 1024.0;
-                                            let v = tv as f32 / 1024.0;
-                                            [
-                                                if u.is_finite() { u } else { 0.0 },
-                                                if v.is_finite() { v } else { 0.0 },
-                                            ]
-                                        } else {
-                                            [0.0, 0.0]
-                                        };
-
-                                        vertices.push(IgbVertex {
-                                            position: pos,
-                                            normal: [0.0, 1.0, 0.0],
-                                            uv,
-                                            color: [0.8, 0.8, 0.82, 1.0],
-                                            bone_indices: [0, 0, 0, 0],
-                                            bone_weights: [1.0, 0.0, 0.0, 0.0],
-                                        });
-                                    }
-
-                                    let mut indices = Vec::with_capacity((count - 2) * 3);
-                                    let diag = ((max_pt[0] - min_pt[0]).powi(2)
-                                        + (max_pt[1] - min_pt[1]).powi(2)
-                                        + (max_pt[2] - min_pt[2]).powi(2))
-                                    .sqrt();
-                                    let max_edge = (diag * 0.45).clamp(3.0, 15.0);
-                                    let max_edge_sq = max_edge * max_edge;
-
-                                    for t in 0..count.saturating_sub(2) {
-                                        let (i0, i1, i2) = if (t % 2) == 0 {
-                                            (t as u32, (t + 1) as u32, (t + 2) as u32)
-                                        } else {
-                                            ((t + 1) as u32, t as u32, (t + 2) as u32)
-                                        };
-                                        let p0 = vertices[i0 as usize].position;
-                                        let p1 = vertices[i1 as usize].position;
-                                        let p2 = vertices[i2 as usize].position;
-                                        let d01_sq = (p0[0] - p1[0]).powi(2)
-                                            + (p0[1] - p1[1]).powi(2)
-                                            + (p0[2] - p1[2]).powi(2);
-                                        let d12_sq = (p1[0] - p2[0]).powi(2)
-                                            + (p1[1] - p2[1]).powi(2)
-                                            + (p1[2] - p2[2]).powi(2);
-                                        let d20_sq = (p2[0] - p0[0]).powi(2)
-                                            + (p2[1] - p0[1]).powi(2)
-                                            + (p2[2] - p0[2]).powi(2);
-
-                                        let min_edge_sq = d01_sq.min(d12_sq).min(d20_sq);
-                                        let max_sq = d01_sq.max(d12_sq).max(d20_sq);
-
-                                        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-                                        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-                                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                                        let area_sq = 0.25 * (nx * nx + ny * ny + nz * nz);
-
-                                        if min_edge_sq > 1e-6
-                                            && max_sq <= max_edge_sq
-                                            && area_sq > 1e-6
-                                            && (max_sq <= 36.0 * min_edge_sq || max_sq <= 9.0)
-                                        {
-                                            indices.push(i0);
-                                            indices.push(i1);
-                                            indices.push(i2);
-                                        }
-                                    }
-
-                                    if indices.is_empty() && count >= 3 && diag <= 5.0 {
-                                        for t in 0..count.saturating_sub(2) {
-                                            if (t % 2) == 0 {
-                                                indices.push(t as u32);
-                                                indices.push((t + 1) as u32);
-                                                indices.push((t + 2) as u32);
-                                            } else {
-                                                indices.push((t + 1) as u32);
-                                                indices.push(t as u32);
-                                                indices.push((t + 2) as u32);
-                                            }
-                                        }
-                                    }
-
-                                    for tri in indices.as_chunks::<3>().0 {
-                                        let i0 = tri[0] as usize;
-                                        let i1 = tri[1] as usize;
-                                        let i2 = tri[2] as usize;
-                                        let p0 = vertices[i0].position;
-                                        let p1 = vertices[i1].position;
-                                        let p2 = vertices[i2].position;
-                                        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-                                        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-                                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                                        let len_sq = nx * nx + ny * ny + nz * nz;
-                                        if len_sq > 1e-8 {
-                                            let len = len_sq.sqrt();
-                                            let norm = [nx / len, ny / len, nz / len];
-                                            if vertices[i0].normal == [0.0, 1.0, 0.0] {
-                                                vertices[i0].normal = norm;
-                                                vertices[i1].normal = norm;
-                                                vertices[i2].normal = norm;
-                                            }
-                                        }
-                                    }
-
-                                    decoded_mesh = Some(IgbMesh {
-                                        name: geo_name.clone(),
-                                        vertices,
-                                        indices,
-                                        material_name: Some(format!("mat_{}", geo_name)),
-                                    });
-                                }
-                            }
+                            decoded_mesh = Self::decode_wii_display_list(dl, vb).map(|mut m| {
+                                m.name = geo_name.clone();
+                                m.material_name = Some(format!("mat_{}", geo_name));
+                                m
+                            });
                         }
 
                         geometries.push(IgbGeometryNode {
@@ -3158,37 +2893,6 @@ impl IgbModel {
                     geometry_index: Some(geo_idx),
                     transform: mat4_identity(),
                 });
-            }
-        }
-
-        // Only decode GX display list from Section 3 if no submesh geometry exists
-        // and Section 3 starts with valid GX commands (avoid false positives on sound/particle data)
-        if meshes.is_empty() && sections.len() > 3 {
-            let sec3 = &sections[3];
-            if sec3.offset < data.len() && sec3.size > 0 {
-                let end = (sec3.offset + sec3.size).min(data.len());
-                let sec3_data = &data[sec3.offset..end];
-                if let Some(decoded_mesh) = Self::decode_gx_display_list(sec3_data, endian) {
-                    let mesh_name = "igz_mesh_3".to_string();
-                    let geo_node = IgbGeometryNode {
-                        name: format!("geo_{}", mesh_name),
-                        vertex_buffer_index: Some(3),
-                        index_buffer_index: Some(3),
-                        attr_list_index: Some(0),
-                        material_index: Some(0),
-                        mesh: Some(decoded_mesh.clone()),
-                    };
-                    let geo_idx = geometries.len();
-                    geometries.push(geo_node);
-                    meshes.push(decoded_mesh);
-                    nodes.push(IgbSceneNode {
-                        name: format!("node_{}", mesh_name),
-                        type_id: IgbObjectType::IgNode,
-                        children: Vec::new(),
-                        geometry_index: Some(geo_idx),
-                        transform: mat4_identity(),
-                    });
-                }
             }
         }
 
@@ -3601,7 +3305,11 @@ impl IgbModel {
             }
         }
 
-        for (geo, mesh) in geometries.iter_mut().zip(meshes.iter()) {
+        for (geo, mesh) in geometries
+            .iter_mut()
+            .filter(|g| g.mesh.is_some())
+            .zip(meshes.iter())
+        {
             geo.mesh = Some(mesh.clone());
         }
 
@@ -3655,461 +3363,250 @@ impl IgbModel {
         })
     }
 
-    pub fn decode_gx_display_list(data: &[u8], endian: IgbEndian) -> Option<IgbMesh> {
-        let mut cp_pos_base = 0usize;
-        let mut cp_pos_stride = 6usize;
-        let mut cp_nrm_base = 0usize;
-        let mut cp_nrm_stride = 3usize;
-        let mut cp_tex0_base = 0usize;
-        let mut cp_tex0_stride = 4usize;
-        let mut vcd_lo = 0u32;
-        let mut vcd_hi = 0u32;
+    /// Decodes a Wii GX display list (`igWiiGeometry` buffer A) whose indexed
+    /// attribute arrays live in `vb` (buffer B). Array bases (CP 0xA0+n) are
+    /// offsets into `vb`. GX data is always big-endian.
+    pub fn decode_wii_display_list(dl: &[u8], vb: &[u8]) -> Option<IgbMesh> {
+        let be16 = |b: &[u8], o: usize| b.get(o..o + 2).map(|s| u16::from_be_bytes([s[0], s[1]]));
+        let be32 = |b: &[u8], o: usize| {
+            b.get(o..o + 4)
+                .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+        };
+        // Component size for GX formats u8/s8/u16/s16/f32.
+        let comp_size = |fmt: u32| [1usize, 1, 2, 2, 4].get(fmt as usize).copied().unwrap_or(4);
+        let read_comp = |b: &[u8], o: usize, fmt: u32, shift: u32| -> Option<f32> {
+            let scale = 1.0 / (1u32 << shift) as f32;
+            Some(match fmt {
+                0 => *b.get(o)? as f32 * scale,
+                1 => *b.get(o)? as i8 as f32 * scale,
+                2 => be16(b, o)? as f32 * scale,
+                3 => be16(b, o)? as i16 as f32 * scale,
+                _ => f32::from_bits(be32(b, o)?),
+            })
+        };
 
-        let mut vertices: Vec<IgbVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        let mut vat_a = [0u32; 8];
+        let mut vat_b = [0u32; 8];
+        let mut base = [0usize; 16];
+        let mut stride = [0usize; 16];
+        let (mut vcd_lo, mut vcd_hi) = (0u32, 0u32);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
         let mut i = 0;
-        while i < data.len() {
-            let cmd = data[i];
-            if cmd == 0x00 {
-                i += 1;
-                continue;
-            }
-            if cmd == 0x08 {
-                if i + 6 > data.len() {
-                    break;
-                }
-                let reg = data[i + 1];
-                let val = match endian {
-                    IgbEndian::Big => {
-                        u32::from_be_bytes([data[i + 2], data[i + 3], data[i + 4], data[i + 5]])
+        while i < dl.len() {
+            let cmd = dl[i];
+            match cmd {
+                0x00 => i += 1,
+                0x08 => {
+                    let reg = *dl.get(i + 1)?;
+                    let val = be32(dl, i + 2)?;
+                    match reg {
+                        0x50 => vcd_lo = val,
+                        0x60 => vcd_hi = val,
+                        0x70..=0x77 => vat_a[(reg & 7) as usize] = val,
+                        0x80..=0x87 => vat_b[(reg & 7) as usize] = val,
+                        0xA0..=0xAF => base[(reg - 0xA0) as usize] = val as usize,
+                        0xB0..=0xBF => stride[(reg - 0xB0) as usize] = val as usize,
+                        _ => {}
                     }
-                    IgbEndian::Little => {
-                        u32::from_le_bytes([data[i + 2], data[i + 3], data[i + 4], data[i + 5]])
-                    }
-                };
-                match reg {
-                    0xA0 => cp_pos_base = val as usize,
-                    0xB0 => cp_pos_stride = (val as usize).max(1),
-                    0xA1 => cp_nrm_base = val as usize,
-                    0xB1 => cp_nrm_stride = (val as usize).max(1),
-                    0xA4 => cp_tex0_base = val as usize,
-                    0xB4 => cp_tex0_stride = (val as usize).max(1),
-                    0x50 => vcd_lo = val,
-                    0x60 => vcd_hi = val,
-                    _ => {}
+                    i += 6;
                 }
-                i += 6;
-                continue;
-            }
-            if cmd == 0x10 {
-                if i + 5 > data.len() {
-                    break;
-                }
-                let cnt_minus_1 = match endian {
-                    IgbEndian::Big => u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize,
-                    IgbEndian::Little => u16::from_le_bytes([data[i + 1], data[i + 2]]) as usize,
-                };
-                let payload_len = (cnt_minus_1 + 1) * 4;
-                i += 5 + payload_len;
-                continue;
-            }
-            if cmd == 0x80 || (cmd & 0xF8) == 0x90 || (cmd & 0xF8) == 0x98 {
-                if i + 3 > data.len() {
-                    break;
-                }
-                let vtx_cnt = match endian {
-                    IgbEndian::Big => u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize,
-                    IgbEndian::Little => u16::from_le_bytes([data[i + 1], data[i + 2]]) as usize,
-                };
-                i += 3;
-                if vtx_cnt == 0 || vtx_cnt > 16384 {
-                    continue;
-                }
+                0x10 => i += 5 + (be16(dl, i + 1)? as usize + 1) * 4,
+                0x20 | 0x28 | 0x30 | 0x38 => i += 5,
+                0x80..=0xBF => {
+                    let fmt = (cmd & 7) as usize;
+                    let prim = cmd & 0xF8;
+                    let n = be16(dl, i + 1)? as usize;
+                    i += 3;
+                    let (a, b) = (vat_a[fmt], vat_b[fmt]);
+                    let pos_fmt = (a >> 1) & 7;
+                    let pos_shift = (a >> 4) & 31;
+                    let pos_comps = if a & 1 == 1 { 3 } else { 2 };
+                    let nrm_fmt = (a >> 10) & 7;
+                    let nrm_comps = if (a >> 9) & 1 == 1 { 9 } else { 3 };
+                    let tex_fmt = [
+                        ((a >> 22) & 7, (a >> 21) & 1, (a >> 25) & 31),
+                        ((b >> 1) & 7, b & 1, 0),
+                        ((b >> 10) & 7, (b >> 9) & 1, 0),
+                        ((b >> 19) & 7, (b >> 18) & 1, 0),
+                        ((b >> 28) & 7, (b >> 27) & 1, 0),
+                    ];
+                    let mtx_bytes = (0..9).filter(|bit| (vcd_lo >> bit) & 1 == 1).count();
+                    let color_size = |fmt: u32| [2usize, 3, 4, 2, 3, 4][fmt.min(5) as usize];
 
-                let pos_fmt = (vcd_lo >> 9) & 3;
-                let nrm_fmt = (vcd_lo >> 11) & 3;
-                let tex0_fmt = if vcd_hi != 0 {
-                    (vcd_hi & 3).max((vcd_hi >> 2) & 3)
-                } else {
-                    0
-                };
-
-                let is_direct = pos_fmt == 1;
-                let base_idx = vertices.len() as u32;
-                let mut prim_verts_decoded = 0;
-
-                for _ in 0..vtx_cnt {
-                    let mut pos = [0.0f32; 3];
-                    let mut nrm = [0.0f32, 1.0f32, 0.0f32];
-                    let mut uv = [0.0f32; 2];
-
-                    if is_direct {
-                        if i + 6 > data.len() {
-                            break;
-                        }
-                        let sx = match endian {
-                            IgbEndian::Big => i16::from_be_bytes([data[i], data[i + 1]]),
-                            IgbEndian::Little => i16::from_le_bytes([data[i], data[i + 1]]),
+                    let first = vertices.len() as u32;
+                    for _ in 0..n {
+                        let mut p = i + mtx_bytes;
+                        let read_idx = |kind: u32, p: &mut usize| -> Option<usize> {
+                            match kind {
+                                2 => {
+                                    *p += 1;
+                                    dl.get(*p - 1).map(|&v| v as usize)
+                                }
+                                3 => {
+                                    *p += 2;
+                                    be16(dl, *p - 2).map(|v| v as usize)
+                                }
+                                _ => None,
+                            }
                         };
-                        let sy = match endian {
-                            IgbEndian::Big => i16::from_be_bytes([data[i + 2], data[i + 3]]),
-                            IgbEndian::Little => i16::from_le_bytes([data[i + 2], data[i + 3]]),
-                        };
-                        let sz = match endian {
-                            IgbEndian::Big => i16::from_be_bytes([data[i + 4], data[i + 5]]),
-                            IgbEndian::Little => i16::from_le_bytes([data[i + 4], data[i + 5]]),
-                        };
-                        pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
-                        i += 6;
 
-                        if nrm_fmt == 1 && i + 3 <= data.len() {
-                            nrm = [
-                                (data[i] as i8) as f32 / 127.0,
-                                (data[i + 1] as i8) as f32 / 127.0,
-                                (data[i + 2] as i8) as f32 / 127.0,
-                            ];
-                            i += 3;
-                        }
-                        if tex0_fmt == 1 && i + 4 <= data.len() {
-                            let tu = match endian {
-                                IgbEndian::Big => i16::from_be_bytes([data[i], data[i + 1]]),
-                                IgbEndian::Little => i16::from_le_bytes([data[i], data[i + 1]]),
-                            };
-                            let tv = match endian {
-                                IgbEndian::Big => i16::from_be_bytes([data[i + 2], data[i + 3]]),
-                                IgbEndian::Little => i16::from_le_bytes([data[i + 2], data[i + 3]]),
-                            };
-                            let u = tu as f32 / 1024.0;
-                            let v = tv as f32 / 1024.0;
-                            uv = [
-                                if u.is_finite() { u } else { 0.0 },
-                                if v.is_finite() { v } else { 0.0 },
-                            ];
-                            i += 4;
-                        }
-                    } else {
-                        // Index8 or Index16 attributes
-                        if pos_fmt == 3 {
-                            // Index16
-                            if i + 2 > data.len() {
-                                break;
-                            }
-                            let pos_idx = match endian {
-                                IgbEndian::Big => {
-                                    u16::from_be_bytes([data[i], data[i + 1]]) as usize
-                                }
-                                IgbEndian::Little => {
-                                    u16::from_le_bytes([data[i], data[i + 1]]) as usize
-                                }
-                            };
-                            i += 2;
-
-                            let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
-                            if pos_off + 6 <= data.len() {
-                                let sx = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
-                                    }
-                                };
-                                let sy = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                    }
-                                };
-                                let sz = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                    }
-                                };
-                                pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
-                            }
-
-                            if nrm_fmt == 3 && i + 2 <= data.len() {
-                                let nrm_idx = match endian {
-                                    IgbEndian::Big => {
-                                        u16::from_be_bytes([data[i], data[i + 1]]) as usize
-                                    }
-                                    IgbEndian::Little => {
-                                        u16::from_le_bytes([data[i], data[i + 1]]) as usize
-                                    }
-                                };
-                                i += 2;
-                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
-                                if nrm_off + 3 <= data.len() {
-                                    nrm = [
-                                        (data[nrm_off] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
-                                    ];
-                                }
-                            } else if nrm_fmt != 0 && i < data.len() {
-                                let nrm_idx = data[i] as usize;
-                                i += 1;
-                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
-                                if nrm_off + 3 <= data.len() {
-                                    nrm = [
-                                        (data[nrm_off] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
-                                    ];
-                                }
-                            }
-
-                            if tex0_fmt == 3 && i + 2 <= data.len() {
-                                let tex_idx = match endian {
-                                    IgbEndian::Big => {
-                                        u16::from_be_bytes([data[i], data[i + 1]]) as usize
-                                    }
-                                    IgbEndian::Little => {
-                                        u16::from_le_bytes([data[i], data[i + 1]]) as usize
-                                    }
-                                };
-                                i += 2;
-                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
-                                if tex_off + 4 <= data.len() {
-                                    let tu = match endian {
-                                        IgbEndian::Big => {
-                                            i16::from_be_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                        IgbEndian::Little => {
-                                            i16::from_le_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                    };
-                                    let tv = match endian {
-                                        IgbEndian::Big => i16::from_be_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                        IgbEndian::Little => i16::from_le_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                    };
-                                    let u = tu as f32 / 1024.0;
-                                    let v = tv as f32 / 1024.0;
-                                    uv = [
-                                        if u.is_finite() { u } else { 0.0 },
-                                        if v.is_finite() { v } else { 0.0 },
-                                    ];
-                                }
-                            } else if tex0_fmt != 0 && i < data.len() {
-                                let tex_idx = data[i] as usize;
-                                i += 1;
-                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
-                                if tex_off + 4 <= data.len() {
-                                    let tu = match endian {
-                                        IgbEndian::Big => {
-                                            i16::from_be_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                        IgbEndian::Little => {
-                                            i16::from_le_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                    };
-                                    let tv = match endian {
-                                        IgbEndian::Big => i16::from_be_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                        IgbEndian::Little => i16::from_le_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                    };
-                                    let u = tu as f32 / 1024.0;
-                                    let v = tv as f32 / 1024.0;
-                                    uv = [
-                                        if u.is_finite() { u } else { 0.0 },
-                                        if v.is_finite() { v } else { 0.0 },
-                                    ];
-                                }
-                            }
+                        let pos_kind = (vcd_lo >> 9) & 3;
+                        let pos_src = if pos_kind == 1 {
+                            let o = p;
+                            p += pos_comps * comp_size(pos_fmt);
+                            (dl, o)
                         } else {
-                            // Index8
-                            if i >= data.len() {
-                                break;
-                            }
-                            let pos_idx = data[i] as usize;
-                            i += 1;
+                            let idx = read_idx(pos_kind, &mut p)?;
+                            (vb, base[0] + idx * stride[0])
+                        };
+                        let cs = comp_size(pos_fmt);
+                        let mut position = [0.0f32; 3];
+                        for (c, out) in position.iter_mut().take(pos_comps).enumerate() {
+                            *out = read_comp(pos_src.0, pos_src.1 + c * cs, pos_fmt, pos_shift)?;
+                        }
 
-                            let pos_off = cp_pos_base + pos_idx * cp_pos_stride;
-                            if pos_off + 6 <= data.len() {
-                                let sx = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off], data[pos_off + 1]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off], data[pos_off + 1]])
-                                    }
-                                };
-                                let sy = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off + 2], data[pos_off + 3]])
-                                    }
-                                };
-                                let sz = match endian {
-                                    IgbEndian::Big => {
-                                        i16::from_be_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                    }
-                                    IgbEndian::Little => {
-                                        i16::from_le_bytes([data[pos_off + 4], data[pos_off + 5]])
-                                    }
-                                };
-                                pos = [sx as f32 / 1024.0, sy as f32 / 1024.0, sz as f32 / 1024.0];
+                        let mut normal = [0.0f32, 1.0, 0.0];
+                        let nrm_kind = (vcd_lo >> 11) & 3;
+                        let nrm_shift = match nrm_fmt {
+                            1 => 6,
+                            3 => 14,
+                            _ => 0,
+                        };
+                        let nrm_src = if nrm_kind == 1 {
+                            let o = p;
+                            p += nrm_comps * comp_size(nrm_fmt);
+                            Some((dl, o))
+                        } else {
+                            read_idx(nrm_kind, &mut p).map(|idx| (vb, base[1] + idx * stride[1]))
+                        };
+                        if let Some((src, o)) = nrm_src {
+                            let ns = comp_size(nrm_fmt);
+                            for (c, out) in normal.iter_mut().enumerate() {
+                                *out =
+                                    read_comp(src, o + c * ns, nrm_fmt, nrm_shift).unwrap_or(0.0);
                             }
+                        }
 
-                            if nrm_fmt != 0 && i < data.len() {
-                                let nrm_idx = data[i] as usize;
-                                i += 1;
-                                let nrm_off = cp_nrm_base + nrm_idx * cp_nrm_stride;
-                                if nrm_off + 3 <= data.len() {
-                                    nrm = [
-                                        (data[nrm_off] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 1] as i8) as f32 / 127.0,
-                                        (data[nrm_off + 2] as i8) as f32 / 127.0,
-                                    ];
-                                }
-                            }
-
-                            if tex0_fmt != 0 && i < data.len() {
-                                let tex_idx = data[i] as usize;
-                                i += 1;
-                                let tex_off = cp_tex0_base + tex_idx * cp_tex0_stride;
-                                if tex_off + 4 <= data.len() {
-                                    let tu = match endian {
-                                        IgbEndian::Big => {
-                                            i16::from_be_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                        IgbEndian::Little => {
-                                            i16::from_le_bytes([data[tex_off], data[tex_off + 1]])
-                                        }
-                                    };
-                                    let tv = match endian {
-                                        IgbEndian::Big => i16::from_be_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                        IgbEndian::Little => i16::from_le_bytes([
-                                            data[tex_off + 2],
-                                            data[tex_off + 3],
-                                        ]),
-                                    };
-                                    let u = tu as f32 / 1024.0;
-                                    let v = tv as f32 / 1024.0;
-                                    uv = [
-                                        if u.is_finite() { u } else { 0.0 },
-                                        if v.is_finite() { v } else { 0.0 },
-                                    ];
+                        for (c, shift) in [(13u32, 14u32), (15, 18)] {
+                            match (vcd_lo >> c) & 3 {
+                                1 => p += color_size((a >> shift) & 7),
+                                kind => {
+                                    read_idx(kind, &mut p);
                                 }
                             }
                         }
-                    }
 
-                    vertices.push(IgbVertex {
-                        position: pos,
-                        normal: nrm,
-                        uv,
-                        color: [0.8, 0.8, 0.82, 1.0],
-                        bone_indices: [0, 0, 0, 0],
-                        bone_weights: [1.0, 0.0, 0.0, 0.0],
-                    });
-                    prim_verts_decoded += 1;
-                }
-
-                if prim_verts_decoded == vtx_cnt {
-                    let prim_type = if cmd == 0x80 { 0x80 } else { cmd & 0xF8 };
-                    if prim_type == 0x80 {
-                        for q in 0..(vtx_cnt / 4) {
-                            let b = base_idx + (q * 4) as u32;
-                            indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
-                        }
-                    } else if prim_type == 0x90 {
-                        for t in 0..(vtx_cnt / 3) {
-                            let b = base_idx + (t * 3) as u32;
-                            indices.extend_from_slice(&[b, b + 1, b + 2]);
-                        }
-                    } else if prim_type == 0x98 {
-                        for s in 2..vtx_cnt {
-                            let s = s as u32;
-                            if s.is_multiple_of(2) {
-                                indices.extend_from_slice(&[
-                                    base_idx + s - 2,
-                                    base_idx + s - 1,
-                                    base_idx + s,
-                                ]);
+                        let mut uv = [0.0f32; 2];
+                        for (t, &(fmt_t, cnt_t, shift_t)) in tex_fmt.iter().enumerate() {
+                            let kind = (vcd_hi >> (t * 2)) & 3;
+                            let comps = if cnt_t == 1 { 2 } else { 1 };
+                            let src = if kind == 1 {
+                                let o = p;
+                                p += comps * comp_size(fmt_t);
+                                Some((dl, o))
                             } else {
-                                indices.extend_from_slice(&[
-                                    base_idx + s - 1,
-                                    base_idx + s - 2,
-                                    base_idx + s,
-                                ]);
+                                read_idx(kind, &mut p)
+                                    .map(|idx| (vb, base[4 + t] + idx * stride[4 + t]))
+                            };
+                            if t == 0 {
+                                if let Some((src, o)) = src {
+                                    let ts = comp_size(fmt_t);
+                                    for (c, out) in uv.iter_mut().take(comps).enumerate() {
+                                        *out = read_comp(src, o + c * ts, fmt_t, shift_t)
+                                            .unwrap_or(0.0);
+                                    }
+                                }
                             }
                         }
+                        // TEX5..7 always use VAT C, which carries no extra state here.
+                        for t in 5..8 {
+                            match (vcd_hi >> (t * 2)) & 3 {
+                                1 => p += 4,
+                                kind => {
+                                    read_idx(kind, &mut p);
+                                }
+                            }
+                        }
+
+                        i = p;
+                        vertices.push(IgbVertex {
+                            position,
+                            normal,
+                            uv,
+                            color: [0.8, 0.8, 0.82, 1.0],
+                            bone_indices: [0, 0, 0, 0],
+                            bone_weights: [1.0, 0.0, 0.0, 0.0],
+                        });
+                    }
+                    if i > dl.len() {
+                        return None;
+                    }
+
+                    let n = n as u32;
+                    match prim {
+                        0x80 => (0..n / 4).for_each(|q| {
+                            let b = first + q * 4;
+                            indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+                        }),
+                        0x90 => (0..n / 3).for_each(|t| {
+                            let b = first + t * 3;
+                            indices.extend_from_slice(&[b, b + 1, b + 2]);
+                        }),
+                        0x98 => (2..n).for_each(|s| {
+                            let b = first + s;
+                            if s % 2 == 0 {
+                                indices.extend_from_slice(&[b - 2, b - 1, b]);
+                            } else {
+                                indices.extend_from_slice(&[b - 1, b - 2, b]);
+                            }
+                        }),
+                        0xA0 => (2..n).for_each(|s| {
+                            indices.extend_from_slice(&[first, first + s - 1, first + s]);
+                        }),
+                        _ => {} // lines / points: not rendered
                     }
                 }
-                continue;
+                _ => return None,
             }
-            i += 1;
         }
 
-        // Validate and filter non-degenerate triangles
-        let mut valid_indices = Vec::with_capacity(indices.len());
-        for chunk in indices.chunks(3) {
-            if chunk.len() < 3 {
-                continue;
-            }
-            let (i0, i1, i2) = (chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
-            if i0 == i1 || i1 == i2 || i0 == i2 {
-                continue;
-            }
-            if i0 >= vertices.len() || i1 >= vertices.len() || i2 >= vertices.len() {
-                continue;
-            }
-            let p0 = vertices[i0].position;
-            let p1 = vertices[i1].position;
-            let p2 = vertices[i2].position;
+        // Fill missing normals with face normals.
+        let has_normals = (vcd_lo >> 11) & 3 != 0;
+        let mut tris = Vec::with_capacity(indices.len());
+        for tri in indices.as_chunks::<3>().0 {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let (p0, p1, p2) = (
+                vertices[i0].position,
+                vertices[i1].position,
+                vertices[i2].position,
+            );
             let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
             let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-            let nx = e1[1] * e2[2] - e1[2] * e2[1];
-            let ny = e1[2] * e2[0] - e1[0] * e2[2];
-            let nz = e1[0] * e2[1] - e1[1] * e2[0];
-            let len_sq = nx * nx + ny * ny + nz * nz;
-            if len_sq > 1e-8 {
-                let len = len_sq.sqrt();
-                let norm = [nx / len, ny / len, nz / len];
-                if vertices[i0].normal == [0.0, 1.0, 0.0] {
-                    vertices[i0].normal = norm;
-                    vertices[i1].normal = norm;
-                    vertices[i2].normal = norm;
-                }
-                valid_indices.push(chunk[0]);
-                valid_indices.push(chunk[1]);
-                valid_indices.push(chunk[2]);
+            let nrm = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let len = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt();
+            if len <= 1e-12 {
+                continue; // degenerate strip joint
             }
+            if !has_normals {
+                for &k in &[i0, i1, i2] {
+                    vertices[k].normal = [nrm[0] / len, nrm[1] / len, nrm[2] / len];
+                }
+            }
+            tris.extend_from_slice(tri);
         }
 
-        if valid_indices.is_empty() {
-            None
-        } else {
-            Some(IgbMesh {
-                name: "gx_mesh".to_string(),
-                vertices,
-                indices: valid_indices,
-                material_name: Some("mat_gx".to_string()),
-            })
-        }
+        (!tris.is_empty()).then(|| IgbMesh {
+            name: "gx_mesh".to_string(),
+            vertices,
+            indices: tris,
+            material_name: Some("mat_gx".to_string()),
+        })
     }
 }
 
@@ -4775,10 +4272,6 @@ mod tests {
         let model = IgbModel::parse(Cursor::new(&igz)).expect("Parse IGZ");
         assert_eq!(&model.header.magic, b"IGZ\x01");
         assert_eq!(model.header.version, 8);
-        assert_eq!(model.geometries.len(), 1);
-        assert_eq!(model.meshes.len(), 1);
-        assert_eq!(model.meshes[0].vertices.len(), 3);
-        assert_eq!(model.meshes[0].indices.len(), 3);
 
         let parsed_igz_header = IgzHeader::parse(&igz).expect("Parse IgzHeader");
         assert_eq!(parsed_igz_header.descriptors.len(), 4);
@@ -5390,8 +4883,8 @@ mod tests {
         // Verify all 16 extracted character submeshes are present
         assert_eq!(
             model.meshes.len(),
-            16,
-            "Spyro has 16 submeshes with geometry"
+            17,
+            "Spyro has 17 submeshes with geometry"
         );
         for mesh in &model.meshes {
             assert!(mesh.vertices.len() >= 3);
@@ -5495,5 +4988,78 @@ mod tests {
             fields: vec![24],
         };
         assert_eq!(igz_obj_24.fields[0], 24);
+    }
+
+    #[test]
+    fn test_wii_display_list_indexed_strip() {
+        // VAT0: pos xyz s16 shift 6; VCD: pos idx16; arrays base 4 stride 6.
+        let mut dl = Vec::new();
+        let cp = |dl: &mut Vec<u8>, reg: u8, val: u32| {
+            dl.push(0x08);
+            dl.push(reg);
+            dl.extend_from_slice(&val.to_be_bytes());
+        };
+        cp(&mut dl, 0x70, 1 | (3 << 1) | (6 << 4));
+        cp(&mut dl, 0xA0, 4);
+        cp(&mut dl, 0xB0, 6);
+        cp(&mut dl, 0x50, 3 << 9);
+        cp(&mut dl, 0x60, 0);
+        dl.extend_from_slice(&[0x98, 0x00, 0x04]);
+        for idx in [0u16, 1, 2, 3] {
+            dl.extend_from_slice(&idx.to_be_bytes());
+        }
+        dl.extend_from_slice(&[0u8; 7]); // trailing NOP padding
+
+        let mut vb = vec![0xEE; 4];
+        for p in [[0i16, 0, 0], [64, 0, 0], [0, 0, 64], [64, 0, 64]] {
+            for c in p {
+                vb.extend_from_slice(&c.to_be_bytes());
+            }
+        }
+
+        let mesh = IgbModel::decode_wii_display_list(&dl, &vb).expect("decodes");
+        let pos: Vec<_> = mesh.vertices.iter().map(|v| v.position).collect();
+        assert_eq!(
+            pos,
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0]
+            ]
+        );
+        assert_eq!(mesh.indices, vec![0, 1, 2, 2, 1, 3]);
+    }
+
+    #[test]
+    fn test_hub_level_geometry_has_no_exploded_triangles() {
+        use crate::archive::ArchiveMount;
+        let rel = "assets/files/level/Level_Hub_2014_01.bld";
+        let p = [rel.to_string(), format!("../../{rel}")]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists());
+        let Some(p) = p else { return };
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).expect("mount hub");
+        let data = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
+        assert!(model.meshes.len() > 3000, "got {}", model.meshes.len());
+
+        let mut edges: Vec<f32> = Vec::new();
+        for m in &model.meshes {
+            for t in m.indices.as_chunks::<3>().0 {
+                let v = |k: u32| m.vertices[k as usize].position;
+                let d = |a: [f32; 3], b: [f32; 3]| {
+                    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+                };
+                let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+                edges.push(d(a, b).max(d(b, c)).max(d(c, a)));
+            }
+        }
+        edges.sort_by(f32::total_cmp);
+        let median = edges[edges.len() / 2];
+        assert!(edges.len() > 500_000, "got {} triangles", edges.len());
+        assert!(median < 3.0, "median edge {median}");
     }
 }

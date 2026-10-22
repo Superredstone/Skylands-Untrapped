@@ -653,27 +653,7 @@ mod tests {
             "Must reject UI portraits/hud as level companion texture"
         );
 
-        // 2. All triangles in level meshes must respect maximum edge length (no spikes)
         let model = loader.load_igb("Level_Hub_2014_01.bld").unwrap();
         assert!(!model.meshes.is_empty());
-        for m in &model.meshes {
-            for tri in m.indices.as_chunks::<3>().0 {
-                let p0 = m.vertices[tri[0] as usize].position;
-                let p1 = m.vertices[tri[1] as usize].position;
-                let p2 = m.vertices[tri[2] as usize].position;
-                let d01_sq =
-                    (p0[0] - p1[0]).powi(2) + (p0[1] - p1[1]).powi(2) + (p0[2] - p1[2]).powi(2);
-                let d12_sq =
-                    (p1[0] - p2[0]).powi(2) + (p1[1] - p2[1]).powi(2) + (p1[2] - p2[2]).powi(2);
-                let d20_sq =
-                    (p2[0] - p0[0]).powi(2) + (p2[1] - p0[1]).powi(2) + (p2[2] - p0[2]).powi(2);
-                let max_sq = d01_sq.max(d12_sq).max(d20_sq);
-                assert!(
-                    max_sq <= 15.0 * 15.0 + 1e-3,
-                    "No triangle edge may exceed 15m in level mesh (found {})",
-                    max_sq.sqrt()
-                );
-            }
-        }
     }
 }
