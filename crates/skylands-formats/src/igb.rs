@@ -239,6 +239,8 @@ pub struct IgbMesh {
     pub vertices: Vec<IgbVertex>,
     pub indices: Vec<u32>,
     pub material_name: Option<String>,
+    /// Index into `IgbModel::skeletons` that `bone_indices` refer to.
+    pub skeleton: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +349,29 @@ pub fn transform_dir(m: &[f32; 16], n: [f32; 3]) -> [f32; 3] {
     } else {
         n
     }
+}
+
+/// Inverts an affine column-major matrix (bottom row `0 0 0 1`), scale/shear included.
+pub fn mat4_affine_inverse(m: &[f32; 16]) -> [f32; 16] {
+    let a = |r: usize, c: usize| m[c * 4 + r];
+    let adj = |i: usize, j: usize| {
+        let (i1, i2, j1, j2) = ((i + 1) % 3, (i + 2) % 3, (j + 1) % 3, (j + 2) % 3);
+        a(j1, i1) * a(j2, i2) - a(j1, i2) * a(j2, i1)
+    };
+    let det = a(0, 0) * adj(0, 0) + a(0, 1) * adj(1, 0) + a(0, 2) * adj(2, 0);
+    if det.abs() < 1e-12 {
+        return mat4_identity();
+    }
+    let mut out = mat4_identity();
+    for i in 0..3 {
+        for j in 0..3 {
+            out[j * 4 + i] = adj(i, j) / det;
+        }
+    }
+    for i in 0..3 {
+        out[12 + i] = -(0..3).map(|j| out[j * 4 + i] * m[12 + j]).sum::<f32>();
+    }
+    out
 }
 
 /// Decodes one GX vertex color (RGB565, RGB8, RGBX8, RGBA4, RGBA6, RGBA8) to RGBA floats.
@@ -844,53 +869,6 @@ impl Skeleton {
     pub fn get_bone_index(&self, name: &str) -> Option<usize> {
         self.name_to_index.get(name).copied()
     }
-
-    pub fn serialize_binary(&self, endian: IgbEndian) -> Vec<u8> {
-        let mut out = Vec::new();
-        match endian {
-            IgbEndian::Little => {
-                out.extend_from_slice(&(self.bones.len() as u32).to_le_bytes());
-                out.extend_from_slice(&(self.root as u32).to_le_bytes());
-                for bone in &self.bones {
-                    let p = match bone.parent {
-                        Some(idx) => idx as i32,
-                        None => -1,
-                    };
-                    out.extend_from_slice(&p.to_le_bytes());
-                    for &f in &bone.inverse_bind_pose {
-                        out.extend_from_slice(&f.to_le_bytes());
-                    }
-                    for &f in &bone.local_transform {
-                        out.extend_from_slice(&f.to_le_bytes());
-                    }
-                    let name_bytes = bone.name.as_bytes();
-                    out.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                    out.extend_from_slice(name_bytes);
-                }
-            }
-            IgbEndian::Big => {
-                out.extend_from_slice(&(self.bones.len() as u32).to_be_bytes());
-                out.extend_from_slice(&(self.root as u32).to_be_bytes());
-                for bone in &self.bones {
-                    let p = match bone.parent {
-                        Some(idx) => idx as i32,
-                        None => -1,
-                    };
-                    out.extend_from_slice(&p.to_be_bytes());
-                    for &f in &bone.inverse_bind_pose {
-                        out.extend_from_slice(&f.to_be_bytes());
-                    }
-                    for &f in &bone.local_transform {
-                        out.extend_from_slice(&f.to_be_bytes());
-                    }
-                    let name_bytes = bone.name.as_bytes();
-                    out.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
-                    out.extend_from_slice(name_bytes);
-                }
-            }
-        }
-        out
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1325,7 +1303,7 @@ impl IgbModel {
         let mut index_buffers = Vec::new();
         let mut materials = Vec::new();
         let mut textures = Vec::new();
-        let mut skeletons = Vec::new();
+        let skeletons = Vec::new();
         let mut animations = Vec::new();
 
         // Parse parsed components by object directory type
@@ -1361,11 +1339,6 @@ impl IgbModel {
                 IgbObjectType::IgNode => {
                     if let Ok(node) = Self::parse_node(data, &entry.name, header.endian) {
                         nodes.push(node);
-                    }
-                }
-                IgbObjectType::IgSkeleton => {
-                    if let Ok(skel) = Self::parse_skeleton(data, &entry.name, header.endian) {
-                        skeletons.push(skel);
                     }
                 }
                 IgbObjectType::IgAnimation => {
@@ -1441,6 +1414,7 @@ impl IgbModel {
                     vertices,
                     indices,
                     material_name,
+                    skeleton: None,
                 };
                 geo.mesh = Some(mesh.clone());
                 meshes.push(mesh);
@@ -2160,6 +2134,7 @@ impl IgbModel {
             vertices,
             indices,
             material_name: None,
+            skeleton: None,
         })
     }
 
@@ -2323,72 +2298,128 @@ impl IgbModel {
         visited[node_idx] = false;
     }
 
-    pub fn parse_skeleton(
+    /// Decodes an IGZ `igSkeleton2` at `off`.
+    ///
+    /// Skeleton: `+0x08` name, `+0x0c` -> `igSkeletonBoneList`, `+0x14` -> inverse bind
+    /// matrices (column-major 4x4, indexed by blend index). Bone list: `+0x08` count,
+    /// `+0x14` -> pointer array. `igSkeletonBone`: `+0x08` name, `+0x0c` parent (i32),
+    /// `+0x10` blend index (i32, -1 = unskinned), `+0x14` translation f32x3.
+    /// Returns the skeleton and a blend-index -> bone-index table.
+    pub fn decode_skeleton2(
         data: &[u8],
-        _name: &str,
+        sections: &[IgzChunkDescriptor],
+        off: usize,
         endian: IgbEndian,
-    ) -> Result<Skeleton, IgbError> {
-        if data.len() < 8 {
-            return Ok(Skeleton::default());
-        }
-        let bone_count = Self::read_u32(data, 0, endian) as usize;
-        let root = Self::read_u32(data, 4, endian) as usize;
-        let mut bones = Vec::with_capacity(bone_count);
-        let mut cur_offset = 8usize;
+    ) -> Option<(Skeleton, Vec<u32>)> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        let mat = |o: usize| -> Option<[f32; 16]> {
+            data.get(o..o + 64)?;
+            Some(std::array::from_fn(|k| {
+                Self::read_f32(data, o + k * 4, endian)
+            }))
+        };
 
-        for i in 0..bone_count {
-            if cur_offset + 132 > data.len() {
-                break;
+        let list = ptr(off + 0x0c)?;
+        let ibps = ptr(off + 0x14);
+        let count = rd(list + 0x08)? as usize;
+        let arr = ptr(list + 0x14)?;
+
+        let mut bones: Vec<Bone> = Vec::with_capacity(count);
+        let mut world: Vec<[f32; 16]> = Vec::with_capacity(count);
+        let mut blend_to_bone = Vec::new();
+        for i in 0..count {
+            let b = ptr(arr + i * 4)?;
+            let parent = Some(rd(b + 0x0c)? as i32)
+                .filter(|&p| p >= 0 && (p as usize) < i)
+                .map(|p| p as usize);
+            let blend = rd(b + 0x10)? as i32;
+            let parent_world = parent.map_or(mat4_identity(), |p| world[p]);
+            // Skinned bones: bind pose = inverse(IBP), exact incl. rotation/scale.
+            // Unskinned bones: translation is relative to the parent.
+            let ibp = match (blend >= 0).then_some(()).and(ibps) {
+                Some(base) => mat(base + blend as usize * 64)?,
+                None => {
+                    let mut local = mat4_identity();
+                    for c in 0..3 {
+                        local[12 + c] = Self::read_f32(data, b + 0x14 + c * 4, endian);
+                    }
+                    mat4_affine_inverse(&mat4_mul(&parent_world, &local))
+                }
+            };
+            let w = mat4_affine_inverse(&ibp);
+            let local_transform = mat4_mul(&mat4_affine_inverse(&parent_world), &w);
+            if blend >= 0 {
+                let slot = blend as usize;
+                if blend_to_bone.len() <= slot {
+                    blend_to_bone.resize(slot + 1, 0);
+                }
+                blend_to_bone[slot] = i as u32;
             }
-            let parent_raw = match endian {
-                IgbEndian::Little => LittleEndian::read_i32(&data[cur_offset..cur_offset + 4]),
-                IgbEndian::Big => BigEndian::read_i32(&data[cur_offset..cur_offset + 4]),
-            };
-            let parent = if parent_raw >= 0 {
-                Some(parent_raw as usize)
-            } else {
-                None
-            };
-            cur_offset += 4;
-
-            let mut inverse_bind_pose = [0.0f32; 16];
-            for (m, val) in inverse_bind_pose.iter_mut().enumerate() {
-                *val = Self::read_f32(data, cur_offset + m * 4, endian);
-            }
-            cur_offset += 64;
-
-            let mut local_transform = [0.0f32; 16];
-            for (m, val) in local_transform.iter_mut().enumerate() {
-                *val = Self::read_f32(data, cur_offset + m * 4, endian);
-            }
-            cur_offset += 64;
-
-            let name_len = if cur_offset + 4 <= data.len() {
-                let l = Self::read_u32(data, cur_offset, endian) as usize;
-                cur_offset += 4;
-                l
-            } else {
-                0
-            };
-
-            let name = if name_len > 0 && cur_offset + name_len <= data.len() {
-                let s =
-                    String::from_utf8_lossy(&data[cur_offset..cur_offset + name_len]).to_string();
-                cur_offset += name_len;
-                s
-            } else {
-                format!("bone_{}", i)
-            };
-
+            world.push(w);
             bones.push(Bone {
-                name,
+                name: cstr(b + 0x08),
                 parent,
-                inverse_bind_pose,
+                inverse_bind_pose: ibp,
                 local_transform,
             });
         }
+        Some((Skeleton::new(bones, 0), blend_to_bone))
+    }
 
-        Ok(Skeleton::new(bones, root))
+    /// Maps each `igGeometryAttr` offset to the `igSkeleton2` offset that skins it:
+    /// `tfbPhysicsBody` `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` -> skeleton;
+    /// `+0x30` -> `tfbBodyEntityInfo` `+0x14` -> `DrawableList` -> `Drawable` `+0x0c` -> attr.
+    fn skinned_attr_links(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> std::collections::HashMap<usize, usize> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let mut links = std::collections::HashMap::new();
+        for body in objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsBody"))
+        {
+            let Some(skel) = ptr(body.offset + 0x28).and_then(|l| ptr(l + 0x0c)) else {
+                continue;
+            };
+            let Some(list) = ptr(body.offset + 0x30).and_then(|e| ptr(e + 0x14)) else {
+                continue;
+            };
+            let (Some(n), Some(arr)) = (rd(list + 0x08), ptr(list + 0x14)) else {
+                continue;
+            };
+            for i in 0..n as usize {
+                if let Some(attr) = ptr(arr + i * 4).and_then(|d| ptr(d + 0x0c)) {
+                    links.insert(attr, skel);
+                }
+            }
+        }
+        links
     }
 
     pub fn parse_animation(
@@ -2729,6 +2760,24 @@ impl IgbModel {
         let mut attr_lists = Vec::new();
         let mut geometries = Vec::new();
 
+        let mut skeletons = Vec::new();
+        let mut skeleton_by_offset = std::collections::HashMap::new();
+        let mut attr_skeleton = std::collections::HashMap::new();
+        if let Some(ref obj_list) = igz_objects {
+            for obj in &obj_list.objects {
+                if obj.type_name.as_deref() != Some("igSkeleton2") {
+                    continue;
+                }
+                if let Some((skel, blend)) =
+                    Self::decode_skeleton2(data, sections, obj.offset, endian)
+                {
+                    skeleton_by_offset.insert(obj.offset, (skeletons.len(), blend));
+                    skeletons.push(skel);
+                }
+            }
+            attr_skeleton = Self::skinned_attr_links(data, sections, &obj_list.objects, endian);
+        }
+
         if let Some(ref obj_list) = igz_objects {
             for (idx, obj) in obj_list.objects.iter().enumerate() {
                 match obj.type_name.as_deref() {
@@ -2856,6 +2905,24 @@ impl IgbModel {
                             .map(|mut m| {
                                 m.name = name.clone();
                                 m.material_name = Some(format!("mat_{}", name));
+                                // Palettes (`tfbBodyEntityInfo` +0x24 igIntListList) are
+                                // identity in every character file, so slot == blend index.
+                                if let Some((si, blend)) = attr_skeleton
+                                    .get(&obj.offset)
+                                    .and_then(|s| skeleton_by_offset.get(s))
+                                {
+                                    m.skeleton = Some(*si);
+                                    for v in &mut m.vertices {
+                                        for (bi, w) in v.bone_indices.iter_mut().zip(v.bone_weights)
+                                        {
+                                            *bi = match blend.get(*bi as usize) {
+                                                Some(&b) => b,
+                                                None if w == 0.0 => 0,
+                                                None => *bi,
+                                            };
+                                        }
+                                    }
+                                }
                                 m
                             });
                             if mesh.is_some() {
@@ -3136,6 +3203,7 @@ impl IgbModel {
                         vertices: extracted_verts,
                         indices,
                         material_name: Some(format!("mat_igz_{}", sec_idx)),
+                        skeleton: None,
                     };
                     let geo_node = IgbGeometryNode {
                         name: format!("geo_{}", mesh_name),
@@ -3159,264 +3227,14 @@ impl IgbModel {
             }
         }
 
-        let mut min_pt = [f32::MAX, f32::MAX, f32::MAX];
-        let mut max_pt = [f32::MIN, f32::MIN, f32::MIN];
-        let mut has_pts = false;
-        for m in &meshes {
-            for v in &m.vertices {
-                has_pts = true;
-                for c in 0..3 {
-                    min_pt[c] = min_pt[c].min(v.position[c]);
-                    max_pt[c] = max_pt[c].max(v.position[c]);
-                }
-            }
-        }
-        if !has_pts || min_pt[1] >= max_pt[1] {
-            min_pt = [-0.5, 0.0, -0.5];
-            max_pt = [0.5, 1.5, 0.5];
-        }
-        let cx = (min_pt[0] + max_pt[0]) * 0.5;
-        let cz = (min_pt[2] + max_pt[2]) * 0.5;
-        let y0 = min_pt[1];
-        let h = (max_pt[1] - min_pt[1]).max(0.1);
-
-        let is_bone_name = |s: &str| -> bool {
-            let lower = s.to_ascii_lowercase();
-            lower.contains("root")
-                || lower.contains("pelvis")
-                || lower.contains("spine")
-                || lower.contains("head")
-                || lower.contains("arm")
-                || lower.contains("leg")
-                || lower.contains("skel")
-                || lower.starts_with("bone_")
-                || lower.contains("bone_")
-                || lower.starts_with("j_")
-                || lower.contains("_j_")
-        };
-
-        // Rigging & skeleton: scan for bone definitions across string table, type table, and section 1
-        let mut bone_candidates = Vec::new();
-        for name in string_table.iter().chain(type_table.iter()) {
-            if is_bone_name(name) && !bone_candidates.contains(name) {
-                bone_candidates.push(name.clone());
-            }
-        }
-
-        // Also search section 1 (mesh / actor objects) for bone names (e.g. Havok J_root, J_head, etc.)
-        if let Some(sec1) = sections.get(1) {
-            let start = sec1.offset;
-            let end = (sec1.offset + sec1.size).min(data.len());
-            if start < end {
-                let sec1_data = &data[start..end];
-                let mut p = 0;
-                while p < sec1_data.len() {
-                    if (sec1_data[p] == b'J' || sec1_data[p] == b'j')
-                        && p + 3 < sec1_data.len()
-                        && sec1_data[p + 1] == b'_'
-                    {
-                        let mut end_p = p + 2;
-                        while end_p < sec1_data.len()
-                            && (sec1_data[end_p].is_ascii_alphanumeric()
-                                || sec1_data[end_p] == b'_')
-                        {
-                            end_p += 1;
-                        }
-                        if let Ok(name_str) = std::str::from_utf8(&sec1_data[p..end_p]) {
-                            if is_bone_name(name_str)
-                                && !bone_candidates.contains(&name_str.to_string())
-                            {
-                                bone_candidates.push(name_str.to_string());
-                            }
-                        }
-                        p = end_p;
-                    } else {
-                        p += 1;
-                    }
-                }
-            }
-        }
-
-        let trans_mat = |t: [f32; 3]| -> [f32; 16] {
-            let mut m = mat4_identity();
-            m[12] = t[0];
-            m[13] = t[1];
-            m[14] = t[2];
-            m
-        };
-
-        let mut bones = Vec::new();
-        let mut bone_world_pos: Vec<[f32; 3]> = Vec::new();
-
-        if !bone_candidates.is_empty() {
-            // Ensure first bone is always the root bone
-            if let Some(pos) = bone_candidates
-                .iter()
-                .position(|n| n.to_ascii_lowercase().contains("root"))
-            {
-                if pos != 0 {
-                    let root_name = bone_candidates.remove(pos);
-                    bone_candidates.insert(0, root_name);
-                }
-            }
-
-            let root_idx = 0usize;
-            let mut pelvis_idx = None;
-            let mut spine_idx = None;
-
-            for (i, name) in bone_candidates.iter().enumerate() {
-                let lower = name.to_ascii_lowercase();
-                let (parent, wpos) = if i == 0 {
-                    (None, [cx, y0, cz])
-                } else if lower.contains("pelvis") {
-                    pelvis_idx = Some(i);
-                    (Some(root_idx), [cx, y0 + 0.25 * h, cz])
-                } else if lower.contains("spine") {
-                    spine_idx = Some(i);
-                    (pelvis_idx.or(Some(root_idx)), [cx, y0 + 0.55 * h, cz])
-                } else if lower.contains("head") {
-                    (
-                        spine_idx.or(pelvis_idx).or(Some(root_idx)),
-                        [cx, y0 + 0.88 * h, cz],
-                    )
-                } else if lower.contains("arm") || lower.contains("hand") {
-                    let dx =
-                        if lower.contains("left") || lower.contains("_l") || lower.contains(".l") {
-                            -0.35 * h
-                        } else {
-                            0.35 * h
-                        };
-                    (spine_idx.or(Some(root_idx)), [cx + dx, y0 + 0.65 * h, cz])
-                } else if lower.contains("leg") || lower.contains("foot") {
-                    let dx =
-                        if lower.contains("left") || lower.contains("_l") || lower.contains(".l") {
-                            -0.20 * h
-                        } else {
-                            0.20 * h
-                        };
-                    (pelvis_idx.or(Some(root_idx)), [cx + dx, y0 + 0.15 * h, cz])
-                } else {
-                    let p = if i > 0 {
-                        (i - 1).min(bone_world_pos.len().saturating_sub(1))
-                    } else {
-                        root_idx
-                    };
-                    let t = (i as f32) / (bone_candidates.len().max(1) as f32);
-                    (Some(p), [cx, y0 + t * h, cz])
-                };
-
-                let parent = if i == 0 {
-                    None
-                } else {
-                    parent
-                        .filter(|&p| p < bone_world_pos.len())
-                        .or(Some(root_idx))
-                };
-
-                let local_transform = match parent {
-                    Some(p) => {
-                        let pw = bone_world_pos[p];
-                        trans_mat([wpos[0] - pw[0], wpos[1] - pw[1], wpos[2] - pw[2]])
-                    }
-                    None => trans_mat(wpos),
-                };
-                let inverse_bind_pose = trans_mat([-wpos[0], -wpos[1], -wpos[2]]);
-
-                bone_world_pos.push(wpos);
-                bones.push(Bone {
-                    name: name.clone(),
-                    parent,
-                    inverse_bind_pose,
-                    local_transform,
-                });
-            }
-        } else {
-            let rig_defs: [(&str, Option<usize>, [f32; 3]); 6] = [
-                ("Root", None, [cx, y0, cz]),
-                ("Pelvis", Some(0), [cx, y0 + 0.25 * h, cz]),
-                ("Spine", Some(1), [cx, y0 + 0.55 * h, cz]),
-                ("Head", Some(2), [cx, y0 + 0.88 * h, cz]),
-                ("Left Arm", Some(2), [cx - 0.35 * h, y0 + 0.65 * h, cz]),
-                ("Right Arm", Some(2), [cx + 0.35 * h, y0 + 0.65 * h, cz]),
-            ];
-            for (name, parent, wpos) in rig_defs {
-                let local_transform = match parent {
-                    Some(p) => {
-                        let pw = bone_world_pos[p];
-                        trans_mat([wpos[0] - pw[0], wpos[1] - pw[1], wpos[2] - pw[2]])
-                    }
-                    None => trans_mat(wpos),
-                };
-                let inverse_bind_pose = trans_mat([-wpos[0], -wpos[1], -wpos[2]]);
-                bone_world_pos.push(wpos);
-                bones.push(Bone {
-                    name: name.to_string(),
-                    parent,
-                    inverse_bind_pose,
-                    local_transform,
-                });
-            }
-        }
-
-        let skeleton = Skeleton::new(bones, 0);
-
-        // ponytail: >64 geometries is treated as an unskinned level and keeps default weights;
-        // replace with real skin data (matrix indices in the GX display list) once decoded.
-        let is_level = geometries.len() > LEVEL_GEOMETRY_THRESHOLD;
-        let has_skin = |m: &IgbMesh| {
-            m.vertices
-                .iter()
-                .any(|v| v.bone_indices != [0; 4] || v.bone_weights != [1.0, 0.0, 0.0, 0.0])
-        };
-        for mesh in meshes.iter_mut().filter(|m| !is_level && !has_skin(m)) {
-            for v in &mut mesh.vertices {
-                let p = v.position;
-                // Keep the 4 nearest bones (ascending, stable on ties).
-                let mut near = [(0usize, f32::INFINITY); 4];
-                for (bi, bw) in bone_world_pos.iter().enumerate() {
-                    let dist =
-                        ((p[0] - bw[0]).powi(2) + (p[1] - bw[1]).powi(2) + (p[2] - bw[2]).powi(2))
-                            .sqrt();
-                    if let Some(slot) = near.iter().position(|&(_, d)| dist < d) {
-                        near.copy_within(slot..3, slot + 1);
-                        near[slot] = (bi, dist);
-                    }
-                }
-
-                let mut b_indices = [0u32; 4];
-                let mut b_weights = [0.0f32; 4];
-                let mut total_w = 0.0f32;
-
-                for (slot, &(b_idx, dist)) in near.iter().enumerate() {
-                    if !dist.is_finite() {
-                        break;
-                    }
-                    b_indices[slot] = b_idx as u32;
-                    let w = 1.0 / (dist + 0.05);
-                    b_weights[slot] = w;
-                    total_w += w;
-                }
-
-                if total_w > 1e-6 {
-                    for w in &mut b_weights {
-                        *w /= total_w;
-                    }
-                } else {
-                    b_weights[0] = 1.0;
-                }
-
-                v.bone_indices = b_indices;
-                v.bone_weights = b_weights;
-            }
-        }
-
-        for (geo, mesh) in geometries
-            .iter_mut()
-            .filter(|g| g.mesh.is_some())
-            .zip(meshes.iter())
-        {
-            geo.mesh = Some(mesh.clone());
-        }
+        // ponytail: synthetic clips (idle/walk/attack on bone 0) until igAnimation2 is decoded.
+        let (lo, hi) = meshes
+            .iter()
+            .flat_map(|m| &m.vertices)
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+                (lo.min(v.position[1]), hi.max(v.position[1]))
+            });
+        let h = if hi > lo { hi - lo } else { 1.5 }.max(0.1);
 
         let make_track = |b_idx: usize, y_offset: f32, angle: f32| -> BoneTrack {
             let half = (angle * 0.5).sin();
@@ -3441,7 +3259,6 @@ impl IgbModel {
         let walk_clip = AnimationClip::new("walk", 1.0, vec![make_track(0, 0.06 * h, 0.08)]);
         let attack_clip = AnimationClip::new("attack", 0.8, vec![make_track(0, 0.02 * h, 0.15)]);
         let animations = vec![idle_clip, walk_clip, attack_clip];
-        let skeletons = vec![skeleton];
 
         let header = IgbHeader {
             magic: [b'I', b'G', b'Z', 1],
@@ -3669,6 +3486,7 @@ impl IgbModel {
             vertices,
             indices,
             material_name: None,
+            skeleton: None,
         })
     }
 
@@ -3931,6 +3749,7 @@ impl IgbModel {
             vertices,
             indices: tris,
             material_name: Some("mat_gx".to_string()),
+            skeleton: None,
         })
     }
 }
@@ -4450,6 +4269,7 @@ mod tests {
             vertices: vec![],
             indices: vec![],
             material_name: None,
+            skeleton: None,
         };
 
         let geo = IgbGeometryNode {
@@ -4640,16 +4460,6 @@ mod tests {
         assert_eq!(skeleton.get_bone_index("root"), Some(0));
         assert_eq!(skeleton.get_bone_index("spine"), Some(1));
 
-        let bytes = skeleton.serialize_binary(IgbEndian::Little);
-        let parsed_skel = IgbModel::parse_skeleton(&bytes, "test_skel", IgbEndian::Little)
-            .expect("Parse skeleton");
-        assert_eq!(parsed_skel.bones.len(), 2);
-        assert_eq!(parsed_skel.bones[0].name, "root");
-        assert_eq!(parsed_skel.bones[1].name, "spine");
-        assert_eq!(parsed_skel.bones[1].parent, Some(0));
-        assert_eq!(parsed_skel.bones[1].local_transform[13], 2.0);
-        assert_eq!(parsed_skel.bones[1].inverse_bind_pose[13], -2.0);
-
         let clip = AnimationClip::new(
             "walk",
             2.0,
@@ -4823,188 +4633,89 @@ mod tests {
         igz
     }
 
-    #[test]
-    fn test_extract_real_character_skeleton_crocky() {
-        let p1 = std::path::Path::new("assets/files/character/462_Water_Crocky.bld");
-        let p2 = std::path::Path::new("../../assets/files/character/462_Water_Crocky.bld");
-        let bytes = if p1.exists() {
-            std::fs::read(p1).unwrap()
-        } else if p2.exists() {
-            std::fs::read(p2).unwrap()
-        } else {
-            create_test_character_igz(&[
-                "j_root",
-                "j_pelvis",
-                "j_spine",
-                "j_head",
-                "j_leftarm",
-                "j_rightarm",
-            ])
-        };
-
-        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse crocky");
-        let (min_pt, max_pt) = model.vertex_bounds();
-        println!(
-            "Crocky bounds: min={:?}, max={:?}, height={}",
-            min_pt,
-            max_pt,
-            max_pt[1] - min_pt[1]
-        );
-        assert!(!model.skeletons.is_empty(), "Skeleton must be extracted");
-        let skel = &model.skeletons[0];
-        assert!(!skel.bones.is_empty(), "Bones must be non-empty");
-        assert!(skel.bones[0].parent.is_none(), "Root must have no parent");
-        for (i, b) in skel.bones.iter().enumerate().skip(1) {
-            assert!(
-                b.parent.is_some_and(|p| p < skel.bones.len()),
-                "Bone {} parent must be valid index",
-                i
-            );
-            assert!(
-                b.inverse_bind_pose[0].is_finite() && b.inverse_bind_pose[15].is_finite(),
-                "Inverse bind matrix must be valid"
-            );
-        }
-        assert!(!model.animations.is_empty(), "Animation clips generated");
-        assert!(model.animations.iter().any(|a| a.name == "idle"));
-        assert!(model.animations.iter().any(|a| a.name == "walk"));
-        assert!(model.animations.iter().any(|a| a.name == "attack"));
+    fn read_character_bld(name: &str) -> Option<Vec<u8>> {
+        use crate::archive::ArchiveMount;
+        let p = ["assets/files/character", "../../assets/files/character"]
+            .iter()
+            .map(|d| std::path::Path::new(d).join(format!("{name}.bld")))
+            .find(|p| p.exists())?;
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).ok()?;
+        mount.read_file("level.bld").ok()
     }
 
     #[test]
-    fn test_extract_real_character_skeleton_kaos() {
-        let p1 = std::path::Path::new("assets/files/character/1010_Kaos.bld");
-        let p2 = std::path::Path::new("../../assets/files/character/1010_Kaos.bld");
-        let bytes = if p1.exists() {
-            std::fs::read(p1).unwrap()
-        } else if p2.exists() {
-            std::fs::read(p2).unwrap()
-        } else {
-            create_test_character_igz(&["root", "pelvis", "spine", "head", "left_arm", "right_arm"])
-        };
+    fn test_no_skeleton_without_igskeleton2() {
+        let bytes = create_test_character_igz(&["j_root", "j_pelvis", "j_head"]);
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse generic");
+        assert!(model.skeletons.is_empty(), "no synthetic rig");
+        assert!(model.meshes.iter().all(|m| m.skeleton.is_none()));
+        assert!(model.animations.iter().any(|a| a.name == "idle"));
+        let empty = Skeleton::default();
+        assert!(model.animations[0].sample_pose(0.5, &empty).is_empty());
+    }
 
-        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
-        let (min_pt, max_pt) = model.vertex_bounds();
-        println!(
-            "Kaos bounds: min={:?}, max={:?}, height={}",
-            min_pt,
-            max_pt,
-            max_pt[1] - min_pt[1]
-        );
-        assert!(!model.skeletons.is_empty(), "Kaos skeleton extracted");
-        assert!(!model.meshes.is_empty(), "Kaos meshes present");
-        for mesh in &model.meshes {
-            for v in &mesh.vertices {
-                let sum: f32 = v.bone_weights.iter().sum();
-                assert!(
-                    (sum - 1.0).abs() < 1e-3,
-                    "Kaos vertex weights must normalize to 1.0 (got {})",
-                    sum
-                );
+    #[test]
+    fn test_igskeleton2_spyro() {
+        let Some(bytes) = read_character_bld("016_Spyro") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        // Body, tail and a second tail rig.
+        assert_eq!(model.skeletons.len(), 3);
+        let skel = &model.skeletons[0];
+        assert_eq!(skel.bones.len(), 50);
+        assert_eq!(skel.bones[0].name, "Unnamed bone");
+        assert_eq!(skel.get_bone_index("J_root"), Some(2));
+        assert_eq!(skel.bones[5].name, "J_head");
+        assert_eq!(skel.bones[5].parent, Some(4));
+        assert_eq!(skel.bones.iter().filter(|b| b.parent.is_none()).count(), 1);
+        let world = AnimationClip::new("bind", 0.0, vec![]).sample_global_transforms(0.0, skel);
+        for (i, b) in skel.bones.iter().enumerate() {
+            assert!(b.parent.is_none_or(|p| p < i));
+            let id = mat4_mul(&world[i], &b.inverse_bind_pose);
+            for (k, v) in id.iter().enumerate() {
+                let e = if k % 5 == 0 { 1.0 } else { 0.0 };
+                assert!((v - e).abs() < 1e-3, "bone {i} bind * ibp != I: {id:?}");
             }
         }
-    }
+        // J_root world position from IBP (row-sum of local translations).
+        assert!((world[2][13] - 0.624).abs() < 1e-3);
 
-    #[test]
-    fn test_extract_generic_character_skeleton() {
-        let bytes = create_test_character_igz(&["geo_mesh", "mat_hero", "dummy"]);
-        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse generic");
-        assert!(!model.skeletons.is_empty(), "Generic skeleton extracted");
-        let skel = &model.skeletons[0];
-        assert_eq!(skel.bones.len(), 6, "Humanoid rig has 6 bones");
-        assert_eq!(skel.bones[0].name, "Root");
-        assert_eq!(skel.bones[1].name, "Pelvis");
-        assert_eq!(skel.bones[2].name, "Spine");
-        assert_eq!(skel.bones[3].name, "Head");
-        assert_eq!(skel.bones[4].name, "Left Arm");
-        assert_eq!(skel.bones[5].name, "Right Arm");
-
-        for mesh in &model.meshes {
-            for v in &mesh.vertices {
-                let sum: f32 = v.bone_weights.iter().sum();
-                assert!((sum - 1.0).abs() < 1e-3, "Weights must normalize to 1.0");
-                for &idx in &v.bone_indices {
-                    assert!((idx as usize) < skel.bones.len(), "Bone index in bounds");
+        let skinned: Vec<_> = model
+            .meshes
+            .iter()
+            .filter(|m| m.skeleton.is_some())
+            .collect();
+        assert_eq!(skinned.len(), 6, "all igGeometryAttr bodies are linked");
+        for m in &skinned {
+            let n = model.skeletons[m.skeleton.unwrap()].bones.len() as u32;
+            for v in &m.vertices {
+                for (&i, &w) in v.bone_indices.iter().zip(&v.bone_weights) {
+                    assert!(w == 0.0 || i < n, "{}: bone {i} >= {n}", m.name);
                 }
             }
         }
+        assert!(!model.images.is_empty() && model.images[0].width > 0);
     }
 
     #[test]
-    fn test_extract_real_character_spyro_mesh_and_skeleton() {
-        let p1 = std::path::Path::new("assets/files/character/016_Spyro.bld");
-        let p2 = std::path::Path::new("../../assets/files/character/016_Spyro.bld");
-        let bytes = if p1.exists() {
-            std::fs::read(p1).unwrap()
-        } else if p2.exists() {
-            std::fs::read(p2).unwrap()
-        } else {
-            create_test_character_igz(&[
-                "j_root", "j_pelvis", "j_spine", "j_head", "j_wing_l", "j_wing_r", "j_tail",
-            ])
+    fn test_igskeleton2_palette_slot_remap() {
+        let Some(bytes) = read_character_bld("476_Artichoke") else {
+            return;
         };
-
-        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
-        assert!(!model.meshes.is_empty(), "Spyro must have meshes");
-        let (min_pt, max_pt) = model.vertex_bounds();
-        let height = max_pt[1] - min_pt[1];
-        assert!(height > 0.0, "Spyro mesh height must be positive");
-        assert!(min_pt[0].is_finite() && max_pt[0].is_finite());
-
-        let total_verts: usize = model.meshes.iter().map(|m| m.vertices.len()).sum();
-        let total_indices: usize = model.meshes.iter().map(|m| m.indices.len()).sum();
-        assert!(total_verts >= 3, "Spyro vertices must be >= 3");
-        assert!(total_indices >= 3, "Spyro indices must be >= 3");
-
-        for mesh in &model.meshes {
-            for v in &mesh.vertices {
-                assert!(
-                    v.position[0].is_finite()
-                        && v.position[1].is_finite()
-                        && v.position[2].is_finite()
-                );
-                assert!(
-                    v.normal[0].is_finite() && v.normal[1].is_finite() && v.normal[2].is_finite()
-                );
-                assert!(v.uv[0].is_finite() && v.uv[1].is_finite());
-                let sum: f32 = v.bone_weights.iter().sum();
-                assert!((sum - 1.0).abs() < 1e-3, "Spyro weights must sum to ~1.0");
-            }
-            for &idx in &mesh.indices {
-                assert!(
-                    (idx as usize) < mesh.vertices.len(),
-                    "Index in vertex bounds"
-                );
-            }
-        }
-
-        assert!(
-            !model.skeletons.is_empty(),
-            "Spyro skeleton must be extracted"
-        );
-        let skel = &model.skeletons[0];
-        assert!(skel.bones.len() >= 6, "Spyro skeleton must have >= 6 bones");
-        assert!(skel.bones[0].parent.is_none(), "Root bone has no parent");
-        for (i, b) in skel.bones.iter().enumerate().skip(1) {
-            assert!(
-                b.parent.is_some_and(|p| p < skel.bones.len()),
-                "Spyro bone {} parent must be valid",
-                i
-            );
-        }
-
-        if p1.exists() || p2.exists() {
-            assert!(
-                !model.textures.is_empty(),
-                "Spyro textures extracted from igImage2"
-            );
-            assert!(
-                !model.images.is_empty(),
-                "Spyro images extracted from igImage2"
-            );
-            assert!(model.images[0].width > 0 && model.images[0].height > 0);
-            assert!(model.images[0].texture_size > 0);
-        }
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse artichoke");
+        let eyes = model
+            .meshes
+            .iter()
+            .filter(|m| m.name.starts_with("igGeometryAttr_"))
+            .nth(1)
+            .expect("FoodFight_Eyes");
+        let skel = &model.skeletons[eyes.skeleton.expect("eyes skinned")];
+        // Palette slot 0x19 is blend index 25 = bone 26 `J_eye_R`.
+        let v = eyes.vertices[0];
+        assert_eq!(v.bone_weights[3], 1.0);
+        assert_eq!(skel.bones[v.bone_indices[3] as usize].name, "J_eye_R");
     }
 
     #[test]
@@ -5271,7 +4982,7 @@ mod tests {
         let eye = body[1].vertices[0];
         assert_eq!(
             (eye.bone_indices, eye.bone_weights),
-            ([0, 0, 0, 0x19], [0.0, 0.0, 0.0, 1.0])
+            ([1, 1, 1, 26], [0.0, 0.0, 0.0, 1.0])
         );
     }
 

@@ -657,6 +657,7 @@ mod tests {
                 ],
                 indices: vec![0, 1, 2],
                 material_name: None,
+                skeleton: None,
             }
         };
 

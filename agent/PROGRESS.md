@@ -25,7 +25,12 @@ Single source of truth for progress. Update this file; do not add per-task fragm
   - IB = GX `0x98` strips, k repeated u8/u16 indices per vertex; width/k probed (verified on all 1622 attrs in `files/character`).
   - Blend weights (usage 6, u8x4 unorm, sum `0xff`, normalized) and indices (usage 8, u8x4) stored in `bone_weights`/`bone_indices`. Indices are bone-palette slots, not skeleton bones (eyes: slot `0x19`, weight in lane 3).
 - [x] GX PNMTXIDX (VCD bit 0) stored as `bone_indices[0] = byte / 3` (palette slot); TEX0-7MTXIDX still skipped.
-- [x] Synthetic nearest-bone weighting only applied to meshes without decoded blend data.
+- [x] `igSkeleton2` decode (`IgbModel::decode_skeleton2`), verified on all 714 character files (671 skeletons, 15576 bones):
+  - Skeleton `+0x08` name, `+0x0c` -> `igSkeletonBoneList` (`+0x08` count, `+0x14` -> ptr array), `+0x14` -> inverse bind matrices (column-major 4x4, indexed by blend index; count == skinned bones).
+  - `igSkeletonBone` (0x20): `+0x08` name, `+0x0c` parent i32 (always < self), `+0x10` blend index i32 (-1 = unskinned, bone 0 `Unnamed bone`), `+0x14` translation f32x3 (parent-local; scaled rigs differ, so bind pose = inverse(IBP)).
+  - Mesh link (`skinned_attr_links`): `tfbPhysicsBody` `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` -> skeleton; `+0x30` -> `tfbBodyEntityInfo` `+0x14` -> `DrawableList` -> `Drawable` `+0x0c` -> `igGeometryAttr` (1630/1630 linked). `IgbMesh.skeleton` holds the index.
+  - Palette `tfbBodyEntityInfo` `+0x24` -> `igIntListList` is identity in every file, so palette slot == blend index; remapped to bone index at decode.
+- [x] Synthetic rig and nearest-bone weighting removed; no `igSkeleton2` = empty `skeletons`.
 - [x] Textures: CMPR (`dxt1_tile_big_wii`) and DXT1, `igImage2` `EXID`/`TMHN`.
 - [x] Companion texture pairing: `<name>.bld` resolves `<name>.arc` (`AssetLoader::load_companion_texture_rgba`).
 - [x] Audio: DSP ADPCM, FSB5.
@@ -65,7 +70,7 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 
 ## Known gaps
 - CLR1, NBT3 binormal/tangent, TEX matrix-index bytes: parsed past, not stored.
-- Decoded `bone_indices` are palette slots and can exceed the synthetic 6-bone rig; map via `igSkeleton2` before feeding Bevy joints.
+- `igWiiGeometry` PNMTXIDX slots (`bone_indices[0]`) not yet linked to a skeleton (`IgbMesh.skeleton = None`).
 - `transform_dir` ignores non-uniform scale (no inverse-transpose).
 - Skinning not wired in Bevy: viewer `bone_count` hardcoded to 32 (`viewer.rs`).
 - Interpolation not visually verified at 144Hz in GUI. `Update` writes to interpolated entities are dropped at the next tick (only viewer turntable does this; harmless).
@@ -74,11 +79,11 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 
 ## Reverse engineering roadmap (ordered)
 
-Current gaps: skeleton is a synthetic 6-bone rig (`igb.rs` `rig_defs`), clips are synthetic idle/walk/attack, `main.dol` is converted to ELF but not analyzed, gameplay constants are guessed.
+Current gaps: clips are synthetic idle/walk/attack on bone 0, `main.dol` is converted to ELF but not analyzed, gameplay constants are guessed.
 
 ### Phase 1 (priority) - Skinning & animation
 - [x] Store GX matrix-index bytes per vertex + `igGeometryAttr` blend weights/indices.
-- [ ] Decode real `igSkeleton2`: bone names, parents, inverse bind poses. Drop synthetic rig.
+- [x] Decode real `igSkeleton2`: bone names, parents, inverse bind poses. Drop synthetic rig.
 - [ ] Decode `igAnimation2` tracks (quantized quats, key times). Reference: sampler function in DOL.
 - [ ] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`.
 - Done: Spyro idle animates in `--viewer`.

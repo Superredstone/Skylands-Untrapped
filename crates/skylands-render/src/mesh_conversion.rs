@@ -1017,6 +1017,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2],
             material_name: None,
+            skeleton: None,
         };
 
         let bevy_mesh = igb_mesh_to_bevy(&igb);
@@ -1040,6 +1041,7 @@ mod tests {
             ],
             indices: vec![0, 1],
             material_name: None,
+            skeleton: None,
         };
 
         let normalized = normalize_model_mesh(&igb, 1.8);
@@ -1145,6 +1147,7 @@ mod tests {
             ],
             indices: vec![0, 1],
             material_name: None,
+            skeleton: None,
         };
         let sub2 = IgbMesh {
             name: "hat".to_string(),
@@ -1166,6 +1169,7 @@ mod tests {
             ],
             indices: vec![0, 1],
             material_name: None,
+            skeleton: None,
         };
 
         let combined = combine_or_normalize_model_meshes(&[sub1, sub2], Some(2.0));
