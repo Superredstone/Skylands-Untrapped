@@ -23,7 +23,9 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] `igGeometryAttr` decode (`IgbModel::decode_geometry_attr`): skinned character bodies (e.g. `FoodFight_Body`, 1612 verts) live here, not in `igWiiGeometry` (accessories only).
   - Attr `+0x10` VB, `+0x14` IB. VB/IB data via TMHN handle at `+0x14`. VF elements (12 B, `0x2c` end): POS s16x3, NRM s8x3, UV s16x2; shift from VB `+0x24` table. Streams 32-byte aligned.
   - IB = GX `0x98` strips, k repeated u8/u16 indices per vertex; width/k probed (verified on all 1622 attrs in `files/character`).
-  - Blend weights/indices (usage 6/8) parsed past, not stored.
+  - Blend weights (usage 6, u8x4 unorm, sum `0xff`, normalized) and indices (usage 8, u8x4) stored in `bone_weights`/`bone_indices`. Indices are bone-palette slots, not skeleton bones (eyes: slot `0x19`, weight in lane 3).
+- [x] GX PNMTXIDX (VCD bit 0) stored as `bone_indices[0] = byte / 3` (palette slot); TEX0-7MTXIDX still skipped.
+- [x] Synthetic nearest-bone weighting only applied to meshes without decoded blend data.
 - [x] Textures: CMPR (`dxt1_tile_big_wii`) and DXT1, `igImage2` `EXID`/`TMHN`.
 - [x] Companion texture pairing: `<name>.bld` resolves `<name>.arc` (`AssetLoader::load_companion_texture_rgba`).
 - [x] Audio: DSP ADPCM, FSB5.
@@ -62,7 +64,8 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - Hub headless load: 91 s to 15 s (debug). Remaining: LZMA + GX decode.
 
 ## Known gaps
-- CLR1, NBT3 binormal/tangent, matrix-index bytes: parsed past, not stored.
+- CLR1, NBT3 binormal/tangent, TEX matrix-index bytes: parsed past, not stored.
+- Decoded `bone_indices` are palette slots and can exceed the synthetic 6-bone rig; map via `igSkeleton2` before feeding Bevy joints.
 - `transform_dir` ignores non-uniform scale (no inverse-transpose).
 - Skinning not wired in Bevy: viewer `bone_count` hardcoded to 32 (`viewer.rs`).
 - Interpolation not visually verified at 144Hz in GUI. `Update` writes to interpolated entities are dropped at the next tick (only viewer turntable does this; harmless).
@@ -74,7 +77,7 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 Current gaps: skeleton is a synthetic 6-bone rig (`igb.rs` `rig_defs`), clips are synthetic idle/walk/attack, `main.dol` is converted to ELF but not analyzed, gameplay constants are guessed.
 
 ### Phase 1 (priority) - Skinning & animation
-- [ ] Store GX matrix-index bytes per vertex (currently parsed past).
+- [x] Store GX matrix-index bytes per vertex + `igGeometryAttr` blend weights/indices.
 - [ ] Decode real `igSkeleton2`: bone names, parents, inverse bind poses. Drop synthetic rig.
 - [ ] Decode `igAnimation2` tracks (quantized quats, key times). Reference: sampler function in DOL.
 - [ ] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`.

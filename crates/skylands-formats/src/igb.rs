@@ -3363,7 +3363,12 @@ impl IgbModel {
         // ponytail: >64 geometries is treated as an unskinned level and keeps default weights;
         // replace with real skin data (matrix indices in the GX display list) once decoded.
         let is_level = geometries.len() > LEVEL_GEOMETRY_THRESHOLD;
-        for mesh in meshes.iter_mut().filter(|_| !is_level) {
+        let has_skin = |m: &IgbMesh| {
+            m.vertices
+                .iter()
+                .any(|v| v.bone_indices != [0; 4] || v.bone_weights != [1.0, 0.0, 0.0, 0.0])
+        };
+        for mesh in meshes.iter_mut().filter(|m| !is_level && !has_skin(m)) {
             for v in &mut mesh.vertices {
                 let p = v.position;
                 // Keep the 4 nearest bones (ascending, stable on ties).
@@ -3549,8 +3554,8 @@ impl IgbModel {
             let shift = shifts.get(e[6] as usize / 4).copied().unwrap_or(0).min(30);
             let scale = 1.0 / (1u32 << shift) as f32;
             let (base, stride) = (*bases.get(stream)?, *strides.get(stream)? as usize);
-            // ponytail: color and blend weights/indices skipped; decode weights+indices
-            // against the bone palette when SkinnedMesh lands.
+            // ponytail: color skipped. Blend indices are bone-palette slots, not
+            // skeleton bones; map them once igSkeleton2 is decoded.
             for (i, v) in vertices.iter_mut().enumerate() {
                 let o = base + i * stride + off;
                 match (usage, set) {
@@ -3567,6 +3572,18 @@ impl IgbModel {
                         for c in 0..2 {
                             v.uv[c] = be16(o + c * 2)? as f32 * scale;
                         }
+                    }
+                    (6, 0) => {
+                        let b = vdata.get(o..o + 4)?;
+                        let sum: u32 = b.iter().map(|&w| w as u32).sum();
+                        if sum > 0 {
+                            v.bone_weights =
+                                [b[0], b[1], b[2], b[3]].map(|w| w as f32 / sum as f32);
+                        }
+                    }
+                    (8, 0) => {
+                        let b = vdata.get(o..o + 4)?;
+                        v.bone_indices = [b[0], b[1], b[2], b[3]].map(u32::from);
                     }
                     _ => {}
                 }
@@ -3726,6 +3743,13 @@ impl IgbModel {
 
                     let first = vertices.len() as u32;
                     for _ in 0..n {
+                        // PNMTXIDX (VCD bit 0) is a row offset into XF matrix memory, 3 rows
+                        // per matrix. ponytail: stored as a palette slot, not a skeleton bone.
+                        let pnmtx = if vcd_lo & 1 == 1 {
+                            *dl.get(i)? as u32 / 3
+                        } else {
+                            0
+                        };
                         let mut p = i + mtx_bytes;
                         let read_idx = |kind: u32, p: &mut usize| -> Option<usize> {
                             match kind {
@@ -3837,7 +3861,7 @@ impl IgbModel {
                             normal,
                             uv,
                             color,
-                            bone_indices: [0, 0, 0, 0],
+                            bone_indices: [pnmtx, 0, 0, 0],
                             bone_weights: [1.0, 0.0, 0.0, 0.0],
                         });
                     }
@@ -5232,6 +5256,23 @@ mod tests {
         assert!(lo[1].abs() < 0.01 && (hi[1] - 2.29).abs() < 0.01);
         assert!((lo[2] + 0.89).abs() < 0.01 && (hi[2] - 0.61).abs() < 0.01);
         assert!(body[0].indices.iter().all(|&i| (i as usize) < 1612));
+        // Blend data (usage 6 u8x4 weights, usage 8 u8x4 palette slots).
+        for v in &body[0].vertices {
+            let sum: f32 = v.bone_weights.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-3);
+        }
+        assert!(body[0].vertices.iter().any(|v| v.bone_indices != [0; 4]));
+        assert!(body[0].vertices.iter().any(|v| v
+            .bone_weights
+            .iter()
+            .filter(|&&w| w > 0.0)
+            .count()
+            >= 2));
+        let eye = body[1].vertices[0];
+        assert_eq!(
+            (eye.bone_indices, eye.bone_weights),
+            ([0, 0, 0, 0x19], [0.0, 0.0, 0.0, 1.0])
+        );
     }
 
     #[test]
@@ -5374,6 +5415,35 @@ mod tests {
     }
 
     #[test]
+    fn test_wii_display_list_pnmtx_index() {
+        // VCD: PNMTXIDX direct + pos idx8. Matrix byte 6 = XF row 6 = matrix slot 2.
+        let mut dl = Vec::new();
+        let cp = |dl: &mut Vec<u8>, reg: u8, val: u32| {
+            dl.push(0x08);
+            dl.push(reg);
+            dl.extend_from_slice(&val.to_be_bytes());
+        };
+        cp(&mut dl, 0x70, 1 | (3 << 1));
+        cp(&mut dl, 0xB0, 6);
+        cp(&mut dl, 0x50, 1 | (2 << 9));
+        cp(&mut dl, 0x60, 0);
+        dl.extend_from_slice(&[0x90, 0x00, 0x03]);
+        for (mtx, idx) in [(6u8, 0u8), (0, 1), (9, 2)] {
+            dl.extend_from_slice(&[mtx, idx]);
+        }
+        let mut vb = Vec::new();
+        for p in [[0i16, 0, 0], [1, 0, 0], [0, 0, 1]] {
+            for c in p {
+                vb.extend_from_slice(&c.to_be_bytes());
+            }
+        }
+
+        let mesh = IgbModel::decode_wii_display_list(&dl, &vb).expect("decodes");
+        let slots: Vec<_> = mesh.vertices.iter().map(|v| v.bone_indices[0]).collect();
+        assert_eq!(slots, vec![2, 0, 3]);
+    }
+
+    #[test]
     fn test_wii_display_list_indexed_clr0() {
         // VAT0: pos xyz s16 shift 0, CLR0 RGBA8; VCD: pos idx8, clr0 idx8.
         let mut dl = Vec::new();
@@ -5438,10 +5508,12 @@ mod tests {
         let data = mount.read_file("level.bld").expect("read level.bld");
         let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
         assert!(model.meshes.len() > 3000, "got {}", model.meshes.len());
+        // igGeometryAttr meshes carry decoded blend data; only GX meshes must stay unskinned.
         assert!(
             model
                 .meshes
                 .iter()
+                .filter(|m| !m.name.starts_with("igGeometryAttr_"))
                 .flat_map(|m| &m.vertices)
                 .all(|v| v.bone_weights == [1.0, 0.0, 0.0, 0.0]),
             "static level must not get synthetic skinning"
