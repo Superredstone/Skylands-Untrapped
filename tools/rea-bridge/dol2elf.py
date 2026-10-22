@@ -20,23 +20,38 @@ def dol_to_elf(dol_bytes: bytes) -> bytes:
     bss_addr, bss_len, entry = struct.unpack(">3I", dol_bytes[0xd8:0xe4])
 
     segments = []
-    # Text segments (PF_X | PF_R = 5)
+    occupied = []
     for i in range(7):
         if text_lens[i] > 0:
             off = text_offsets[i]
             sz = text_lens[i]
             segments.append((text_addrs[i], 5, dol_bytes[off:off+sz], 0))
+            occupied.append((text_addrs[i], text_addrs[i] + sz))
 
-    # Data segments (PF_W | PF_R = 6)
     for i in range(11):
         if data_lens[i] > 0:
             off = data_offsets[i]
             sz = data_lens[i]
             segments.append((data_addrs[i], 6, dol_bytes[off:off+sz], 0))
+            occupied.append((data_addrs[i], data_addrs[i] + sz))
 
-    # BSS segment (PF_W | PF_R = 6)
+    occupied.sort()
+
     if bss_len > 0:
-        segments.append((bss_addr, 6, b"", bss_len))
+        curr = bss_addr
+        bss_end = bss_addr + bss_len
+        for s, e in occupied:
+            if s >= bss_end:
+                break
+            if e <= curr:
+                continue
+            if s > curr:
+                segments.append((curr, 6, b"", s - curr))
+            curr = max(curr, e)
+        if curr < bss_end:
+            segments.append((curr, 6, b"", bss_end - curr))
+
+    segments.sort(key=lambda s: s[0])
 
     # ELF32 Header
     # e_ident: 0x7f, 'E', 'L', 'F', ELFCLASS32 (1), ELFDATA2MSB (2), EV_CURRENT (1), ELFOSABI_NONE (0)
@@ -63,9 +78,8 @@ def dol_to_elf(dol_bytes: bytes) -> bytes:
 
     for vaddr, flags, content, mem_sz in segments:
         if mem_sz > 0 and len(content) == 0:
-            # BSS segment (NOBITS in memory)
-            p_type = 1 # PT_LOAD
-            p_offset = file_offset # Reuse current file offset
+            p_type = 1
+            p_offset = 0
             p_vaddr = p_paddr = vaddr
             p_filesz = 0
             p_memsz = mem_sz

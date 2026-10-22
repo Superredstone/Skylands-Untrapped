@@ -18,6 +18,18 @@ pub fn element_to_color(element: Element) -> Color {
     Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
 }
 
+fn ensure_unskinned_mesh(mesh_handle: &Handle<Mesh>, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    if let Some(m) = meshes.get(mesh_handle) {
+        if m.attribute(Mesh::ATTRIBUTE_JOINT_INDEX).is_some() {
+            let mut unskinned = m.clone();
+            unskinned.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+            unskinned.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+            return meshes.add(unskinned);
+        }
+    }
+    mesh_handle.clone()
+}
+
 #[derive(Resource, Clone, Default)]
 pub struct ModelVisualRegistry {
     pub cache: HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -56,7 +68,9 @@ impl ModelVisualRegistry {
         }?;
 
         let model = loader.load_igb(&resolved_path).ok()?;
-        let bevy_mesh = igb_model_to_bevy_mesh(&model, target_height);
+        let mut bevy_mesh = igb_model_to_bevy_mesh(&model, target_height);
+        bevy_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+        bevy_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
         let mesh_handle = meshes.add(bevy_mesh);
 
         let mut base_color_texture = None;
@@ -309,8 +323,10 @@ pub fn setup_environment_and_assets(
                                     ..default()
                                 });
 
-                                let combined_mesh =
+                                let mut combined_mesh =
                                     combine_or_normalize_model_meshes(&model.meshes, None);
+                                combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+                                combined_mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
                                 let mesh_handle = meshes.add(combined_mesh);
 
                                 commands.spawn((
@@ -545,7 +561,10 @@ pub fn actor_visual_sync_system(
     };
 
     for (entity, ident, maybe_hero, maybe_villain, maybe_prop) in &actor_query {
-        if maybe_hero.is_some() {
+        let is_hero = maybe_hero.is_some();
+        let is_villain = maybe_villain.is_some();
+
+        if is_hero || is_villain {
             let custom_visual = visual_registry.as_mut().and_then(|reg| {
                 reg.get_or_load(
                     ident.character_id,
@@ -569,26 +588,25 @@ pub fn actor_visual_sync_system(
                     commands.entity(entity).remove::<CharacterAnimator>();
                 }
 
-                if let Some(ref mut vs) = viewer_settings {
-                    if vs.viewer_mode {
-                        if let Some(m) = meshes.get(&mesh) {
-                            vs.vert_count = m.count_vertices();
-                            vs.tri_count = m
-                                .indices()
-                                .map(|idx| idx.len() / 3)
-                                .unwrap_or(vs.vert_count / 3);
-                        }
-                        if let Some(ref md) = model_data {
-                            vs.bone_count =
-                                md.skeletons.first().map(|s| s.bones.len()).unwrap_or(0);
+                if is_hero {
+                    if let Some(ref mut vs) = viewer_settings {
+                        if vs.viewer_mode {
+                            if let Some(m) = meshes.get(&mesh) {
+                                vs.vert_count = m.count_vertices();
+                                vs.tri_count = m
+                                    .indices()
+                                    .map(|idx| idx.len() / 3)
+                                    .unwrap_or(vs.vert_count / 3);
+                            }
+                            if let Some(ref md) = model_data {
+                                vs.bone_count =
+                                    md.skeletons.first().map(|s| s.bones.len()).unwrap_or(0);
+                            }
                         }
                     }
                 }
 
-                commands
-                    .entity(entity)
-                    .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
-
+                let mut skinned_applied = false;
                 if let (Some(ref md), Some(ref mut ibp_res)) = (&model_data, &mut ibp_assets) {
                     if let Some(skeleton) = md.skeletons.first() {
                         if !skeleton.bones.is_empty() {
@@ -615,6 +633,8 @@ pub fn actor_visual_sync_system(
                                 .collect();
 
                             commands.entity(entity).insert((
+                                Mesh3d(mesh.clone()),
+                                MeshMaterial3d(mat.clone()),
                                 SkinnedMesh {
                                     inverse_bindposes: ibp_handle,
                                     joints: joints.clone(),
@@ -628,43 +648,22 @@ pub fn actor_visual_sync_system(
                                 },
                             ));
                             commands.entity(entity).add_children(&joints);
+                            skinned_applied = true;
                         }
                     }
                 }
-            } else {
+
+                if !skinned_applied {
+                    let safe_mesh = ensure_unskinned_mesh(&mesh, &mut meshes);
+                    commands
+                        .entity(entity)
+                        .insert((Mesh3d(safe_mesh), MeshMaterial3d(mat)));
+                }
+            } else if is_hero {
                 commands.entity(entity).insert((
                     Mesh3d(assets.hero_mesh.clone()),
                     MeshMaterial3d(assets.hero_material.clone()),
                 ));
-            }
-        } else if maybe_villain.is_some() {
-            let villain_visual = model_registry.as_mut().and_then(|reg| {
-                let resolved_archive;
-                let model_name = if let Some(path) = ident.model_path.as_deref() {
-                    path
-                } else if ident.character_id > 0 {
-                    resolved_archive = resolve_character_model_archive(ident.character_id)?;
-                    &resolved_archive
-                } else {
-                    return None;
-                };
-                let (_, elem) = get_character_info(ident.character_id);
-                let col = Some(element_to_color(elem));
-                reg.get_or_load_model(
-                    model_name,
-                    Some(2.0),
-                    col,
-                    asset_server.as_deref(),
-                    &mut meshes,
-                    &mut materials,
-                    &mut images,
-                )
-            });
-
-            if let Some((mesh, mat)) = villain_visual {
-                commands
-                    .entity(entity)
-                    .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
             } else {
                 commands.entity(entity).insert((
                     Mesh3d(assets.villain_mesh.clone()),
@@ -1387,5 +1386,143 @@ mod tests {
         assert!(mesh_count >= 2, "Must spawn level geometry and pedestal");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_villain_visual_sync_and_mesh_sanitization() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        app.init_resource::<CharacterAssetServer>();
+        app.init_resource::<CharacterVisualRegistry>();
+        app.init_resource::<ModelVisualRegistry>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let fallback_mesh = meshes.add(ProceduralMesh::prop_cube(0.5).to_bevy());
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let fallback_mat = materials.add(StandardMaterial::default());
+
+        let render_assets = RenderMeshAssets {
+            courtyard_mesh: fallback_mesh.clone(),
+            courtyard_material: fallback_mat.clone(),
+            pedestal_mesh: fallback_mesh.clone(),
+            pedestal_material: fallback_mat.clone(),
+            hero_mesh: fallback_mesh.clone(),
+            hero_material: fallback_mat.clone(),
+            villain_mesh: fallback_mesh.clone(),
+            villain_material: fallback_mat.clone(),
+            prop_mesh: fallback_mesh.clone(),
+            prop_material: fallback_mat.clone(),
+            coin_mesh: fallback_mesh.clone(),
+            coin_material: fallback_mat.clone(),
+            gem_mesh: fallback_mesh.clone(),
+            gem_material: fallback_mat.clone(),
+            projectile_mesh: fallback_mesh.clone(),
+            projectile_material: fallback_mat.clone(),
+        };
+        app.insert_resource(render_assets);
+
+        // 1. Verify ensure_unskinned_mesh strips joint attributes
+        let mut skinned_bevy_mesh = ProceduralMesh::prop_cube(1.0).to_bevy();
+        skinned_bevy_mesh.insert_attribute(
+            Mesh::ATTRIBUTE_JOINT_INDEX,
+            bevy::render::mesh::VertexAttributeValues::Uint16x4(vec![
+                [0, 0, 0, 0];
+                skinned_bevy_mesh
+                    .count_vertices()
+            ]),
+        );
+        skinned_bevy_mesh.insert_attribute(
+            Mesh::ATTRIBUTE_JOINT_WEIGHT,
+            vec![[1.0, 0.0, 0.0, 0.0]; skinned_bevy_mesh.count_vertices()],
+        );
+        let skinned_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(skinned_bevy_mesh);
+        assert!(app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&skinned_handle)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_JOINT_INDEX)
+            .is_some());
+
+        let safe_handle = {
+            let mut m = app.world_mut().resource_mut::<Assets<Mesh>>();
+            ensure_unskinned_mesh(&skinned_handle, &mut m)
+        };
+        assert_ne!(safe_handle, skinned_handle);
+        let sanitized = app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(&safe_handle)
+            .unwrap();
+        assert!(sanitized.attribute(Mesh::ATTRIBUTE_JOINT_INDEX).is_none());
+        assert!(sanitized.attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT).is_none());
+
+        // 2. Spawn villain with mock skinned model
+        let bone = skylands_formats::Bone {
+            name: "root".to_string(),
+            parent: None,
+            inverse_bind_pose: skylands_formats::mat4_identity(),
+            local_transform: skylands_formats::mat4_identity(),
+        };
+        let skel = skylands_formats::Skeleton::new(vec![bone], 0);
+        let mock_model = std::sync::Arc::new(skylands_formats::IgbModel {
+            skeletons: vec![skel],
+            animations: vec![skylands_formats::AnimationClip::new("idle", 1.0, vec![])],
+            ..default()
+        });
+
+        let villain_mesh = {
+            let mut m = app.world_mut().resource_mut::<Assets<Mesh>>();
+            m.add(ProceduralMesh::prop_cube(1.0).to_bevy())
+        };
+        let villain_mat = {
+            let mut mats = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            mats.add(StandardMaterial::default())
+        };
+
+        let key = "1010:1010_kaos.bld".to_string();
+        {
+            let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
+            reg.cache
+                .insert(key.clone(), (villain_mesh.clone(), villain_mat.clone()));
+            reg.models.insert(key, mock_model);
+        }
+
+        let villain_entity = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 2010,
+                    character_id: 1010,
+                    name: "Kaos".to_string(),
+                    is_villain: true,
+                    model_path: Some("1010_Kaos.bld".to_string()),
+                    texture_path: None,
+                },
+                skylands_core::Villain,
+            ))
+            .id();
+
+        app.add_systems(Update, actor_visual_sync_system);
+        app.update();
+
+        let skinned = app.world().get::<SkinnedMesh>(villain_entity);
+        assert!(
+            skinned.is_some(),
+            "Villain entity must receive SkinnedMesh when skeleton is present"
+        );
+        let animator = app.world().get::<CharacterAnimator>(villain_entity);
+        assert!(
+            animator.is_some(),
+            "Villain entity must receive CharacterAnimator"
+        );
     }
 }

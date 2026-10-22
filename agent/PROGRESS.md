@@ -85,13 +85,14 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - [x] Decode real `igSkeleton2`: bone names, parents, inverse bind poses. Drop synthetic rig.
 - [x] Decode real character animation tracks: character files use Havok 2013 (`hk_2013.1.0-r1`) spline compressed animations inside `tfbPhysicsAnimation`. Implemented B-spline NURBS curve & quaternion evaluation (POLAR32, THREECOMP40, THREECOMP48).
 - [x] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`. Spawn joint hierarchy, bind `SkinnedMeshInverseBindposes`, add `CharacterAnimator` updating GPU skinning transforms.
+- [x] Enable skinning and animation for villains (`Villain`) via `CharacterVisualRegistry` and sanitize unskinned meshes (`ensure_unskinned_mesh`) to avoid WGPU bind group layout mismatch crashes in Bevy PBR prepass.
 - Done: Spyro idle animates in `--viewer`.
 
 ### Phase 2 - DOL tooling & Alchemy metadata
-- [ ] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway`) + auto-analysis.
-- [ ] Locate `igMetaObject` name strings / registry; map class name to vtable/ctor.
+- [x] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway` / `PowerPC:BE:32:default`) + auto-analysis.
+- [x] Locate `igMetaObject` name strings / registry; map class name to vtable/ctor (1,111 classes mapped via `igMetaObject::Register` at `0x801062e0`).
 - [ ] Dump `igMetaField` tables (name, type, offset, size) for `igWiiGeometry`, `igImage2`, `igEntity`, `igComponent`. Replace guessed `w[n]` indices.
-- [ ] Commit address/name map only (`tools/rea-bridge/symbols.txt`).
+- [x] Commit address/name map only (`tools/rea-bridge/symbols.txt`, 3,336 symbols).
 
 ### Phase 3 - Entities & levels
 - [ ] Decode `igEntity`/component layout in level `.bld`; replace name-heuristic `MarkerKind::from_node_name`.
