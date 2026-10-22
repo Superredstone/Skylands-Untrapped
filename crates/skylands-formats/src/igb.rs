@@ -846,6 +846,17 @@ pub struct Bone {
     pub local_transform: [f32; 16],
 }
 
+impl Default for Bone {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            parent: None,
+            inverse_bind_pose: mat4_identity(),
+            local_transform: mat4_identity(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Skeleton {
     pub bones: Vec<Bone>,
@@ -1190,6 +1201,32 @@ pub struct IgbModel {
     pub meshes: Vec<IgbMesh>,
     pub skeletons: Vec<Skeleton>,
     pub animations: Vec<AnimationClip>,
+}
+
+impl Default for IgbModel {
+    fn default() -> Self {
+        Self {
+            header: IgbHeader {
+                magic: [b'I', b'G', b'Z', 1],
+                version: 8,
+                object_count: 0,
+                string_table_offset: 0,
+                endian: IgbEndian::Big,
+            },
+            directory: Vec::new(),
+            nodes: Vec::new(),
+            geometries: Vec::new(),
+            attr_lists: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffers: Vec::new(),
+            materials: Vec::new(),
+            textures: Vec::new(),
+            images: Vec::new(),
+            meshes: Vec::new(),
+            skeletons: Vec::new(),
+            animations: Vec::new(),
+        }
+    }
 }
 
 impl IgbModel {
@@ -3227,38 +3264,133 @@ impl IgbModel {
             }
         }
 
-        // ponytail: synthetic clips (idle/walk/attack on bone 0) until igAnimation2 is decoded.
-        let (lo, hi) = meshes
-            .iter()
-            .flat_map(|m| &m.vertices)
-            .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
-                (lo.min(v.position[1]), hi.max(v.position[1]))
-            });
-        let h = if hi > lo { hi - lo } else { 1.5 }.max(0.1);
+        let mut animations = Vec::new();
+        if let Some(ref obj_list) = igz_objects {
+            let rd = |o: usize| -> Option<u32> {
+                data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+            };
+            let ptr = |o: usize| -> Option<usize> {
+                let w = rd(o).filter(|&w| w != 0)?;
+                let s = sections.get(((w >> 27) + 1) as usize)?;
+                Some(s.offset + (w & 0x07FF_FFFF) as usize)
+            };
+            let cstr = |o: usize| -> String {
+                ptr(o)
+                    .and_then(|p| data.get(p..))
+                    .map(|s| {
+                        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                        String::from_utf8_lossy(&s[..end]).into_owned()
+                    })
+                    .unwrap_or_default()
+            };
 
-        let make_track = |b_idx: usize, y_offset: f32, angle: f32| -> BoneTrack {
-            let half = (angle * 0.5).sin();
-            let cos_half = (angle * 0.5).cos();
-            BoneTrack {
-                bone_index: b_idx,
-                positions: vec![
-                    Keyframe::new(0.0, [0.0, 0.0, 0.0]),
-                    Keyframe::new(0.5, [0.0, y_offset, 0.0]),
-                    Keyframe::new(1.0, [0.0, 0.0, 0.0]),
-                ],
-                rotations: vec![
-                    Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0]),
-                    Keyframe::new(0.5, [0.0, half, 0.0, cos_half]),
-                    Keyframe::new(1.0, [0.0, 0.0, 0.0, 1.0]),
-                ],
-                scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+            for obj in &obj_list.objects {
+                if obj.type_name.as_deref() != Some("tfbPhysicsAnimation") {
+                    continue;
+                }
+                let raw_name = cstr(obj.offset + 0x08);
+                let Some(raw_sz) = rd(obj.offset + 0x14) else {
+                    continue;
+                };
+                let sz = (raw_sz & 0x07ff_ffff) as usize;
+                let Some(hk_off) = ptr(obj.offset + 0x18) else {
+                    continue;
+                };
+                let Some(hk_data) = data.get(hk_off..hk_off + sz) else {
+                    continue;
+                };
+
+                let stem = std::path::Path::new(&raw_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&raw_name);
+                let name = if let Some(pos) = stem.rfind('_') {
+                    &stem[pos + 1..]
+                } else {
+                    stem
+                };
+                let norm_name = name.to_ascii_lowercase();
+
+                if let Some(clip) =
+                    crate::havok::parse_havok_animation(hk_data, &norm_name, skeletons.first())
+                {
+                    animations.push(clip);
+                }
             }
-        };
+        }
 
-        let idle_clip = AnimationClip::new("idle", 2.0, vec![make_track(0, 0.03 * h, 0.0)]);
-        let walk_clip = AnimationClip::new("walk", 1.0, vec![make_track(0, 0.06 * h, 0.08)]);
-        let attack_clip = AnimationClip::new("attack", 0.8, vec![make_track(0, 0.02 * h, 0.15)]);
-        let animations = vec![idle_clip, walk_clip, attack_clip];
+        if !animations.is_empty() {
+            let mut has_idle = animations.iter().any(|a| a.name == "idle");
+            let mut has_walk = animations.iter().any(|a| a.name == "walk");
+            let mut has_attack = animations.iter().any(|a| a.name == "attack");
+
+            if !has_idle {
+                if let Some(pos) = animations.iter().position(|a| a.name.contains("idle")) {
+                    let mut alias = animations[pos].clone();
+                    alias.name = "idle".to_string();
+                    animations.push(alias);
+                    has_idle = true;
+                }
+            }
+            if !has_walk {
+                if let Some(pos) = animations
+                    .iter()
+                    .position(|a| a.name.contains("walk") || a.name.contains("run"))
+                {
+                    let mut alias = animations[pos].clone();
+                    alias.name = "walk".to_string();
+                    animations.push(alias);
+                    has_walk = true;
+                }
+            }
+            if !has_attack {
+                if let Some(pos) = animations.iter().position(|a| {
+                    a.name.contains("charge")
+                        || a.name.contains("attack")
+                        || a.name.contains("fire")
+                }) {
+                    let mut alias = animations[pos].clone();
+                    alias.name = "attack".to_string();
+                    animations.push(alias);
+                    has_attack = true;
+                }
+            }
+            let _ = (has_idle, has_walk, has_attack);
+        } else {
+            // ponytail: synthetic clips (idle/walk/attack on bone 0) for models without tfbPhysicsAnimation.
+            let (lo, hi) = meshes
+                .iter()
+                .flat_map(|m| &m.vertices)
+                .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+                    (lo.min(v.position[1]), hi.max(v.position[1]))
+                });
+            let h = if hi > lo { hi - lo } else { 1.5 }.max(0.1);
+
+            let make_track = |b_idx: usize, y_offset: f32, angle: f32| -> BoneTrack {
+                let half = (angle * 0.5).sin();
+                let cos_half = (angle * 0.5).cos();
+                BoneTrack {
+                    bone_index: b_idx,
+                    positions: vec![
+                        Keyframe::new(0.0, [0.0, 0.0, 0.0]),
+                        Keyframe::new(0.5, [0.0, y_offset, 0.0]),
+                        Keyframe::new(1.0, [0.0, 0.0, 0.0]),
+                    ],
+                    rotations: vec![
+                        Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0]),
+                        Keyframe::new(0.5, [0.0, half, 0.0, cos_half]),
+                        Keyframe::new(1.0, [0.0, 0.0, 0.0, 1.0]),
+                    ],
+                    scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+                }
+            };
+
+            let idle_clip = AnimationClip::new("idle", 2.0, vec![make_track(0, 0.03 * h, 0.0)]);
+            let walk_clip = AnimationClip::new("walk", 1.0, vec![make_track(0, 0.06 * h, 0.08)]);
+            let attack_clip =
+                AnimationClip::new("attack", 0.8, vec![make_track(0, 0.02 * h, 0.15)]);
+            animations = vec![idle_clip, walk_clip, attack_clip];
+        }
 
         let header = IgbHeader {
             magic: [b'I', b'G', b'Z', 1],
@@ -4697,6 +4829,13 @@ mod tests {
             }
         }
         assert!(!model.images.is_empty() && model.images[0].width > 0);
+        assert!(!model.animations.is_empty(), "Havok animations decoded");
+        assert!(model.animations.iter().any(|a| a.name == "idle"));
+        assert!(model.animations.iter().any(|a| a.name == "walk"));
+        assert!(model.animations.iter().any(|a| a.name == "attack"));
+        let idle = model.animations.iter().find(|a| a.name == "idle").unwrap();
+        assert!((idle.duration - 0.8).abs() < 1e-2);
+        assert_eq!(idle.tracks.len(), 49);
     }
 
     #[test]

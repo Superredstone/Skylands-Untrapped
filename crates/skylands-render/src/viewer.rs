@@ -44,7 +44,7 @@ impl Default for ViewerSettings {
             clip_name: "idle".to_string(),
             vert_count: 1420,
             tri_count: 2480,
-            bone_count: 32,
+            bone_count: 0,
         }
     }
 }
@@ -221,7 +221,15 @@ mod tests {
                 .world_mut()
                 .resource_mut::<crate::CharacterVisualRegistry>();
             let key = format!("16:{}", "016_spyro.bld");
-            reg.cache.insert(key, (hero_mesh, hero_mat));
+            reg.cache.insert(key.clone(), (hero_mesh, hero_mat));
+            let mock_model = std::sync::Arc::new(skylands_formats::IgbModel {
+                skeletons: vec![skylands_formats::Skeleton::new(
+                    vec![skylands_formats::Bone::default(); 50],
+                    0,
+                )],
+                ..default()
+            });
+            reg.models.insert(key, mock_model);
         }
 
         app.world_mut().spawn((
@@ -243,5 +251,6 @@ mod tests {
         let viewer = app.world().resource::<ViewerSettings>();
         assert_eq!(viewer.vert_count, 24);
         assert_eq!(viewer.tri_count, 12);
+        assert_eq!(viewer.bone_count, 50);
     }
 }

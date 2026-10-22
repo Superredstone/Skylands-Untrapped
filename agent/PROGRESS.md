@@ -72,22 +72,20 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - CLR1, NBT3 binormal/tangent, TEX matrix-index bytes: parsed past, not stored.
 - `igWiiGeometry` PNMTXIDX slots (`bone_indices[0]`) not yet linked to a skeleton (`IgbMesh.skeleton = None`).
 - `transform_dir` ignores non-uniform scale (no inverse-transpose).
-- Skinning not wired in Bevy: viewer `bone_count` hardcoded to 32 (`viewer.rs`).
 - Interpolation not visually verified at 144Hz in GUI. `Update` writes to interpolated entities are dropped at the next tick (only viewer turntable does this; harmless).
 - Normal/specular maps not loaded.
 - CLR0 vertex colors not yet visually verified in GUI (Bevy multiplies `ATTRIBUTE_COLOR` into base color).
 
 ## Reverse engineering roadmap (ordered)
 
-Current gaps: clips are synthetic idle/walk/attack on bone 0, `main.dol` is converted to ELF but not analyzed, gameplay constants are guessed.
+Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constants are guessed.
 
 ### Phase 1 (priority) - Skinning & animation
 - [x] Store GX matrix-index bytes per vertex + `igGeometryAttr` blend weights/indices.
 - [x] Decode real `igSkeleton2`: bone names, parents, inverse bind poses. Drop synthetic rig.
-- [ ] Decode `igAnimation2` tracks (quantized quats, key times). Reference: sampler function in DOL.
-- [ ] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`.
+- [x] Decode real character animation tracks: character files use Havok 2013 (`hk_2013.1.0-r1`) spline compressed animations inside `tfbPhysicsAnimation`. Implemented B-spline NURBS curve & quaternion evaluation (POLAR32, THREECOMP40, THREECOMP48).
+- [x] Wire Bevy `SkinnedMesh`, remove hardcoded `bone_count = 32` in `viewer.rs`. Spawn joint hierarchy, bind `SkinnedMeshInverseBindposes`, add `CharacterAnimator` updating GPU skinning transforms.
 - Done: Spyro idle animates in `--viewer`.
-- Field offsets needed here come from targeted DOL lookups (Phase 2 tooling) for these classes only.
 
 ### Phase 2 - DOL tooling & Alchemy metadata
 - [ ] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway`) + auto-analysis.

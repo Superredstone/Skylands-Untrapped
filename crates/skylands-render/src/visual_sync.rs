@@ -3,6 +3,7 @@ use crate::mesh_conversion::{
 };
 use crate::texture_conversion::create_colored_material;
 use bevy::prelude::*;
+use bevy::render::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
@@ -92,9 +93,22 @@ impl ModelVisualRegistry {
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
     pub cache: HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>,
+    pub models: HashMap<String, std::sync::Arc<skylands_formats::igb::IgbModel>>,
 }
 
 impl CharacterVisualRegistry {
+    pub fn get_model(
+        &self,
+        character_id: u16,
+        model_path: Option<&str>,
+    ) -> Option<std::sync::Arc<skylands_formats::igb::IgbModel>> {
+        let bld_name = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))?;
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+        self.models.get(&cache_key).cloned()
+    }
+
     pub fn get_or_load(
         &mut self,
         character_id: u16,
@@ -153,7 +167,8 @@ impl CharacterVisualRegistry {
         });
 
         let pair = (mesh_handle, material_handle);
-        self.cache.insert(cache_key, pair.clone());
+        self.cache.insert(cache_key.clone(), pair.clone());
+        self.models.insert(cache_key, model);
         Some(pair)
     }
 }
@@ -455,6 +470,50 @@ pub fn setup_environment_and_assets(
     });
 }
 
+#[derive(Component)]
+pub struct CharacterAnimator {
+    pub skeleton: skylands_formats::Skeleton,
+    pub animations: Vec<skylands_formats::AnimationClip>,
+    pub current_clip: String,
+    pub elapsed: f32,
+    pub joints: Vec<Entity>,
+}
+
+pub fn character_animation_system(
+    time: Res<Time>,
+    viewer_settings: Option<Res<crate::ViewerSettings>>,
+    mut anim_query: Query<&mut CharacterAnimator>,
+    mut transform_query: Query<&mut Transform>,
+) {
+    let dt = time.delta_secs();
+    let clip_requested = viewer_settings.as_ref().map(|v| v.clip_name.as_str());
+
+    for mut anim in &mut anim_query {
+        anim.elapsed += dt;
+
+        let target_clip_name = clip_requested.unwrap_or(&anim.current_clip);
+        let clip = anim
+            .animations
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(target_clip_name))
+            .or_else(|| anim.animations.iter().find(|a| a.name == "idle"))
+            .or_else(|| anim.animations.first());
+
+        let Some(clip) = clip else {
+            continue;
+        };
+        let global_transforms = clip.sample_global_transforms(anim.elapsed, &anim.skeleton);
+
+        for (i, &joint_entity) in anim.joints.iter().enumerate() {
+            if i < global_transforms.len() {
+                if let Ok(mut tf) = transform_query.get_mut(joint_entity) {
+                    *tf = Transform::from_matrix(Mat4::from_cols_array(&global_transforms[i]));
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn actor_visual_sync_system(
     mut commands: Commands,
@@ -465,7 +524,9 @@ pub fn actor_visual_sync_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut ibp_assets: Option<ResMut<Assets<SkinnedMeshInverseBindposes>>>,
     mut viewer_settings: Option<ResMut<crate::ViewerSettings>>,
+    anim_query: Query<&CharacterAnimator>,
     actor_query: Query<
         (
             Entity,
@@ -495,8 +556,19 @@ pub fn actor_visual_sync_system(
                     &mut images,
                 )
             });
+            let model_data = visual_registry
+                .as_ref()
+                .and_then(|reg| reg.get_model(ident.character_id, ident.model_path.as_deref()));
 
             if let Some((mesh, mat)) = custom_visual {
+                if let Ok(old_anim) = anim_query.get(entity) {
+                    for &j in &old_anim.joints {
+                        commands.entity(j).despawn();
+                    }
+                    commands.entity(entity).remove::<SkinnedMesh>();
+                    commands.entity(entity).remove::<CharacterAnimator>();
+                }
+
                 if let Some(ref mut vs) = viewer_settings {
                     if vs.viewer_mode {
                         if let Some(m) = meshes.get(&mesh) {
@@ -506,11 +578,59 @@ pub fn actor_visual_sync_system(
                                 .map(|idx| idx.len() / 3)
                                 .unwrap_or(vs.vert_count / 3);
                         }
+                        if let Some(ref md) = model_data {
+                            vs.bone_count =
+                                md.skeletons.first().map(|s| s.bones.len()).unwrap_or(0);
+                        }
                     }
                 }
+
                 commands
                     .entity(entity)
                     .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
+
+                if let (Some(ref md), Some(ref mut ibp_res)) = (&model_data, &mut ibp_assets) {
+                    if let Some(skeleton) = md.skeletons.first() {
+                        if !skeleton.bones.is_empty() {
+                            let ibp_mats: Vec<Mat4> = skeleton
+                                .bones
+                                .iter()
+                                .map(|b| Mat4::from_cols_array(&b.inverse_bind_pose))
+                                .collect();
+                            let ibp_handle =
+                                ibp_res.add(SkinnedMeshInverseBindposes::from(ibp_mats));
+                            let joints: Vec<Entity> = skeleton
+                                .bones
+                                .iter()
+                                .map(|b| {
+                                    commands
+                                        .spawn((
+                                            Transform::from_matrix(Mat4::from_cols_array(
+                                                &b.local_transform,
+                                            )),
+                                            Visibility::default(),
+                                        ))
+                                        .id()
+                                })
+                                .collect();
+
+                            commands.entity(entity).insert((
+                                SkinnedMesh {
+                                    inverse_bindposes: ibp_handle,
+                                    joints: joints.clone(),
+                                },
+                                CharacterAnimator {
+                                    skeleton: skeleton.clone(),
+                                    animations: md.animations.clone(),
+                                    current_clip: "idle".to_string(),
+                                    elapsed: 0.0,
+                                    joints: joints.clone(),
+                                },
+                            ));
+                            commands.entity(entity).add_children(&joints);
+                        }
+                    }
+                }
             } else {
                 commands.entity(entity).insert((
                     Mesh3d(assets.hero_mesh.clone()),
@@ -761,6 +881,154 @@ mod tests {
     }
 
     #[test]
+    fn test_character_animation_and_skinning_pipeline() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        app.init_resource::<CharacterAssetServer>();
+        app.init_resource::<CharacterVisualRegistry>();
+        app.init_resource::<ModelVisualRegistry>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let hero_mesh = meshes.add(ProceduralMesh::prop_cube(0.5).to_bevy());
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let hero_mat = materials.add(StandardMaterial::default());
+
+        let render_assets = RenderMeshAssets {
+            courtyard_mesh: hero_mesh.clone(),
+            courtyard_material: hero_mat.clone(),
+            pedestal_mesh: hero_mesh.clone(),
+            pedestal_material: hero_mat.clone(),
+            hero_mesh: hero_mesh.clone(),
+            hero_material: hero_mat.clone(),
+            villain_mesh: hero_mesh.clone(),
+            villain_material: hero_mat.clone(),
+            prop_mesh: hero_mesh.clone(),
+            prop_material: hero_mat.clone(),
+            coin_mesh: hero_mesh.clone(),
+            coin_material: hero_mat.clone(),
+            gem_mesh: hero_mesh.clone(),
+            gem_material: hero_mat.clone(),
+            projectile_mesh: hero_mesh.clone(),
+            projectile_material: hero_mat.clone(),
+        };
+        app.insert_resource(render_assets);
+
+        let bone_0 = skylands_formats::Bone {
+            name: "root".to_string(),
+            parent: None,
+            inverse_bind_pose: skylands_formats::mat4_identity(),
+            local_transform: skylands_formats::mat4_identity(),
+        };
+        let mut bone_1_local = skylands_formats::mat4_identity();
+        bone_1_local[13] = 1.0;
+        let mut bone_1_ibp = skylands_formats::mat4_identity();
+        bone_1_ibp[13] = -1.0;
+        let bone_1 = skylands_formats::Bone {
+            name: "head".to_string(),
+            parent: Some(0),
+            inverse_bind_pose: bone_1_ibp,
+            local_transform: bone_1_local,
+        };
+        let skeleton = skylands_formats::Skeleton::new(vec![bone_0, bone_1], 0);
+
+        let idle_clip = skylands_formats::AnimationClip::new(
+            "idle",
+            1.0,
+            vec![
+                skylands_formats::BoneTrack {
+                    bone_index: 0,
+                    positions: vec![
+                        skylands_formats::Keyframe::new(0.0, [0.0, 0.0, 0.0]),
+                        skylands_formats::Keyframe::new(0.5, [0.0, 0.5, 0.0]),
+                        skylands_formats::Keyframe::new(1.0, [0.0, 0.0, 0.0]),
+                    ],
+                    rotations: vec![skylands_formats::Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0])],
+                    scales: vec![skylands_formats::Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+                },
+                skylands_formats::BoneTrack {
+                    bone_index: 1,
+                    positions: vec![skylands_formats::Keyframe::new(0.0, [0.0, 1.0, 0.0])],
+                    rotations: vec![skylands_formats::Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0])],
+                    scales: vec![skylands_formats::Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+                },
+            ],
+        );
+
+        let mock_model = std::sync::Arc::new(skylands_formats::IgbModel {
+            skeletons: vec![skeleton],
+            animations: vec![idle_clip],
+            ..default()
+        });
+
+        let key = format!("16:{}", "016_spyro.bld");
+        {
+            let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
+            reg.cache
+                .insert(key.clone(), (hero_mesh.clone(), hero_mat.clone()));
+            reg.models.insert(key, mock_model);
+        }
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".to_string(),
+                    is_villain: false,
+                    model_path: Some("016_Spyro.bld".to_string()),
+                    texture_path: None,
+                },
+                Hero,
+            ))
+            .id();
+
+        app.add_systems(
+            Update,
+            (actor_visual_sync_system, character_animation_system),
+        );
+        app.update();
+
+        let root_joint = {
+            let skinned = app.world().get::<SkinnedMesh>(entity);
+            assert!(skinned.is_some(), "Entity must have SkinnedMesh component");
+            let skinned = skinned.unwrap();
+            assert_eq!(skinned.joints.len(), 2, "2 joints spawned for 2 bones");
+
+            let animator = app.world().get::<CharacterAnimator>(entity);
+            assert!(
+                animator.is_some(),
+                "Entity must have CharacterAnimator component"
+            );
+            let animator = animator.unwrap();
+            assert_eq!(animator.current_clip, "idle");
+            assert_eq!(animator.joints.len(), 2);
+            skinned.joints[0]
+        };
+
+        {
+            let mut anim = app
+                .world_mut()
+                .get_mut::<CharacterAnimator>(entity)
+                .unwrap();
+            anim.elapsed = 0.5;
+        }
+        app.update();
+
+        let root_tf = app.world().get::<Transform>(root_joint).unwrap();
+        assert!(
+            (root_tf.translation.y - 0.5).abs() < 1e-2,
+            "Root joint animated to Y=0.5, got {}",
+            root_tf.translation.y
+        );
+    }
+
+    #[test]
     fn test_spyro_mount_and_load_visual_from_bld() {
         let p1 = std::path::Path::new("assets/files/character/016_Spyro.bld");
         let p2 = std::path::Path::new("../../assets/files/character/016_Spyro.bld");
@@ -800,6 +1068,22 @@ mod tests {
             let (mesh_handle, mat_handle) = res.unwrap();
             let loaded_mesh = meshes.get(&mesh_handle).expect("mesh in assets");
             assert!(loaded_mesh.count_vertices() >= 3);
+            assert!(
+                loaded_mesh.attribute(Mesh::ATTRIBUTE_JOINT_INDEX).is_some(),
+                "Skinned character mesh must have JOINT_INDEX attribute"
+            );
+            assert!(
+                loaded_mesh
+                    .attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT)
+                    .is_some(),
+                "Skinned character mesh must have JOINT_WEIGHT attribute"
+            );
+            let model_data = registry
+                .get_model(16, Some("016_Spyro.bld"))
+                .expect("model data in registry");
+            assert!(!model_data.skeletons.is_empty(), "Skeleton present");
+            assert!(!model_data.animations.is_empty(), "Animations present");
+            assert!(model_data.animations.iter().any(|a| a.name == "idle"));
             let loaded_mat = materials.get(&mat_handle).expect("material in assets");
             assert!(
                 loaded_mat.base_color_texture.is_some(),

@@ -1,4 +1,4 @@
-use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
+use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
 use skylands_formats::igb::{transform_point, IgbMesh, IgbModel};
 
@@ -759,6 +759,29 @@ pub fn combine_or_normalize_model_meshes(
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    if combined_vertices
+        .iter()
+        .any(|v| v.bone_weights.iter().any(|&w| w > 0.0))
+    {
+        let joint_indices: Vec<[u16; 4]> = combined_vertices
+            .iter()
+            .map(|v| {
+                [
+                    v.bone_indices[0] as u16,
+                    v.bone_indices[1] as u16,
+                    v.bone_indices[2] as u16,
+                    v.bone_indices[3] as u16,
+                ]
+            })
+            .collect();
+        let joint_weights: Vec<[f32; 4]> =
+            combined_vertices.iter().map(|v| v.bone_weights).collect();
+        bevy_mesh.insert_attribute(
+            BevyMesh::ATTRIBUTE_JOINT_INDEX,
+            VertexAttributeValues::Uint16x4(joint_indices),
+        );
+        bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_JOINT_WEIGHT, joint_weights);
+    }
     bevy_mesh.insert_indices(Indices::U32(combined_indices));
 
     bevy_mesh
@@ -949,6 +972,29 @@ pub fn igb_model_to_bevy_mesh(model: &IgbModel, target_height: Option<f32>) -> B
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    if combined_vertices
+        .iter()
+        .any(|v| v.bone_weights.iter().any(|&w| w > 0.0))
+    {
+        let joint_indices: Vec<[u16; 4]> = combined_vertices
+            .iter()
+            .map(|v| {
+                [
+                    v.bone_indices[0] as u16,
+                    v.bone_indices[1] as u16,
+                    v.bone_indices[2] as u16,
+                    v.bone_indices[3] as u16,
+                ]
+            })
+            .collect();
+        let joint_weights: Vec<[f32; 4]> =
+            combined_vertices.iter().map(|v| v.bone_weights).collect();
+        bevy_mesh.insert_attribute(
+            BevyMesh::ATTRIBUTE_JOINT_INDEX,
+            VertexAttributeValues::Uint16x4(joint_indices),
+        );
+        bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_JOINT_WEIGHT, joint_weights);
+    }
     bevy_mesh.insert_indices(Indices::U32(combined_indices));
 
     bevy_mesh
