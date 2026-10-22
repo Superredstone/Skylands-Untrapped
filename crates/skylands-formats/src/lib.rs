@@ -12,12 +12,12 @@ pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use havok::{parse_havok_animation, HAVOK_TAG};
 pub use igb::{
     compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, quat_to_mat4, sample_quat,
-    sample_vec3, slerp_quat, transform_point, AnimationClip, AttrFormat, AttrSemantic, Bone,
-    BoneTrack, IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode,
-    IgbHeader, IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode,
-    IgbTextureRef, IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject,
-    IgzObjectList, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind,
-    SceneInstance, Skeleton,
+    sample_vec3, slerp_quat, transform_point, ActorPlacement, AnimationClip, AttrFormat,
+    AttrSemantic, Bone, BoneTrack, CollisionPrimitive, CollisionShapeType, IgbAttrDesc,
+    IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
+    IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
+    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
+    IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};
 pub use texture::{decode_cmpr, decode_dxt1, decode_dxt1_block, decode_rgb565, TextureError};
@@ -169,5 +169,16 @@ mod tests {
             ga_ib.1,
             crate::igb::meta_fields::ig_geometry_attr::INDEX_BUFFER
         );
+
+        // Verify CollisionInfo and Placement collision fields
+        let col_w = fields
+            .get(&("CollisionInfo".to_string(), "_width".to_string()))
+            .expect("CollisionInfo._width");
+        assert_eq!(col_w.1, crate::igb::meta_fields::collision_info::WIDTH);
+
+        let place_col = fields
+            .get(&("Placement".to_string(), "_collision".to_string()))
+            .expect("Placement._collision");
+        assert_eq!(place_col.1, crate::igb::meta_fields::placement::COLLISION);
     }
 }

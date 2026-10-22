@@ -87,6 +87,18 @@ pub mod meta_fields {
     /// `tfbActorInfo` (0xf8) derives from `Placement` (0xd8).
     pub mod placement {
         pub const SCRIPT: usize = 0xa8;
+        pub const COLLISION: usize = 0xc4;
+    }
+
+    pub mod collision_info {
+        pub const PROPERTIES: usize = 0x18;
+        pub const TRANSFORM: usize = 0x1c;
+        pub const WIDTH: usize = 0x34;
+        pub const HEIGHT: usize = 0x38;
+        pub const LENGTH: usize = 0x3c;
+        pub const WEIGHT: usize = 0x40;
+        pub const REBOUND: usize = 0x44;
+        pub const OBJECT_OWNER: usize = 0x48;
     }
 
     pub mod animation_component {
@@ -391,6 +403,92 @@ impl MarkerKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionShapeType {
+    Box,
+    Cylinder,
+    Capsule,
+    Sphere,
+    Mesh,
+    Unknown(u32),
+}
+
+impl From<u32> for CollisionShapeType {
+    fn from(val: u32) -> Self {
+        match val & 0x07 {
+            0 => CollisionShapeType::Box,
+            1 => CollisionShapeType::Cylinder,
+            2 => CollisionShapeType::Capsule,
+            3 => CollisionShapeType::Sphere,
+            4 => CollisionShapeType::Mesh,
+            other => CollisionShapeType::Unknown(other),
+        }
+    }
+}
+
+/// Analytical bounding collision volume from `CollisionInfo`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollisionPrimitive {
+    pub name: String,
+    pub shape_type: CollisionShapeType,
+    pub local_position: [f32; 3],
+    pub local_rotation_deg: [f32; 3],
+    pub extents: [f32; 3],
+    pub world_transform: [f32; 16],
+    pub is_solid: bool,
+    pub interacts_with_world: bool,
+    pub is_actor_surface: bool,
+}
+
+impl CollisionPrimitive {
+    pub fn world_position(&self) -> [f32; 3] {
+        [
+            self.world_transform[12],
+            self.world_transform[13],
+            self.world_transform[14],
+        ]
+    }
+
+    pub fn to_world_triangles(&self) -> Vec<[[f32; 3]; 3]> {
+        let hx = self.extents[0] * 0.5;
+        let hy = self.extents[1] * 0.5;
+        let hz = self.extents[2] * 0.5;
+        if hx <= 0.0 || hy <= 0.0 || hz <= 0.0 {
+            return Vec::new();
+        }
+
+        let p000 = transform_point(&self.world_transform, [-hx, -hy, -hz]);
+        let p001 = transform_point(&self.world_transform, [-hx, -hy, hz]);
+        let p010 = transform_point(&self.world_transform, [-hx, hy, -hz]);
+        let p011 = transform_point(&self.world_transform, [-hx, hy, hz]);
+        let p100 = transform_point(&self.world_transform, [hx, -hy, -hz]);
+        let p101 = transform_point(&self.world_transform, [hx, -hy, hz]);
+        let p110 = transform_point(&self.world_transform, [hx, hy, -hz]);
+        let p111 = transform_point(&self.world_transform, [hx, hy, hz]);
+
+        vec![
+            // -X (faces -X)
+            [p000, p001, p011],
+            [p000, p011, p010],
+            // +X (faces +X)
+            [p100, p110, p111],
+            [p100, p111, p101],
+            // -Y (faces -Y)
+            [p000, p100, p101],
+            [p000, p101, p001],
+            // +Y (walkable top surface, faces +Y)
+            [p010, p011, p111],
+            [p010, p111, p110],
+            // -Z (faces -Z)
+            [p000, p010, p110],
+            [p000, p110, p100],
+            // +Z (faces +Z)
+            [p001, p101, p111],
+            [p001, p111, p011],
+        ]
+    }
+}
+
 /// One `tfbActorInfo` level placement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorPlacement {
@@ -399,6 +497,7 @@ pub struct ActorPlacement {
     pub rotation_deg: [f32; 3],
     /// `.ai` script path, if the actor has one.
     pub script: Option<String>,
+    pub collision: Option<CollisionPrimitive>,
 }
 
 impl ActorPlacement {
@@ -1378,6 +1477,7 @@ pub struct IgbModel {
     pub meshes: Vec<IgbMesh>,
     pub skeletons: Vec<Skeleton>,
     pub animations: Vec<AnimationClip>,
+    pub collision_primitives: Vec<CollisionPrimitive>,
 }
 
 impl Default for IgbModel {
@@ -1402,6 +1502,7 @@ impl Default for IgbModel {
             meshes: Vec::new(),
             skeletons: Vec::new(),
             animations: Vec::new(),
+            collision_primitives: Vec::new(),
         }
     }
 }
@@ -1494,6 +1595,7 @@ impl IgbModel {
                 meshes,
                 skeletons: Vec::new(),
                 animations: Vec::new(),
+                collision_primitives: Vec::new(),
             });
         }
 
@@ -1523,6 +1625,7 @@ impl IgbModel {
                 meshes,
                 skeletons: Vec::new(),
                 animations: Vec::new(),
+                collision_primitives: Vec::new(),
             });
         }
 
@@ -1698,6 +1801,7 @@ impl IgbModel {
             meshes,
             skeletons,
             animations,
+            collision_primitives: Vec::new(),
         })
     }
 
@@ -2931,6 +3035,11 @@ impl IgbModel {
             .filter(|o| o.type_name.as_deref() == Some("tfbScriptInfo"))
             .map(|o| o.offset)
             .collect();
+        let col_info_offsets: std::collections::HashSet<usize> = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("CollisionInfo"))
+            .map(|o| o.offset)
+            .collect();
         objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
@@ -2942,15 +3051,79 @@ impl IgbModel {
                 let script = ptr(o.offset + meta_fields::placement::SCRIPT)
                     .filter(|p| script_infos.contains(p))
                     .and_then(|p| cstr(p + meta_fields::named_object::NAME));
+                let collision = ptr(o.offset + meta_fields::placement::COLLISION)
+                    .filter(|p| col_info_offsets.contains(p))
+                    .and_then(|col_off| {
+                        if col_off + meta_fields::collision_info::LENGTH + 4 <= data.len() {
+                            let props = Self::read_u32(
+                                data,
+                                col_off + meta_fields::collision_info::PROPERTIES,
+                                endian,
+                            );
+                            let local_position =
+                                vec3(col_off + meta_fields::collision_info::TRANSFORM);
+                            let local_rotation_deg =
+                                vec3(col_off + meta_fields::collision_info::TRANSFORM + 12);
+                            let extents = [
+                                Self::read_f32(
+                                    data,
+                                    col_off + meta_fields::collision_info::WIDTH,
+                                    endian,
+                                ),
+                                Self::read_f32(
+                                    data,
+                                    col_off + meta_fields::collision_info::HEIGHT,
+                                    endian,
+                                ),
+                                Self::read_f32(
+                                    data,
+                                    col_off + meta_fields::collision_info::LENGTH,
+                                    endian,
+                                ),
+                            ];
+                            let actor_xform = {
+                                let mut m = mat4_from_euler_deg(rotation_deg);
+                                m[12..15].copy_from_slice(&position);
+                                m
+                            };
+                            let local_m = {
+                                let mut m = mat4_from_euler_deg(local_rotation_deg);
+                                m[12..15].copy_from_slice(&local_position);
+                                m
+                            };
+                            let world_transform = mat4_mul(&actor_xform, &local_m);
+                            Some(CollisionPrimitive {
+                                name: name.clone(),
+                                shape_type: CollisionShapeType::from(props),
+                                local_position,
+                                local_rotation_deg,
+                                extents,
+                                world_transform,
+                                is_solid: (props & 0x08) != 0,
+                                interacts_with_world: (props & 0x10) != 0,
+                                is_actor_surface: (props & 0x20) != 0,
+                            })
+                        } else {
+                            None
+                        }
+                    });
                 (position.iter().chain(&rotation_deg).all(|v| v.is_finite())).then_some(
                     ActorPlacement {
                         name,
                         position,
                         rotation_deg,
                         script,
+                        collision,
                     },
                 )
             })
+            .collect()
+    }
+
+    pub fn decode_collision_primitives(placements: &[ActorPlacement]) -> Vec<CollisionPrimitive> {
+        placements
+            .iter()
+            .filter_map(|p| p.collision.clone())
             .collect()
     }
 
@@ -3292,11 +3465,13 @@ impl IgbModel {
         let mut geo_transforms = std::collections::HashMap::new();
         let mut actor_placements = Vec::new();
         let mut geo_materials = std::collections::HashMap::new();
+        let mut collision_primitives = Vec::new();
         if let Some(ref list) = igz_objects {
             geo_transforms =
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
+            collision_primitives = Self::decode_collision_primitives(&actor_placements);
         }
 
         // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
@@ -3977,6 +4152,7 @@ impl IgbModel {
             meshes,
             skeletons,
             animations,
+            collision_primitives,
         })
     }
 
@@ -4464,6 +4640,7 @@ mod tests {
             position: [1.0, 2.0, 3.0],
             rotation_deg: [0.0, 90.0, 0.0],
             script: script.map(Into::into),
+            collision: None,
         };
         let s = "C:/tfb/Content/Levels/Level_Hub_2014/Scripts/";
         let crystal = actor("Transit_01", Some(&format!("{s}TransitCrystal.ai")));
@@ -4922,6 +5099,7 @@ mod tests {
             meshes: vec![],
             skeletons: vec![],
             animations: vec![],
+            collision_primitives: vec![],
         };
 
         let instances = model.evaluate_scene_graph();
@@ -5032,6 +5210,7 @@ mod tests {
             meshes: vec![test_mesh],
             skeletons: vec![],
             animations: vec![],
+            collision_primitives: vec![],
         };
 
         let markers = model.extract_level_markers();
@@ -5298,6 +5477,7 @@ mod tests {
             meshes: vec![],
             skeletons: vec![skeleton],
             animations: vec![clip.clone()],
+            collision_primitives: vec![],
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);

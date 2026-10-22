@@ -1,4 +1,5 @@
 use skylands_formats::igb::IgbModel;
+use skylands_formats::CollisionPrimitive;
 use std::collections::HashMap;
 
 // ponytail: basic uniform XZ grid cell size. Upgrade to BVH if static mesh topology warrants hierarchy.
@@ -295,6 +296,7 @@ impl Triangle {
 pub struct CollisionMesh {
     pub triangles: Vec<Triangle>,
     pub bounds: Aabb,
+    pub primitives: Vec<CollisionPrimitive>,
     spatial_grid: HashMap<(i32, i32), Vec<usize>>,
 }
 
@@ -303,6 +305,7 @@ impl CollisionMesh {
         Self {
             triangles: Vec::new(),
             bounds: Aabb::empty(),
+            primitives: Vec::new(),
             spatial_grid: HashMap::new(),
         }
     }
@@ -329,6 +332,7 @@ impl CollisionMesh {
         Self {
             triangles,
             bounds,
+            primitives: Vec::new(),
             spatial_grid,
         }
     }
@@ -371,6 +375,19 @@ impl CollisionMesh {
         let instances = igb.evaluate_scene_graph();
         let mut triangles = Vec::new();
 
+        // 1. Incorporate dedicated analytical collision primitives (boxes, props, obstacles)
+        for prim in &igb.collision_primitives {
+            if prim.is_solid || prim.is_actor_surface {
+                for tri in prim.to_world_triangles() {
+                    let t = Triangle::new(tri[0], tri[1], tri[2]);
+                    if t.is_valid() {
+                        triangles.push(t);
+                    }
+                }
+            }
+        }
+
+        // 2. Filter geometry instances
         let has_col_or_trig = if filter_prefixes {
             let in_geos = igb.geometries.iter().any(|g| {
                 let lower = g.name.to_ascii_lowercase();
@@ -407,6 +424,25 @@ impl CollisionMesh {
                         continue;
                     }
                     if let Some(mesh) = &geo.mesh {
+                        // When no explicit col_/trig_ markers exist, discard 2D vertical billboard cards (foliage/decals)
+                        if !has_col_or_trig && filter_prefixes && mesh.vertices.len() <= 4 {
+                            let mut min_p = [f32::MAX; 3];
+                            let mut max_p = [f32::MIN; 3];
+                            for v in &mesh.vertices {
+                                for c in 0..3 {
+                                    min_p[c] = min_p[c].min(v.position[c]);
+                                    max_p[c] = max_p[c].max(v.position[c]);
+                                }
+                            }
+                            let dx = max_p[0] - min_p[0];
+                            let dy = max_p[1] - min_p[1];
+                            let dz = max_p[2] - min_p[2];
+                            // Vertical billboard quad (standing upright with negligible thickness)
+                            if (dx < 0.05 || dz < 0.05) && dy > 1.0 {
+                                continue;
+                            }
+                        }
+
                         let verts: Vec<[f32; 3]> =
                             mesh.vertices.iter().map(|v| v.position).collect();
                         let sub = Self::from_vertices_and_indices(
@@ -429,7 +465,9 @@ impl CollisionMesh {
             }
         }
 
-        Self::from_triangles(triangles)
+        let mut res = Self::from_triangles(triangles);
+        res.primitives = igb.collision_primitives.clone();
+        res
     }
 
     pub fn synthetic_courtyard() -> Self {
@@ -636,6 +674,7 @@ mod tests {
             meshes: Vec::new(),
             skeletons: Vec::new(),
             animations: Vec::new(),
+            collision_primitives: Vec::new(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {
@@ -695,5 +734,55 @@ mod tests {
         // Unfiltered: all 3 included
         let unfiltered = CollisionMesh::from_igb_filtered(&igb, false);
         assert_eq!(unfiltered.triangles.len(), 3);
+    }
+
+    #[test]
+    fn test_collision_mesh_dedicated_primitives() {
+        use skylands_formats::igb::mat4_identity;
+        use skylands_formats::{CollisionPrimitive, CollisionShapeType};
+
+        let mut igb = IgbModel::default();
+        let mut xform = mat4_identity();
+        xform[12] = 10.0;
+        xform[13] = 0.0;
+        xform[14] = 10.0;
+
+        igb.collision_primitives.push(CollisionPrimitive {
+            name: "Prop_Crate".to_string(),
+            shape_type: CollisionShapeType::Box,
+            local_position: [0.0, 1.0, 0.0],
+            local_rotation_deg: [0.0, 0.0, 0.0],
+            extents: [2.0, 2.0, 2.0],
+            world_transform: {
+                let mut m = xform;
+                m[13] = 1.0;
+                m
+            },
+            is_solid: true,
+            interacts_with_world: true,
+            is_actor_surface: true,
+        });
+
+        let col = CollisionMesh::from_igb(&igb);
+        assert_eq!(col.primitives.len(), 1);
+        assert_eq!(col.triangles.len(), 12);
+
+        // Ground raycast right above crate top (center at [10, 1, 10], half-height 1 -> top y = 2.0)
+        let hit = col.raycast_down([10.0, 5.0, 10.0], 10.0);
+        assert!(hit.is_some());
+        let (y, _) = hit.unwrap();
+        assert!(
+            (y - 2.0).abs() < 1e-4,
+            "Top surface should hit at y=2.0, got {y}"
+        );
+
+        // Sphere pushout against the obstacle's north wall (+Z face at z = 11.0, crate center z=10, half-length 1)
+        let push = col.resolve_sphere([10.0, 1.0, 11.2], 0.5);
+        assert!(
+            push.is_some(),
+            "Must push out sphere penetrating solid crate"
+        );
+        let p = push.unwrap();
+        assert!(p[2] > 0.0, "Push must be outward (+Z), got {:?}", p);
     }
 }

@@ -748,6 +748,20 @@ mod tests {
         assert_eq!(layer.kind, crate::igb::MarkerKind::Collectible);
         assert!(layer.world_transform[0].abs() < 1e-4);
         assert!((layer.world_transform[8] - 1.0).abs() < 1e-4);
+
+        // Dedicated collision primitives decoded from CollisionInfo
+        assert!(
+            model.collision_primitives.len() >= 1200,
+            "expected >= 1200 collision primitives, got {}",
+            model.collision_primitives.len()
+        );
+        let statue_col = model
+            .collision_primitives
+            .iter()
+            .find(|p| p.name == "LL_325_FlynnStatue")
+            .expect("Flynn statue collision");
+        assert_eq!(statue_col.extents, [60.0, 40.0, 11.0]);
+        assert!(statue_col.is_solid);
     }
 
     #[test]

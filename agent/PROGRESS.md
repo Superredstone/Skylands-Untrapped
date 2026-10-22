@@ -110,7 +110,13 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - Campaign progress (`CampaignProgress`): canonical chapter table for Chapters 1..=18, unlocks chapter upon completing previous chapter, tracks visited levels and active chapter.
   - Level swapping lifecycle (`state_transition_update_system`): tagged level entities (`LevelEntity`) despawned on level change, new level geometry/collision/markers loaded via `spawn_level_content`, player teleported to destination spawn while preserving hero/villain state across swap.
   - Visual sync (`LevelRenderMesh` & `level_render_mesh_sync_system`): detects `ActiveLevel` changes, cleans up old level meshes/materials, and instantiates the new level scene graph and textures.
-- [ ] Find dedicated collision data (vs render mesh).
+- [x] Dedicated collision data (vs render mesh):
+  - Architecture: Alchemy level files separate visual render meshes (`igWiiGeometry` with display lists) from collision primitives (`CollisionInfo`, 1,523 in hub).
+  - Actor & prop collision: all 1,260 placed level actors link to dedicated `CollisionInfo` at `Placement._collision` (+0xc4):
+    - `_shapeType` bitfield at +0x18: 0=Box, 1=Cylinder, 2=Capsule, 3=Sphere, 4=Mesh; properties include `_isSolid` (0x08), `_interactsWithWorld` (0x10), `_isActorSurface` (0x20).
+    - `_transform` at +0x1c: local position (xyz) and Euler degrees rotation (xyz).
+    - Extents at +0x34 (`_width`), +0x38 (`_height`), +0x3c (`_length`): full dimensions (e.g. Flynn statue 60x40x11, NPC bounds 3x6x3).
+  - Environment collision separation: `CollisionMesh::from_igb` now separates visual display lists from analytical collision shapes (`CollisionPrimitive`), discarding non-colliding visual elements (vertical billboard foliage cards, flat decals), generating oriented collision boundaries from solid `CollisionInfo` volumes, and storing `CollisionMesh.primitives` for exact prop collision and vertical ground raycasts.
 
 ### Phase 4 - Gameplay logic from DOL
 - [ ] Character stat tables (HP, speed, damage by element/level).
