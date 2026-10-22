@@ -27,6 +27,61 @@ pub enum IgbEndian {
     Big,
 }
 
+pub mod meta_fields {
+    pub mod ig_wii_geometry {
+        pub const DISPLAY_LIST: usize = 0x08;
+        pub const VERTEX_BUFFER: usize = 0x10;
+        pub const ARRAY_BASES: usize = 0x18;
+        pub const VERTEX_COUNTS: usize = 0x24;
+        pub const PRIMITIVE_COUNT: usize = 0x30;
+        pub const PRIMITIVE_LENGTH_COUNT: usize = 0x34;
+        pub const POS_ATTR_DL_STRIDE: usize = 0x38;
+        pub const HAS_COLOR: usize = 0x3c;
+    }
+
+    pub mod ig_image2 {
+        pub const WIDTH: usize = 0x30;
+        pub const HEIGHT: usize = 0x32;
+        pub const DEPTH: usize = 0x34;
+        pub const LEVEL_COUNT: usize = 0x36;
+        pub const IMAGE_COUNT: usize = 0x38;
+        pub const FORMAT: usize = 0x3c;
+        pub const USAGE_DEPRECATED: usize = 0x40;
+        pub const PADDING_DEPRECATED: usize = 0x44;
+        pub const DATA: usize = 0x48;
+        pub const LOCK_COUNT: usize = 0x4c;
+        pub const TEX_HANDLE: usize = 0x50;
+        pub const LOCKED_MEMORY: usize = 0x54;
+        pub const OGL_DISCARD_ORIGINAL_IMAGE: usize = 0x58;
+    }
+
+    pub mod ig_geometry_attr {
+        pub const VERTEX_BUFFER: usize = 0x10;
+        pub const INDEX_BUFFER: usize = 0x14;
+        pub const OFFSET: usize = 0x18;
+        pub const PRIMITIVE_COUNT: usize = 0x1c;
+        pub const VERTEX_ARRAY: usize = 0x20;
+        pub const INDEX_ARRAY: usize = 0x24;
+        pub const IS_DYNAMIC: usize = 0x28;
+    }
+
+    pub mod entity {
+        pub const TRANSFORM: usize = 0x08;
+        pub const LIST_MASK: usize = 0x0c;
+        pub const PARENT_INDEX: usize = 0x10;
+        pub const FLAG_BITS: usize = 0x12;
+    }
+
+    pub mod animation_component {
+        pub const NOW_PLAYING: usize = 0x08;
+        pub const OWNER: usize = 0x14;
+        pub const CURRENT_BLEND_LIST: usize = 0x18;
+        pub const ID_CODE: usize = 0x1c;
+        pub const ANIMATION_SYSTEM: usize = 0x20;
+        pub const VISEME_CODE: usize = 0x24;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IgbHeader {
     pub magic: [u8; 4],
@@ -445,28 +500,53 @@ impl IgzImage2 {
         exid_formats: &[u32],
         tmhn_entries: &[(usize, usize)],
     ) -> Option<Self> {
-        let field_start = if version == 5 {
-            obj_offset + 0x0c
-        } else if version == 9 {
-            obj_offset + 0x34
-        } else {
-            obj_offset + 0x30
-        };
+        let (width_off, height_off, depth_off, level_off, image_off, format_off, data_off) =
+            if version == 5 {
+                (
+                    obj_offset + 0x0c,
+                    obj_offset + 0x0e,
+                    obj_offset + 0x10,
+                    obj_offset + 0x12,
+                    obj_offset + 0x14,
+                    obj_offset + 0x1a,
+                    obj_offset + 0x24,
+                )
+            } else if version == 9 {
+                (
+                    obj_offset + 0x34,
+                    obj_offset + 0x36,
+                    obj_offset + 0x38,
+                    obj_offset + 0x3a,
+                    obj_offset + 0x3c,
+                    obj_offset + 0x42,
+                    obj_offset + 0x4c,
+                )
+            } else {
+                (
+                    obj_offset + meta_fields::ig_image2::WIDTH,
+                    obj_offset + meta_fields::ig_image2::HEIGHT,
+                    obj_offset + meta_fields::ig_image2::DEPTH,
+                    obj_offset + meta_fields::ig_image2::LEVEL_COUNT,
+                    obj_offset + meta_fields::ig_image2::IMAGE_COUNT,
+                    obj_offset + meta_fields::ig_image2::FORMAT + 2,
+                    obj_offset + meta_fields::ig_image2::DATA,
+                )
+            };
 
-        if field_start + 28 > data.len() {
+        if data_off + 4 > data.len() {
             return None;
         }
 
-        let width = IgbModel::read_u16(data, field_start, endian);
-        let height = IgbModel::read_u16(data, field_start + 2, endian);
-        let depth = IgbModel::read_u16(data, field_start + 4, endian);
-        let mipmap_count = IgbModel::read_u16(data, field_start + 6, endian);
-        let array = IgbModel::read_u16(data, field_start + 8, endian);
+        let width = IgbModel::read_u16(data, width_off, endian);
+        let height = IgbModel::read_u16(data, height_off, endian);
+        let depth = IgbModel::read_u16(data, depth_off, endian);
+        let mipmap_count = IgbModel::read_u16(data, level_off, endian);
+        let array = IgbModel::read_u16(data, image_off, endian);
 
-        let exid_idx = IgbModel::read_u16(data, field_start + 14, endian) as usize;
+        let exid_idx = IgbModel::read_u16(data, format_off, endian) as usize;
         let format = exid_formats.get(exid_idx).copied().unwrap_or(0);
 
-        let tmhn_idx = IgbModel::read_u32(data, field_start + 24, endian) as usize;
+        let tmhn_idx = IgbModel::read_u32(data, data_off, endian) as usize;
         let (texture_offset, texture_size) = tmhn_entries.get(tmhn_idx).copied().unwrap_or((0, 0));
 
         Some(Self {
@@ -2995,12 +3075,28 @@ impl IgbModel {
                                     .unwrap_or(&[])
                             };
                             let dl = resolve(
-                                Self::read_u32(slice, 2 * 4, endian),
-                                Self::read_u32(slice, 3 * 4, endian),
+                                Self::read_u32(
+                                    slice,
+                                    meta_fields::ig_wii_geometry::DISPLAY_LIST,
+                                    endian,
+                                ),
+                                Self::read_u32(
+                                    slice,
+                                    meta_fields::ig_wii_geometry::DISPLAY_LIST + 4,
+                                    endian,
+                                ),
                             );
                             let vb = resolve(
-                                Self::read_u32(slice, 4 * 4, endian),
-                                Self::read_u32(slice, 5 * 4, endian),
+                                Self::read_u32(
+                                    slice,
+                                    meta_fields::ig_wii_geometry::VERTEX_BUFFER,
+                                    endian,
+                                ),
+                                Self::read_u32(
+                                    slice,
+                                    meta_fields::ig_wii_geometry::VERTEX_BUFFER + 4,
+                                    endian,
+                                ),
                             );
                             decoded_mesh = Self::decode_wii_display_list(dl, vb).map(|mut m| {
                                 m.name = geo_name.clone();
@@ -3454,8 +3550,8 @@ impl IgbModel {
             data.get(o..o + l)
         };
 
-        let vb = ptr(attr_off + 0x10)?;
-        let ib = ptr(attr_off + 0x14)?;
+        let vb = ptr(attr_off + meta_fields::ig_geometry_attr::VERTEX_BUFFER)?;
+        let ib = ptr(attr_off + meta_fields::ig_geometry_attr::INDEX_BUFFER)?;
         let count = rd(vb + 0x08)? as usize;
         let vdata = blob(vb + 0x14)?;
         let vf = ptr(vb + 0x18)?;

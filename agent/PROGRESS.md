@@ -91,7 +91,7 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 ### Phase 2 - DOL tooling & Alchemy metadata
 - [x] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway` / `PowerPC:BE:32:default`) + auto-analysis.
 - [x] Locate `igMetaObject` name strings / registry; map class name to vtable/ctor (1,111 classes mapped via `igMetaObject::Register` at `0x801062e0`).
-- [ ] Dump `igMetaField` tables (name, type, offset, size) for `igWiiGeometry`, `igImage2`, `igEntity`, `igComponent`. Replace guessed `w[n]` indices.
+- [x] Dump `igMetaField` tables (name, type, offset, size) for `igWiiGeometry`, `igImage2`, `igEntity`, `igComponent`. Replace guessed `w[n]` indices (2,884 fields across 655 classes in `tools/rea-bridge/meta_fields.tsv`; structured `meta_fields` constants in `crates/skylands-formats/src/igb.rs`).
 - [x] Commit address/name map only (`tools/rea-bridge/symbols.txt`, 3,336 symbols).
 
 ### Phase 3 - Entities & levels

@@ -67,7 +67,7 @@ EXTRA_ARGS=()
 if [ "$#" -gt 1 ]; then
     EXTRA_ARGS=("${@:2}")
 else
-    EXTRA_ARGS=(-scriptPath tools/rea-bridge -postScript DumpMetaObjects.java)
+    EXTRA_ARGS=(-scriptPath tools/rea-bridge -postScript DumpMetaObjects.java -postScript DumpMetaFields.java)
 fi
 
 echo "[3/3] Running Ghidra headless analysis..."

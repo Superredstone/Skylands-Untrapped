@@ -11,12 +11,13 @@ pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use havok::{parse_havok_animation, HAVOK_TAG};
 pub use igb::{
-    compose_transform, lerp_vec3, mat4_identity, mat4_mul, quat_to_mat4, sample_quat, sample_vec3,
-    slerp_quat, transform_point, AnimationClip, AttrFormat, AttrSemantic, Bone, BoneTrack,
-    IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
-    IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
-    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
-    IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance, Skeleton,
+    compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, quat_to_mat4, sample_quat,
+    sample_vec3, slerp_quat, transform_point, AnimationClip, AttrFormat, AttrSemantic, Bone,
+    BoneTrack, IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode,
+    IgbHeader, IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode,
+    IgbTextureRef, IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject,
+    IgzObjectList, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind,
+    SceneInstance, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};
 pub use texture::{decode_cmpr, decode_dxt1, decode_dxt1_block, decode_rgb565, TextureError};
@@ -81,6 +82,92 @@ mod tests {
         assert_eq!(
             symbols.get("0x801062e0"),
             Some(&"igMetaObject::Register".to_string())
+        );
+    }
+
+    #[test]
+    fn test_meta_fields_registry() {
+        let fields_path = Path::new("../../tools/rea-bridge/meta_fields.tsv");
+        if !fields_path.exists() {
+            return;
+        }
+
+        let file = File::open(fields_path).expect("open meta_fields.tsv");
+        let reader = BufReader::new(file);
+        let mut fields: HashMap<(String, String), (String, usize, usize)> = HashMap::new();
+
+        for (i, line) in reader.lines().enumerate() {
+            let line = line.expect("read line");
+            if i == 0 {
+                continue;
+            }
+            let p: Vec<&str> = line.split('\t').collect();
+            if p.len() >= 5 {
+                let cls = p[0].to_string();
+                let fld = p[1].to_string();
+                let ty = p[2].to_string();
+                let off = usize::from_str_radix(p[3].trim_start_matches("0x"), 16).unwrap_or(0);
+                let sz = usize::from_str_radix(p[4].trim_start_matches("0x"), 16).unwrap_or(0);
+                fields.insert((cls, fld), (ty, off, sz));
+            }
+        }
+
+        assert!(
+            fields.len() >= 2000,
+            "expected >= 2000 fields, found {}",
+            fields.len()
+        );
+
+        // Verify igWiiGeometry fields match meta_fields constants
+        let dl = fields
+            .get(&("igWiiGeometry".to_string(), "_displayList".to_string()))
+            .expect("igWiiGeometry._displayList");
+        assert_eq!(dl.1, crate::igb::meta_fields::ig_wii_geometry::DISPLAY_LIST);
+
+        let vb = fields
+            .get(&("igWiiGeometry".to_string(), "_vertexBuffer".to_string()))
+            .expect("igWiiGeometry._vertexBuffer");
+        assert_eq!(
+            vb.1,
+            crate::igb::meta_fields::ig_wii_geometry::VERTEX_BUFFER
+        );
+
+        // Verify igImage2 fields match meta_fields constants
+        let width = fields
+            .get(&("igImage2".to_string(), "_width".to_string()))
+            .expect("igImage2._width");
+        assert_eq!(width.1, crate::igb::meta_fields::ig_image2::WIDTH);
+
+        let height = fields
+            .get(&("igImage2".to_string(), "_height".to_string()))
+            .expect("igImage2._height");
+        assert_eq!(height.1, crate::igb::meta_fields::ig_image2::HEIGHT);
+
+        let fmt = fields
+            .get(&("igImage2".to_string(), "_format".to_string()))
+            .expect("igImage2._format");
+        assert_eq!(fmt.1, crate::igb::meta_fields::ig_image2::FORMAT);
+
+        let data = fields
+            .get(&("igImage2".to_string(), "_data".to_string()))
+            .expect("igImage2._data");
+        assert_eq!(data.1, crate::igb::meta_fields::ig_image2::DATA);
+
+        // Verify igGeometryAttr fields match meta_fields constants
+        let ga_vb = fields
+            .get(&("igGeometryAttr".to_string(), "_vertexBuffer".to_string()))
+            .expect("igGeometryAttr._vertexBuffer");
+        assert_eq!(
+            ga_vb.1,
+            crate::igb::meta_fields::ig_geometry_attr::VERTEX_BUFFER
+        );
+
+        let ga_ib = fields
+            .get(&("igGeometryAttr".to_string(), "_indexBuffer".to_string()))
+            .expect("igGeometryAttr._indexBuffer");
+        assert_eq!(
+            ga_ib.1,
+            crate::igb::meta_fields::ig_geometry_attr::INDEX_BUFFER
         );
     }
 }
