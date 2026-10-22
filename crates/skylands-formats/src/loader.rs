@@ -280,10 +280,25 @@ impl AssetLoader {
         let is_level = model_path.to_ascii_lowercase().contains("level");
         let model = self.load_igb(model_path);
         if let Ok(ref m) = model {
-            if let Some(first_img) = m.images.first() {
-                let width = first_img.width as u32;
-                let height = first_img.height as u32;
-                if width > 0 && height > 0 && first_img.texture_size > 0 {
+            // Find best texture image in model.
+            // For characters, prefer full-res diffuse texture (e.g. 512x512, 256x256, 128x128)
+            // over UI cards / icons (e.g. 142x71, 72x72) or tiny mip/LUT entries.
+            let candidate_img = m
+                .images
+                .iter()
+                .filter(|img| {
+                    let w = img.width as u32;
+                    let h = img.height as u32;
+                    // Exclude 2:1 UI cards (e.g. 142x71) and tiny textures
+                    w >= 32 && h >= 32 && img.texture_size > 0 && w != 142 && h != 71
+                })
+                .max_by_key(|img| (img.width as u32) * (img.height as u32))
+                .or_else(|| m.images.first());
+
+            if let Some(target_img) = candidate_img {
+                let width = target_img.width as u32;
+                let height = target_img.height as u32;
+                if width > 0 && height > 0 && target_img.texture_size > 0 {
                     let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
                         if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
                             Arc::new(inner)
@@ -293,9 +308,9 @@ impl AssetLoader {
                     } else {
                         self.load_raw(model_path)?
                     };
-                    let end = (first_img.texture_offset + first_img.texture_size).min(raw.len());
-                    if first_img.texture_offset < end {
-                        let slice = &raw[first_img.texture_offset..end];
+                    let end = (target_img.texture_offset + target_img.texture_size).min(raw.len());
+                    if target_img.texture_offset < end {
+                        let slice = &raw[target_img.texture_offset..end];
                         if let Ok(rgba) = decode_cmpr(slice, width, height) {
                             return Ok((width, height, rgba));
                         }
@@ -655,5 +670,45 @@ mod tests {
 
         let model = loader.load_igb("Level_Hub_2014_01.bld").unwrap();
         assert!(!model.meshes.is_empty());
+    }
+
+    #[test]
+    fn test_character_diffuse_texture_selection() {
+        for char_file in [
+            "462_Water_Crocky.bld",
+            "476_Artichoke.bld",
+            "459_Barbarian.bld",
+            "016_Spyro.bld",
+            "1010_Kaos.bld",
+        ] {
+            let p1 = std::path::Path::new("assets/files/character").join(char_file);
+            let p2 = std::path::Path::new("../../assets/files/character").join(char_file);
+            let p = if p1.exists() {
+                Some(p1)
+            } else if p2.exists() {
+                Some(p2)
+            } else {
+                None
+            };
+
+            let Some(path) = p else { continue };
+            let mut loader = AssetLoader::default();
+            loader.mount(&path).expect("mount character bld");
+
+            let res = loader.load_first_image_rgba(char_file);
+            assert!(res.is_ok(), "must decode image for {char_file}");
+            let (w, h, rgba) = res.unwrap();
+            // Verify resolution is full character diffuse (>= 128x128), not a 142x71 or 72x72 UI card
+            assert!(
+                w >= 128 && h >= 128,
+                "{char_file} must load full diffuse texture, got {w}x{h}"
+            );
+            assert_ne!(
+                (w, h),
+                (142, 71),
+                "{char_file} must not load 142x71 UI card/icon"
+            );
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }
     }
 }

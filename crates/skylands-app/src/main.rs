@@ -65,17 +65,19 @@ struct Args {
     viewer: bool,
 }
 
-pub fn create_mock_portal(char_id: Option<u16>) -> ActivePortal {
+pub fn create_mock_portal(char_id: Option<u16>, include_trap: bool) -> ActivePortal {
     let mut mock = MockPortal::new();
 
-    // 1. Trap slot (slot 0): Kaos Trap (3010) with Kaos villain (1010)
-    let mut b0 = [0u8; 16];
-    b0[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
-    let mut b1 = [0u8; 16];
-    b1[0..2].copy_from_slice(&3010u16.to_le_bytes());
-    b1[2..4].copy_from_slice(&1010u16.to_le_bytes());
-    let b8 = [0u8; 16];
-    mock.insert_tag(0, vec![b0, b1, b8]);
+    if include_trap {
+        // 1. Trap slot (slot 0): Kaos Trap (3010) with Kaos villain (1010)
+        let mut b0 = [0u8; 16];
+        b0[0..4].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        let mut b1 = [0u8; 16];
+        b1[0..2].copy_from_slice(&3010u16.to_le_bytes());
+        b1[2..4].copy_from_slice(&1010u16.to_le_bytes());
+        let b8 = [0u8; 16];
+        mock.insert_tag(0, vec![b0, b1, b8]);
+    }
 
     // 2. Ring slot (slot 1): Skylander hero (default Spyro 16)
     let hero_id = char_id.unwrap_or(16);
@@ -86,14 +88,19 @@ pub fn create_mock_portal(char_id: Option<u16>) -> ActivePortal {
     let h8 = [0u8; 16];
     mock.insert_tag(1, vec![h0, h1, h8]);
 
-    info!(
-        "Mock Portal initialized with Kaos Trap (0) and Hero ID {} (1)",
-        hero_id
-    );
+    if include_trap {
+        info!(
+            "Mock Portal initialized with Kaos Trap (0) and Hero ID {} (1)",
+            hero_id
+        );
+    } else {
+        info!("Mock Portal initialized with Hero ID {} (1)", hero_id);
+    }
     ActivePortal::Mock(mock)
 }
 
-fn init_portal(mock_portal: bool, char_id: Option<u16>) -> ActivePortal {
+fn init_portal(mock_portal: bool, char_id: Option<u16>, viewer_mode: bool) -> ActivePortal {
+    let include_trap = !viewer_mode;
     if !mock_portal {
         info!("Probing for physical USB Traptanium Portal (VID: 0x1430, PID: 0x0150)...");
         match UsbPortal::open_first() {
@@ -108,12 +115,12 @@ fn init_portal(mock_portal: bool, char_id: Option<u16>) -> ActivePortal {
                     "Physical USB Portal not connected ({}). Falling back to virtual MockPortal.",
                     e
                 );
-                create_mock_portal(char_id)
+                create_mock_portal(char_id, include_trap)
             }
         }
     } else {
         info!("Mock portal mode requested.");
-        create_mock_portal(char_id)
+        create_mock_portal(char_id, include_trap)
     }
 }
 
@@ -171,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     // 4. Initialize portal
-    let portal = init_portal(args.mock_portal, Some(resolved_char_id));
+    let portal = init_portal(args.mock_portal, Some(resolved_char_id), args.viewer);
 
     // 5. Headless mode (CLI simulation / test runner)
     if args.headless {
@@ -251,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_mock_portal_creation() {
-        let portal_default = create_mock_portal(None);
+        let portal_default = create_mock_portal(None, true);
         match portal_default {
             ActivePortal::Mock(mock) => {
                 assert!(mock.loaded_tags.contains_key(&0));
@@ -263,7 +270,7 @@ mod tests {
             _ => panic!("Expected Mock portal"),
         }
 
-        let portal = create_mock_portal(Some(401));
+        let portal = create_mock_portal(Some(401), true);
         match portal {
             ActivePortal::Mock(mock) => {
                 assert!(mock.loaded_tags.contains_key(&0));
@@ -271,6 +278,15 @@ mod tests {
                 let b1 = &mock.loaded_tags[&1][1];
                 let cid = u16::from_le_bytes([b1[0], b1[1]]);
                 assert_eq!(cid, 401);
+            }
+            _ => panic!("Expected Mock portal"),
+        }
+
+        let portal_viewer = create_mock_portal(Some(16), false);
+        match portal_viewer {
+            ActivePortal::Mock(mock) => {
+                assert!(!mock.loaded_tags.contains_key(&0));
+                assert!(mock.loaded_tags.contains_key(&1));
             }
             _ => panic!("Expected Mock portal"),
         }
@@ -282,7 +298,7 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.add_plugins(SkylandsCorePlugin);
         app.insert_resource(CharacterAssetServer::default());
-        app.insert_resource(create_mock_portal(Some(400)));
+        app.insert_resource(create_mock_portal(Some(400), true));
 
         app.update();
         for _ in 0..60 {

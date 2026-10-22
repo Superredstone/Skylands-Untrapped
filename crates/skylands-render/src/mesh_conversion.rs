@@ -601,11 +601,78 @@ pub fn igb_mesh_to_bevy(igb_mesh: &IgbMesh) -> BevyMesh {
     bevy_mesh
 }
 
+fn is_auxiliary_character_submesh(vertices: &[skylands_formats::igb::IgbVertex]) -> bool {
+    if vertices.is_empty() {
+        return true;
+    }
+
+    let mut min = vertices[0].position;
+    let mut max = vertices[0].position;
+    for v in vertices {
+        min[0] = min[0].min(v.position[0]);
+        min[1] = min[1].min(v.position[1]);
+        min[2] = min[2].min(v.position[2]);
+
+        max[0] = max[0].max(v.position[0]);
+        max[1] = max[1].max(v.position[1]);
+        max[2] = max[2].max(v.position[2]);
+    }
+
+    let dx = max[0] - min[0];
+    let dy = max[1] - min[1];
+    let dz = max[2] - min[2];
+    let max_dim = dx.max(dy).max(dz);
+
+    // Filter oversized outlier submeshes (e.g. 600-unit background dome / VFX card)
+    if max_dim > 15.0 {
+        return true;
+    }
+
+    // Filter horizontal ground decals, discs, rings, pedestals, and shadow plates
+    // (e.g. Kaos ground rings dx/dz ~ 8.4-11.6, Snap Shot ground disc dx/dz ~ 14.68, dy <= 1.2)
+    let horizontal_span = dx.max(dz);
+    if horizontal_span > 2.5 && dy < 1.25 && (dy < 0.25 || horizontal_span / dy.max(0.01) > 3.0) {
+        return true;
+    }
+
+    // Filter 2D billboard quads/cards: trivial vertex count (<= 16) with planar span > 1.5
+    if vertices.len() <= 16 && (dy < 0.05 || dx < 0.05 || dz < 0.05) && max_dim > 1.5 {
+        return true;
+    }
+
+    // Filter flat 2D billboard cards where one axis thickness is near zero while other axes > 1.8
+    let min_dim = dx.min(dy).min(dz);
+    let mid_dim = if (dx <= dy && dx >= dz) || (dx <= dz && dx >= dy) {
+        dx
+    } else if (dy <= dx && dy >= dz) || (dy <= dz && dy >= dx) {
+        dy
+    } else {
+        dz
+    };
+    if min_dim < 0.08 && mid_dim > 1.8 {
+        return true;
+    }
+
+    false
+}
+
 pub fn combine_or_normalize_model_meshes(
     meshes: &[IgbMesh],
     target_height: Option<f32>,
 ) -> BevyMesh {
-    let non_empty: Vec<&IgbMesh> = meshes.iter().filter(|m| !m.vertices.is_empty()).collect();
+    let mut non_empty: Vec<&IgbMesh> = meshes.iter().filter(|m| !m.vertices.is_empty()).collect();
+
+    // If normalizing to character target_height, filter out billboards, ground rings, oversized meshes
+    if target_height.is_some() {
+        let filtered: Vec<&IgbMesh> = non_empty
+            .iter()
+            .copied()
+            .filter(|m| !is_auxiliary_character_submesh(&m.vertices))
+            .collect();
+        if !filtered.is_empty() {
+            non_empty = filtered;
+        }
+    }
 
     if non_empty.is_empty() {
         return Mesh::prop_cube(0.5).to_bevy();
@@ -753,6 +820,137 @@ pub fn combine_scene_instances_to_bevy(
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
     bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
     bevy_mesh.insert_indices(Indices::U32(indices));
+    bevy_mesh
+}
+
+pub fn igb_model_to_bevy_mesh(model: &IgbModel, target_height: Option<f32>) -> BevyMesh {
+    let instances = model.evaluate_scene_graph();
+
+    let valid_instances: Vec<&skylands_formats::igb::SceneInstance> = if target_height.is_some() {
+        let mut filtered = Vec::new();
+        for inst in &instances {
+            if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                if let Some(ref m) = geo.mesh {
+                    if !is_auxiliary_character_submesh(&m.vertices) {
+                        filtered.push(inst);
+                    }
+                }
+            }
+        }
+        if filtered.is_empty() {
+            instances.iter().collect()
+        } else {
+            filtered
+        }
+    } else {
+        instances.iter().collect()
+    };
+
+    let mut total_vert_count = 0;
+    let mut total_idx_count = 0;
+
+    if !valid_instances.is_empty() && !model.geometries.is_empty() {
+        for inst in &valid_instances {
+            if let Some(geo) = model.geometries.get(inst.geometry_index) {
+                if let Some(ref m) = geo.mesh {
+                    total_vert_count += m.vertices.len();
+                    total_idx_count += m.indices.len();
+                }
+            }
+        }
+    }
+
+    if total_vert_count == 0 {
+        return combine_or_normalize_model_meshes(&model.meshes, target_height);
+    }
+
+    let mut combined_vertices = Vec::with_capacity(total_vert_count);
+    let mut combined_indices = Vec::with_capacity(total_idx_count);
+    let mut vert_offset = 0u32;
+
+    for inst in &valid_instances {
+        if let Some(geo) = model.geometries.get(inst.geometry_index) {
+            if let Some(ref m) = geo.mesh {
+                if m.vertices.is_empty() {
+                    continue;
+                }
+                for v in &m.vertices {
+                    let mut transformed = *v;
+                    transformed.position = transform_point(&inst.world_transform, v.position);
+                    combined_vertices.push(transformed);
+                }
+                if m.indices.is_empty() {
+                    for idx in 0..m.vertices.len() as u32 {
+                        combined_indices.push(vert_offset + idx);
+                    }
+                } else {
+                    for &idx in &m.indices {
+                        combined_indices.push(vert_offset + idx);
+                    }
+                }
+                vert_offset += m.vertices.len() as u32;
+            }
+        }
+    }
+
+    let mut min = combined_vertices[0].position;
+    let mut max = combined_vertices[0].position;
+
+    for v in &combined_vertices {
+        min[0] = min[0].min(v.position[0]);
+        min[1] = min[1].min(v.position[1]);
+        min[2] = min[2].min(v.position[2]);
+
+        max[0] = max[0].max(v.position[0]);
+        max[1] = max[1].max(v.position[1]);
+        max[2] = max[2].max(v.position[2]);
+    }
+
+    let scale = if let Some(th) = target_height {
+        let orig_height = max[1] - min[1];
+        if orig_height > 1e-4 {
+            th / orig_height
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    let center_x = (min[0] + max[0]) * 0.5;
+    let center_z = (min[2] + max[2]) * 0.5;
+    let min_y = min[1];
+
+    let mut bevy_mesh = BevyMesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+
+    let positions: Vec<[f32; 3]> = combined_vertices
+        .iter()
+        .map(|v| {
+            if target_height.is_some() {
+                [
+                    (v.position[0] - center_x) * scale,
+                    (v.position[1] - min_y) * scale,
+                    (v.position[2] - center_z) * scale,
+                ]
+            } else {
+                v.position
+            }
+        })
+        .collect();
+
+    let normals: Vec<[f32; 3]> = combined_vertices.iter().map(|v| v.normal).collect();
+    let uvs: Vec<[f32; 2]> = combined_vertices.iter().map(|v| v.uv).collect();
+    let colors: Vec<[f32; 4]> = combined_vertices.iter().map(|v| v.color).collect();
+
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_POSITION, positions);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_NORMAL, normals);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_UV_0, uvs);
+    bevy_mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
+    bevy_mesh.insert_indices(Indices::U32(combined_indices));
+
     bevy_mesh
 }
 
@@ -988,6 +1186,55 @@ mod tests {
             assert!((max_y - 2.0).abs() < 1e-4);
         } else {
             panic!("expected Float32x3");
+        }
+    }
+
+    #[test]
+    fn test_character_model_submesh_filtering() {
+        for char_file in [
+            "assets/files/character/016_Spyro.bld",
+            "assets/files/character/462_Water_Crocky.bld",
+            "assets/files/character/476_Artichoke.bld",
+            "assets/files/character/459_Barbarian.bld",
+            "assets/files/character/1010_Kaos.bld",
+        ] {
+            let p1 = std::path::Path::new(char_file);
+            let p2 = std::path::Path::new("../../").join(char_file);
+            let path = if p1.exists() {
+                Some(p1.to_path_buf())
+            } else if p2.exists() {
+                Some(p2)
+            } else {
+                None
+            };
+
+            let Some(p) = path else { continue };
+            let bytes = std::fs::read(p).unwrap();
+            let model = IgbModel::parse(std::io::Cursor::new(&bytes)).expect("parse character bld");
+
+            let target_height = 1.8f32;
+            let bevy_mesh = igb_model_to_bevy_mesh(&model, Some(target_height));
+            assert_eq!(
+                bevy_mesh.primitive_topology(),
+                PrimitiveTopology::TriangleList
+            );
+            assert!(bevy_mesh.count_vertices() >= 3);
+
+            let pos = bevy_mesh.attribute(BevyMesh::ATTRIBUTE_POSITION).unwrap();
+            if let bevy::render::mesh::VertexAttributeValues::Float32x3(pts) = pos {
+                let min_y = pts.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+                let max_y = pts.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    (min_y - 0.0).abs() < 1e-4,
+                    "{char_file} base should be grounded at y=0"
+                );
+                assert!(
+                    (max_y - target_height).abs() < 1e-3,
+                    "{char_file} top height should match target_height"
+                );
+            } else {
+                panic!("Expected Float32x3 positions");
+            }
         }
     }
 }

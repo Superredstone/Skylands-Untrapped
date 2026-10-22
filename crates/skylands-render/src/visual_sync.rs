@@ -1,4 +1,6 @@
-use crate::mesh_conversion::{combine_or_normalize_model_meshes, Mesh as ProceduralMesh};
+use crate::mesh_conversion::{
+    combine_or_normalize_model_meshes, igb_model_to_bevy_mesh, Mesh as ProceduralMesh,
+};
 use crate::texture_conversion::create_colored_material;
 use bevy::prelude::*;
 use bevy::utils::HashMap;
@@ -53,7 +55,7 @@ impl ModelVisualRegistry {
         }?;
 
         let model = loader.load_igb(&resolved_path).ok()?;
-        let bevy_mesh = combine_or_normalize_model_meshes(&model.meshes, target_height);
+        let bevy_mesh = igb_model_to_bevy_mesh(&model, target_height);
         let mesh_handle = meshes.add(bevy_mesh);
 
         let mut base_color_texture = None;
@@ -76,6 +78,8 @@ impl ModelVisualRegistry {
             base_color_texture,
             perceptual_roughness: 0.8,
             reflectance: 0.2,
+            cull_mode: None,
+            double_sided: true,
             ..default()
         });
 
@@ -87,7 +91,7 @@ impl ModelVisualRegistry {
 
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
-    pub cache: HashMap<u16, (Handle<Mesh>, Handle<StandardMaterial>)>,
+    pub cache: HashMap<String, (Handle<Mesh>, Handle<StandardMaterial>)>,
 }
 
 impl CharacterVisualRegistry {
@@ -100,19 +104,20 @@ impl CharacterVisualRegistry {
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
     ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
-        if let Some(pair) = self.cache.get(&character_id) {
+        let bld_name = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))?;
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+
+        if let Some(pair) = self.cache.get(&cache_key) {
             return Some(pair.clone());
         }
 
         let asset_server = asset_server?;
         let loader = asset_server.loader.lock().ok()?;
 
-        let bld_name = model_path
-            .map(|s| s.to_string())
-            .or_else(|| resolve_character_model_archive(character_id))?;
-
         let model = loader.load_igb(&bld_name).ok()?;
-        let normalized_bevy_mesh = combine_or_normalize_model_meshes(&model.meshes, Some(1.8));
+        let normalized_bevy_mesh = igb_model_to_bevy_mesh(&model, Some(1.8));
         let mesh_handle = meshes.add(normalized_bevy_mesh);
 
         let mat_color = if character_id == 16 {
@@ -142,11 +147,13 @@ impl CharacterVisualRegistry {
             base_color_texture,
             perceptual_roughness: 0.8,
             reflectance: 0.2,
+            cull_mode: None,
+            double_sided: true,
             ..default()
         });
 
         let pair = (mesh_handle, material_handle);
-        self.cache.insert(character_id, pair.clone());
+        self.cache.insert(cache_key, pair.clone());
         Some(pair)
     }
 }
@@ -458,6 +465,7 @@ pub fn actor_visual_sync_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut viewer_settings: Option<ResMut<crate::ViewerSettings>>,
     actor_query: Query<
         (
             Entity,
@@ -489,6 +497,17 @@ pub fn actor_visual_sync_system(
             });
 
             if let Some((mesh, mat)) = custom_visual {
+                if let Some(ref mut vs) = viewer_settings {
+                    if vs.viewer_mode {
+                        if let Some(m) = meshes.get(&mesh) {
+                            vs.vert_count = m.count_vertices();
+                            vs.tri_count = m
+                                .indices()
+                                .map(|idx| idx.len() / 3)
+                                .unwrap_or(vs.vert_count / 3);
+                        }
+                    }
+                }
                 commands
                     .entity(entity)
                     .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
@@ -671,8 +690,10 @@ mod tests {
         };
         {
             let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
-            reg.cache
-                .insert(16, (custom_mesh.clone(), custom_mat.clone()));
+            reg.cache.insert(
+                "16:016_spyro.bld".to_string(),
+                (custom_mesh.clone(), custom_mat.clone()),
+            );
         }
 
         let entity = app
@@ -715,14 +736,17 @@ mod tests {
         };
         {
             let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
-            reg.cache
-                .insert(401, (foodfight_mesh.clone(), foodfight_mat.clone()));
+            reg.cache.insert(
+                "401:476_artichoke.bld".to_string(),
+                (foodfight_mesh.clone(), foodfight_mat.clone()),
+            );
         }
 
         {
             let mut ident = app.world_mut().get_mut::<ActorIdentity>(entity).unwrap();
             ident.character_id = 401;
             ident.name = "Food Fight".to_string();
+            ident.model_path = Some("476_Artichoke.bld".to_string());
         }
 
         app.update();
@@ -782,6 +806,14 @@ mod tests {
                 "Base color texture must be bound when texture is available"
             );
             assert_eq!(loaded_mat.base_color, Color::WHITE);
+            assert_eq!(
+                loaded_mat.cull_mode, None,
+                "Character materials must disable backface culling"
+            );
+            assert!(
+                loaded_mat.double_sided,
+                "Character materials must be double-sided"
+            );
 
             // Verify igImage2 extraction
             let loader = server.loader.lock().unwrap();
@@ -1010,6 +1042,8 @@ mod tests {
             "Decoded texture must be bound to base_color_texture"
         );
         assert_eq!(mat.base_color, Color::WHITE);
+        assert_eq!(mat.cull_mode, None);
+        assert!(mat.double_sided);
 
         let tex_handle = mat.base_color_texture.as_ref().unwrap();
         let image = images

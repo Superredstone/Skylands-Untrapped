@@ -175,4 +175,73 @@ mod tests {
         let tf = app.world().get::<Transform>(hero).unwrap();
         assert_eq!(tf.translation, Vec3::new(0.0, 0.2, 0.0));
     }
+
+    #[test]
+    fn test_viewer_stats_updated_by_visual_sync() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.insert_resource(ViewerSettings {
+            viewer_mode: true,
+            vert_count: 0,
+            tri_count: 0,
+            ..default()
+        });
+        app.insert_resource(crate::CharacterVisualRegistry::default());
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let hero_mesh = meshes.add(crate::Mesh::prop_cube(0.5).to_bevy());
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let hero_mat = materials.add(StandardMaterial::default());
+
+        app.insert_resource(crate::RenderMeshAssets {
+            courtyard_mesh: hero_mesh.clone(),
+            courtyard_material: hero_mat.clone(),
+            pedestal_mesh: hero_mesh.clone(),
+            pedestal_material: hero_mat.clone(),
+            hero_mesh: hero_mesh.clone(),
+            hero_material: hero_mat.clone(),
+            villain_mesh: hero_mesh.clone(),
+            villain_material: hero_mat.clone(),
+            prop_mesh: hero_mesh.clone(),
+            prop_material: hero_mat.clone(),
+            coin_mesh: hero_mesh.clone(),
+            coin_material: hero_mat.clone(),
+            gem_mesh: hero_mesh.clone(),
+            gem_material: hero_mat.clone(),
+            projectile_mesh: hero_mesh.clone(),
+            projectile_material: hero_mat.clone(),
+        });
+
+        // Seed cache with a known mesh
+        {
+            let mut reg = app
+                .world_mut()
+                .resource_mut::<crate::CharacterVisualRegistry>();
+            let key = format!("16:{}", "016_spyro.bld");
+            reg.cache.insert(key, (hero_mesh, hero_mat));
+        }
+
+        app.world_mut().spawn((
+            Hero,
+            ActorIdentity {
+                id: 16,
+                character_id: 16,
+                name: "Spyro".to_string(),
+                is_villain: false,
+                model_path: None,
+                texture_path: None,
+            },
+            Transform::default(),
+        ));
+
+        app.add_systems(Update, crate::visual_sync::actor_visual_sync_system);
+        app.update();
+
+        let viewer = app.world().resource::<ViewerSettings>();
+        assert_eq!(viewer.vert_count, 24);
+        assert_eq!(viewer.tri_count, 12);
+    }
 }

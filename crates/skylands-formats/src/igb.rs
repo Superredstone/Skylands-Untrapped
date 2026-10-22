@@ -2843,6 +2843,32 @@ impl IgbModel {
                             };
 
                         attr_lists.push(attr_list);
+
+                        if obj.type_name.as_deref() == Some("igGeometryAttr") {
+                            let name = format!("igGeometryAttr_{}", idx);
+                            let mesh = Self::decode_geometry_attr(
+                                data,
+                                sections,
+                                &tmhn_entries,
+                                obj.offset,
+                                endian,
+                            )
+                            .map(|mut m| {
+                                m.name = name.clone();
+                                m.material_name = Some(format!("mat_{}", name));
+                                m
+                            });
+                            if mesh.is_some() {
+                                geometries.push(IgbGeometryNode {
+                                    name,
+                                    vertex_buffer_index: None,
+                                    index_buffer_index: None,
+                                    attr_list_index: Some(attr_lists.len() - 1),
+                                    material_index: Some(0),
+                                    mesh,
+                                });
+                            }
+                        }
                     }
                     Some("igWiiGeometry") => {
                         let slice = if obj.offset + 120 <= data.len() {
@@ -3440,6 +3466,195 @@ impl IgbModel {
     /// Decodes a Wii GX display list (`igWiiGeometry` buffer A) whose indexed
     /// attribute arrays live in `vb` (buffer B). Array bases (CP 0xA0+n) are
     /// offsets into `vb`. GX data is always big-endian.
+    /// Decodes an `igGeometryAttr` (skinned character body) into a mesh.
+    ///
+    /// Layout (IGZ v8, Wii): attr `+0x10` -> `igVertexBuffer`, `+0x14` -> `igIndexBuffer`.
+    /// VB: `+0x08` count, `+0x14` TMHN data handle, `+0x18` -> `igVertexFormat`,
+    /// `+0x20/+0x24` per-element fixed-point shifts. VF: `+0x10` element list
+    /// (12 bytes each, `0x2c` terminator), `+0x30/+0x34` per-stream strides.
+    /// Streams are packed back to back, each 32-byte aligned.
+    /// IB: `+0x08` index count, `+0x14` TMHN handle to a GX display list of
+    /// `0x98` strips with one u8/u16 index per element (all equal).
+    pub fn decode_geometry_attr(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        tmhn: &[(usize, usize)],
+        attr_off: usize,
+        endian: IgbEndian,
+    ) -> Option<IgbMesh> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let words = |len_off: usize, ptr_off: usize| -> Option<Vec<u32>> {
+            let n = (rd(len_off)? & 0x00FF_FFFF) as usize / 4;
+            let p = ptr(ptr_off)?;
+            (0..n).map(|i| rd(p + i * 4)).collect()
+        };
+        let blob = |handle_off: usize| -> Option<&[u8]> {
+            let (o, l) = *tmhn.get(rd(handle_off)? as usize)?;
+            data.get(o..o + l)
+        };
+
+        let vb = ptr(attr_off + 0x10)?;
+        let ib = ptr(attr_off + 0x14)?;
+        let count = rd(vb + 0x08)? as usize;
+        let vdata = blob(vb + 0x14)?;
+        let vf = ptr(vb + 0x18)?;
+        let shifts = words(vb + 0x20, vb + 0x24)?;
+        let strides = words(vf + 0x30, vf + 0x34)?;
+        if count == 0 || strides.is_empty() {
+            return None;
+        }
+
+        let mut bases = Vec::with_capacity(strides.len());
+        let mut acc = 0usize;
+        for &s in &strides {
+            bases.push(acc);
+            acc = (acc + s as usize * count + 31) & !31;
+        }
+
+        let mut vertices = vec![
+            IgbVertex {
+                position: [0.0; 3],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.0; 2],
+                color: [1.0; 4],
+                bone_indices: [0; 4],
+                bone_weights: [1.0, 0.0, 0.0, 0.0],
+            };
+            count
+        ];
+        let be16 = |o: usize| {
+            vdata
+                .get(o..o + 2)
+                .map(|b| i16::from_be_bytes([b[0], b[1]]))
+        };
+
+        // Element: [0]=type, [1]=stream, [4]=usage, [5]=usage index, [6]=shift slot*4,
+        // [8..10]=offset. Usage 0=POS s16x3, 1=NRM s8x3, 4=color, 5=UV s16x2,
+        // 6=blend weights, 8=blend indices.
+        let mut el = ptr(vf + 0x10)?;
+        let mut has_pos = false;
+        while let Some(e) = data.get(el..el + 12) {
+            if e[0] == 0x2c {
+                break;
+            }
+            let (stream, usage, set) = (e[1] as usize, e[4], e[5]);
+            let off = u16::from_be_bytes([e[8], e[9]]) as usize;
+            let shift = shifts.get(e[6] as usize / 4).copied().unwrap_or(0).min(30);
+            let scale = 1.0 / (1u32 << shift) as f32;
+            let (base, stride) = (*bases.get(stream)?, *strides.get(stream)? as usize);
+            // ponytail: color and blend weights/indices skipped; decode weights+indices
+            // against the bone palette when SkinnedMesh lands.
+            for (i, v) in vertices.iter_mut().enumerate() {
+                let o = base + i * stride + off;
+                match (usage, set) {
+                    (0, _) => {
+                        for c in 0..3 {
+                            v.position[c] = be16(o + c * 2)? as f32 * scale;
+                        }
+                    }
+                    (1, _) => {
+                        let b = vdata.get(o..o + 3)?;
+                        v.normal = [b[0], b[1], b[2]].map(|c| c as i8 as f32 * scale);
+                    }
+                    (5, 0) => {
+                        for c in 0..2 {
+                            v.uv[c] = be16(o + c * 2)? as f32 * scale;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            has_pos |= usage == 0;
+            el += 12;
+        }
+        if !has_pos {
+            return None;
+        }
+
+        let index_count = rd(ib + 0x08)? as usize;
+        let dl = blob(ib + 0x14)?;
+        let mut indices = Vec::with_capacity(index_count * 3);
+        let mut read = 0usize;
+        // Element stride / index width aren't stored explicitly: try each and keep the
+        // one that consumes the list exactly with in-range, repeated indices.
+        'width: for width in [2usize, 1] {
+            for k in 1..=8usize {
+                indices.clear();
+                read = 0;
+                let mut p = 0usize;
+                let ok = loop {
+                    let Some(&op) = dl.get(p) else { break true };
+                    if op == 0 {
+                        p += 1;
+                        continue;
+                    }
+                    if op & 0xF8 != 0x98 {
+                        break false;
+                    }
+                    let Some(n) = dl.get(p + 1..p + 3) else {
+                        break false;
+                    };
+                    let n = u16::from_be_bytes([n[0], n[1]]) as usize;
+                    let step = k * width;
+                    let Some(body) = dl.get(p + 3..p + 3 + n * step) else {
+                        break false;
+                    };
+                    let mut strip = Vec::with_capacity(n);
+                    for v in body.chunks_exact(step) {
+                        let get = |j: usize| -> usize {
+                            if width == 2 {
+                                u16::from_be_bytes([v[j * 2], v[j * 2 + 1]]) as usize
+                            } else {
+                                v[j] as usize
+                            }
+                        };
+                        let idx = get(0);
+                        if idx >= count || (1..k).any(|j| get(j) != idx) {
+                            break;
+                        }
+                        strip.push(idx as u32);
+                    }
+                    if strip.len() != n {
+                        break false;
+                    }
+                    for s in 2..n {
+                        let (a, b, c) = (strip[s - 2], strip[s - 1], strip[s]);
+                        if a == b || b == c || a == c {
+                            continue;
+                        }
+                        if s % 2 == 0 {
+                            indices.extend_from_slice(&[a, b, c]);
+                        } else {
+                            indices.extend_from_slice(&[b, a, c]);
+                        }
+                    }
+                    read += n;
+                    p += 3 + n * step;
+                };
+                if ok && read == index_count {
+                    break 'width;
+                }
+            }
+        }
+        if read != index_count || indices.is_empty() {
+            return None;
+        }
+
+        Some(IgbMesh {
+            name: "geometry_attr".to_string(),
+            vertices,
+            indices,
+            material_name: None,
+        })
+    }
+
     pub fn decode_wii_display_list(dl: &[u8], vb: &[u8]) -> Option<IgbMesh> {
         let be16 = |b: &[u8], o: usize| b.get(o..o + 2).map(|s| u16::from_be_bytes([s[0], s[1]]));
         let be32 = |b: &[u8], o: usize| {
@@ -4958,7 +5173,11 @@ mod tests {
         assert!(!model.meshes.is_empty(), "Spyro has extracted meshes");
         assert!(!model.textures.is_empty(), "Spyro has extracted textures");
         assert_eq!(model.images.len(), 77, "Spyro has 77 igImage2 textures");
-        assert_eq!(model.geometries.len(), 17, "Spyro has 17 Wii geometries");
+        assert_eq!(
+            model.geometries.len(),
+            23,
+            "Spyro has 17 Wii geometries + 6 igGeometryAttr"
+        );
         assert_eq!(model.vertex_buffers.len(), 6, "Spyro has 6 vertex buffers");
         assert_eq!(model.index_buffers.len(), 6, "Spyro has 6 index buffers");
         assert_eq!(
@@ -4966,16 +5185,53 @@ mod tests {
             18,
             "Spyro has 18 vertex format/attr lists"
         );
-        // Verify all 16 extracted character submeshes are present
         assert_eq!(
             model.meshes.len(),
-            17,
-            "Spyro has 17 submeshes with geometry"
+            23,
+            "Spyro has 23 submeshes with geometry"
         );
         for mesh in &model.meshes {
             assert!(mesh.vertices.len() >= 3);
             assert!(!mesh.indices.is_empty());
         }
+    }
+
+    #[test]
+    fn test_artichoke_body_from_geometry_attr() {
+        use crate::archive::ArchiveMount;
+        let p1 = std::path::Path::new("assets/files/character/476_Artichoke.bld");
+        let p2 = std::path::Path::new("../../assets/files/character/476_Artichoke.bld");
+        let p = if p1.exists() {
+            p1
+        } else if p2.exists() {
+            p2
+        } else {
+            return;
+        };
+        let mut mount = ArchiveMount::new();
+        mount.mount(p).expect("mount artichoke");
+        let level_bld = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&level_bld)).expect("parse level.bld");
+        let body: Vec<_> = model
+            .meshes
+            .iter()
+            .filter(|m| m.name.starts_with("igGeometryAttr_"))
+            .collect();
+        assert_eq!(body.len(), 2, "FoodFight_Body + FoodFight_Eyes");
+        assert_eq!(body[0].vertices.len(), 1612);
+        assert_eq!(body[1].vertices.len(), 144);
+        // igActor2 bounds: [-2.13..2.13, 0.00..2.29, -0.89..0.61]
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &body[0].vertices {
+            for c in 0..3 {
+                lo[c] = lo[c].min(v.position[c]);
+                hi[c] = hi[c].max(v.position[c]);
+            }
+        }
+        assert!((lo[0] + 2.13).abs() < 0.01 && (hi[0] - 2.13).abs() < 0.01);
+        assert!(lo[1].abs() < 0.01 && (hi[1] - 2.29).abs() < 0.01);
+        assert!((lo[2] + 0.89).abs() < 0.01 && (hi[2] - 0.61).abs() < 0.01);
+        assert!(body[0].indices.iter().all(|&i| (i as usize) < 1612));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use skylands_core::{GameState, Hero};
 
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -125,12 +126,26 @@ pub fn camera_follow_system(
     }
 }
 
+pub fn free_cam_cursor(captured: bool) -> CursorOptions {
+    let grab_mode = match (captured, cfg!(target_os = "macos")) {
+        (false, _) => CursorGrabMode::None,
+        (true, true) => CursorGrabMode::Locked,
+        (true, false) => CursorGrabMode::Confined,
+    };
+    CursorOptions {
+        grab_mode,
+        visible: !captured,
+        ..default()
+    }
+}
+
 pub fn free_cam_system(
     time: Res<Time>,
     keyboard: Option<Res<ButtonInput<KeyCode>>>,
     mut free_cam: ResMut<FreeCamState>,
     mut mouse_motion: EventReader<MouseMotion>,
     mut cam_query: Query<&mut Transform, With<MainCamera>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     let Some(keyboard) = keyboard else {
         return;
@@ -138,6 +153,9 @@ pub fn free_cam_system(
 
     if keyboard.just_pressed(KeyCode::F12) {
         free_cam.enabled = !free_cam.enabled;
+        if let Ok(mut window) = windows.get_single_mut() {
+            window.cursor_options = free_cam_cursor(free_cam.enabled);
+        }
     }
 
     if !free_cam.enabled {
@@ -251,5 +269,39 @@ mod tests {
         let free_cam = FreeCamState::default();
         assert!(!free_cam.enabled);
         assert_eq!(free_cam.speed, 15.0);
+    }
+
+    #[test]
+    fn test_free_cam_toggle_captures_cursor() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FreeCamState>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_event::<MouseMotion>()
+            .add_systems(Update, free_cam_system);
+        let win = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+
+        let press_f12 = |app: &mut App| {
+            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            kb.reset_all();
+            kb.press(KeyCode::F12);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(KeyCode::F12);
+        };
+
+        press_f12(&mut app);
+        let opts = &app.world().get::<Window>(win).unwrap().cursor_options;
+        assert_ne!(opts.grab_mode, CursorGrabMode::None);
+        assert!(!opts.visible);
+
+        press_f12(&mut app);
+        let opts = &app.world().get::<Window>(win).unwrap().cursor_options;
+        assert_eq!(opts.grab_mode, CursorGrabMode::None);
+        assert!(opts.visible);
     }
 }

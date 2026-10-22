@@ -556,9 +556,12 @@ impl ArchiveMount {
         let lower = normalized.to_ascii_lowercase();
 
         // 1. Direct exact match on archive name (e.g. "Level_Hub_2014_01.bld" -> inner "level.bld")
+        let target_file = lower.rsplit('/').next().unwrap_or(&lower);
         for archive in &self.archives {
             let arch_name = archive.source_name.to_ascii_lowercase();
-            if arch_name == lower && archive.contains_path("level.bld") {
+            if (arch_name == lower || arch_name == target_file)
+                && archive.contains_path("level.bld")
+            {
                 return archive.read_file("level.bld");
             }
         }
@@ -629,6 +632,16 @@ impl ArchiveMount {
         let normalized = path.replace('\\', "/");
         let lower = normalized.to_ascii_lowercase();
 
+        let target_file = lower.rsplit('/').next().unwrap_or(&lower);
+        for archive in &self.archives {
+            let arch_name = archive.source_name.to_ascii_lowercase();
+            if (arch_name == lower || arch_name == target_file)
+                && archive.contains_path("level.bld")
+            {
+                return true;
+            }
+        }
+
         for archive in &self.archives {
             let arch_name = archive.source_name.to_ascii_lowercase();
             if !arch_name.is_empty() {
@@ -643,8 +656,7 @@ impl ArchiveMount {
                     .unwrap_or(&lower);
                 let target_stem = cand_stem.rsplit('/').next().unwrap_or(cand_stem);
 
-                if (arch_name == lower || target_stem == stem) && archive.contains_path("level.bld")
-                {
+                if target_stem == stem && archive.contains_path("level.bld") {
                     return true;
                 }
             }

@@ -109,6 +109,38 @@ pub fn get_character_voice_path(character_id: u16) -> Option<&'static str> {
 
 pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
     match character_id {
+        0 => return Some("000_AirDragon.bld".to_string()),
+        1 => return Some("001_Gryphon.bld".to_string()),
+        2 => return Some("002_SkyTurtle.bld".to_string()),
+        3 => return Some("003_StormGiant.bld".to_string()),
+        4 => return Some("004_Rock_Dragon.bld".to_string()),
+        5 => return Some("005_LandShark.bld".to_string()),
+        6 => return Some("006_DinoRang.bld".to_string()),
+        7 => return Some("007_GemGolem.bld".to_string()),
+        8 => return Some("008_FireDragon.bld".to_string()),
+        9 => return Some("009_Eruptor.bld".to_string()),
+        10 => return Some("010_FlameKnight.bld".to_string()),
+        11 => return Some("011_FireElf.bld".to_string()),
+        12 => return Some("012_SeaDragon.bld".to_string()),
+        13 => return Some("013_Crab.bld".to_string()),
+        14 => return Some("014_GillGrunt.bld".to_string()),
+        15 => return Some("015_Yeti.bld".to_string()),
+        16 => return Some("016_Spyro.bld".to_string()),
+        17 => return Some("017_SkullOrc.bld".to_string()),
+        18 => return Some("018_Wizard.bld".to_string()),
+        19 => return Some("019_GoldenCheat.bld".to_string()),
+        20 => return Some("020_Metal_Dragon.bld".to_string()),
+        21 => return Some("021_DrillBot.bld".to_string()),
+        22 => return Some("022_Bomb_Troll.bld".to_string()),
+        23 => return Some("023_ForceFieldGrub.bld".to_string()),
+        24 => return Some("024_LifeDragon.bld".to_string()),
+        25 => return Some("025_BamBazooker.bld".to_string()),
+        26 => return Some("026_StealthElf.bld".to_string()),
+        27 => return Some("027_Ent.bld".to_string()),
+        29 => return Some("029_ShadowMaid.bld".to_string()),
+        30 => return Some("030_PandoranElite.bld".to_string()),
+        31 => return Some("031_GhostEater.bld".to_string()),
+        32 => return Some("032_Cynder.bld".to_string()),
         400 | 462 => return Some("462_Water_Crocky.bld".to_string()),
         401 => return Some("476_Artichoke.bld".to_string()),
         402 => return Some("459_Barbarian.bld".to_string()),
@@ -117,11 +149,15 @@ pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
         405 => return Some("481_Bonesaw.bld".to_string()),
         406 => return Some("467_Void.bld".to_string()),
         407 | 450 => return Some("450_Typhoon.bld".to_string()),
-        14 => return Some("014_GillGrunt.bld".to_string()),
-        16 => return Some("016_Spyro.bld".to_string()),
-        19 => return Some("019_GoldenCheat.bld".to_string()),
         1010 => return Some("1010_Kaos.bld".to_string()),
         1001 => return Some("1001_ChompyMage.bld".to_string()),
+        1002 => return Some("1002_Crankcase.bld".to_string()),
+        1003 => return Some("1003_Rocker.bld".to_string()),
+        1004 => return Some("1004_Chef.bld".to_string()),
+        1005 => return Some("1005_Thief.bld".to_string()),
+        1006 => return Some("1006_LightVillain.bld".to_string()),
+        1007 => return Some("1007_GoldenQueen.bld".to_string()),
+        1008 => return Some("1008_DreamTwin.bld".to_string()),
         _ => {}
     }
 
@@ -133,6 +169,20 @@ pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
 
     let prefix1 = format!("{}_", character_id);
     let prefix2 = format!("{:03}_", character_id);
+
+    let is_auxiliary = |filename: &str| -> bool {
+        let lower = filename.to_ascii_lowercase();
+        lower.contains("musicmini")
+            || lower.contains("outro")
+            || lower.contains("stream")
+            || lower.contains("card")
+            || lower.contains("ally_icon")
+            || lower.contains("_alt")
+            || lower.contains("legendary")
+    };
+
+    let mut candidate_fallback = None;
+
     for dir in &search_dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -140,10 +190,18 @@ pub fn resolve_character_model_archive(character_id: u16) -> Option<String> {
                 if (name.starts_with(&prefix1) || name.starts_with(&prefix2))
                     && name.ends_with(".bld")
                 {
-                    return Some(name);
+                    if !is_auxiliary(&name) {
+                        return Some(name);
+                    } else if candidate_fallback.is_none() {
+                        candidate_fallback = Some(name);
+                    }
                 }
             }
         }
+    }
+
+    if let Some(candidate) = candidate_fallback {
+        return Some(candidate);
     }
 
     Some(format!("{}_Character.bld", character_id))
@@ -234,31 +292,28 @@ pub fn get_character_asset_paths(character_id: u16) -> (&'static str, Option<&'s
             Some("textures/characters/chompymage.png"),
         ),
         1002 => (
-            "models/characters/wolfgang.igb",
+            "1002_Crankcase.bld",
             Some("textures/characters/wolfgang.png"),
         ),
         1003 => (
-            "models/characters/chompymage.igb",
+            "1003_Rocker.bld",
             Some("textures/characters/chompymage.png"),
         ),
-        1004 => (
-            "models/characters/goldenqueen.igb",
-            Some("textures/characters/goldenqueen.png"),
-        ),
+        1004 => ("1004_Chef.bld", Some("textures/characters/goldenqueen.png")),
         1005 => (
-            "models/characters/chefpepperjack.igb",
+            "1005_Thief.bld",
             Some("textures/characters/chefpepperjack.png"),
         ),
         1006 => (
-            "models/characters/drkrankcase.igb",
+            "1006_LightVillain.bld",
             Some("textures/characters/drkrankcase.png"),
         ),
         1007 => (
-            "models/characters/dreamcatcher.igb",
+            "1007_GoldenQueen.bld",
             Some("textures/characters/dreamcatcher.png"),
         ),
         1008 => (
-            "models/characters/painyatta.igb",
+            "1008_DreamTwin.bld",
             Some("textures/characters/painyatta.png"),
         ),
         3000..=3100 => (
@@ -323,6 +378,40 @@ mod tests {
             Some("1001_ChompyMage.bld".to_string())
         );
         assert!(resolve_character_model_archive(500).is_some());
+
+        // Test canonical mapping / auxiliary filter for IDs with minigame/alt archives
+        assert_eq!(
+            resolve_character_model_archive(1),
+            Some("001_Gryphon.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(2),
+            Some("002_SkyTurtle.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(5),
+            Some("005_LandShark.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(7),
+            Some("007_GemGolem.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(8),
+            Some("008_FireDragon.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(9),
+            Some("009_Eruptor.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(17),
+            Some("017_SkullOrc.bld".to_string())
+        );
+        assert_eq!(
+            resolve_character_model_archive(20),
+            Some("020_Metal_Dragon.bld".to_string())
+        );
 
         assert_eq!(resolve_character_id_by_name("Snap Shot"), Some(400));
         assert_eq!(resolve_character_id_by_name("food-fight"), Some(401));
