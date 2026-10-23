@@ -160,10 +160,74 @@ impl AttackDamage {
     }
 }
 
+/// Per-character projectile flight, raw engine units (characters are native scale
+/// in levels: `Placement._scaleVec` = 100%, Spyro 1.77 units tall).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileParams {
+    pub speed: f32,
+    pub lifetime: f32,
+}
+
+impl Default for ProjectileParams {
+    fn default() -> Self {
+        Self {
+            speed: 12.0,
+            lifetime: 1.5,
+        }
+    }
+}
+
+impl ProjectileParams {
+    pub fn from_model(model: &skylands_formats::IgbModel) -> Self {
+        Self::from_constants(&model.script_constants)
+    }
+
+    /// First positive literal on a projectile/missile variable whose name has
+    /// speed|velocity (speed) or lifetime|lifespan (lifetime). Zeros are runtime
+    /// resets, skipped. Missing fields keep the default.
+    // ponytail: ignores per-attack variants (e.g. Eruptor lava ball vs fire shot);
+    // add attack-specific lookup when more than one ranged attack is wired.
+    pub fn from_constants(constants: &[(String, skylands_formats::ScriptValue)]) -> Self {
+        let find = |keys: &[&str]| {
+            constants.iter().find_map(|(name, value)| {
+                let l = name.to_ascii_lowercase();
+                let v = value.as_f32();
+                let hit = (l.contains("projectile") || l.contains("missile"))
+                    && !l.contains("difference")
+                    && keys.iter().any(|k| l.contains(k));
+                (hit && v > 0.0 && v.is_finite()).then_some(v)
+            })
+        };
+        let d = Self::default();
+        Self {
+            speed: find(&["speed", "velocity"]).unwrap_or(d.speed),
+            lifetime: find(&["lifetime", "lifespan"]).unwrap_or(d.lifetime),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use skylands_formats::ScriptValue;
+
+    #[test]
+    fn test_projectile_params_from_constants() {
+        let spyro = consts(&[
+            ("projectile range/lifetime", 0.35),
+            ("missile speed", 0.0),
+            ("missile speed", 40.0),
+            ("Action 2 displace speed", 5.0),
+        ]);
+        let p = ProjectileParams::from_constants(&spyro);
+        assert_eq!((p.speed, p.lifetime), (40.0, 0.35));
+
+        let king = consts(&[("differenceBetweenProjectileLifetimeAndTotalLifeTime", 8.5)]);
+        assert_eq!(
+            ProjectileParams::from_constants(&king),
+            ProjectileParams::default()
+        );
+    }
 
     fn consts(items: &[(&str, f32)]) -> Vec<(String, ScriptValue)> {
         items

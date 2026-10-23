@@ -111,10 +111,16 @@ pub fn portal_gameplay_system(
                         }
                     }
 
-                    let damage = asset_server
+                    let model = asset_server
                         .as_ref()
-                        .and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok())
-                        .and_then(|m| AttackDamage::from_model(&m))
+                        .and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok());
+                    let damage = model
+                        .as_deref()
+                        .and_then(AttackDamage::from_model)
+                        .unwrap_or_default();
+                    let projectile = model
+                        .as_deref()
+                        .map(ProjectileParams::from_model)
                         .unwrap_or_default();
 
                     // Spawn hero entity
@@ -141,6 +147,7 @@ pub fn portal_gameplay_system(
                         Health::default(),
                         AttackCombo::default(),
                         damage,
+                        projectile,
                         ActorAnimation::default(),
                     ));
                 }
@@ -324,7 +331,13 @@ pub fn hero_combat_system(
     mut audio_events: EventWriter<WorldAudioCueEvent>,
     mut damage_events: EventWriter<DamageEvent>,
     mut hero_query: Query<
-        (Entity, &Transform, &mut AttackCombo, Option<&AttackDamage>),
+        (
+            Entity,
+            &Transform,
+            &mut AttackCombo,
+            Option<&AttackDamage>,
+            Option<&ProjectileParams>,
+        ),
         With<Hero>,
     >,
     target_query: Query<
@@ -344,8 +357,9 @@ pub fn hero_combat_system(
         time.timestep().as_secs_f32()
     };
 
-    for (_hero_entity, hero_tf, mut combo, attack_damage) in &mut hero_query {
+    for (_hero_entity, hero_tf, mut combo, attack_damage, projectile) in &mut hero_query {
         let attack_damage = attack_damage.copied().unwrap_or_default();
+        let projectile = projectile.copied().unwrap_or_default();
         if combo.cooldown > 0.0 {
             combo.cooldown -= dt;
             if combo.cooldown <= 0.0 {
@@ -405,15 +419,14 @@ pub fn hero_combat_system(
 
             match kind {
                 AttackKind::SpecialProjectile => {
-                    const PROJ_SPEED: f32 = 12.0;
                     commands.spawn((
                         Projectile {
                             lifetime: 0.0,
-                            max_lifetime: 1.5,
+                            max_lifetime: projectile.lifetime,
                             damage: attack_damage.special.round() as u32,
                             radius: 0.5,
                         },
-                        Velocity(fwd_norm * PROJ_SPEED),
+                        Velocity(fwd_norm * projectile.speed),
                         Transform::from_translation(hero_tf.translation + Vec3::new(0.0, 0.8, 0.0)),
                     ));
                 }
@@ -1284,6 +1297,10 @@ mod tests {
                 secondary: 10.0,
                 special: 12.5,
             },
+            ProjectileParams {
+                speed: 40.0,
+                lifetime: 0.35,
+            },
             ActorAnimation::default(),
         ));
         app.world_mut()
@@ -1291,9 +1308,16 @@ mod tests {
             .press(WiiButton::One);
         step_fixed(&mut app);
 
-        let mut q = app.world_mut().query::<&Projectile>();
-        let dmg: Vec<u32> = q.iter(app.world()).map(|p| p.damage).collect();
-        assert_eq!(dmg, vec![13]);
+        let mut q = app.world_mut().query::<(&Projectile, &Velocity)>();
+        let spawned: Vec<(u32, f32, f32)> = q
+            .iter(app.world())
+            .map(|(p, v)| (p.damage, p.max_lifetime, v.0.length()))
+            .collect();
+        assert_eq!(spawned.len(), 1);
+        let (damage, lifetime, speed) = spawned[0];
+        assert_eq!(damage, 13);
+        assert_eq!(lifetime, 0.35);
+        assert!((speed - 40.0).abs() < 1e-3, "speed {speed}");
     }
 
     #[test]

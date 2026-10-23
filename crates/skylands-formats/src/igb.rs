@@ -5712,6 +5712,17 @@ mod tests {
             get("PrimaryAttack_Range_Base"),
             Some(ScriptValue::Float(0.45))
         );
+        assert_eq!(
+            get("projectile range/lifetime"),
+            Some(ScriptValue::Float(0.35))
+        );
+        let missile: Vec<f32> = model
+            .script_constants
+            .iter()
+            .filter(|(n, _)| n == "missile speed")
+            .map(|(_, v)| v.as_f32())
+            .collect();
+        assert!(missile.contains(&40.0), "missile speed {missile:?}");
 
         let Some(bytes) = read_character_bld("014_GillGrunt") else {
             return;
