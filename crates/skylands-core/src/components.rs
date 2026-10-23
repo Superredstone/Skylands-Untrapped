@@ -31,6 +31,28 @@ pub struct Hero;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Villain;
 
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlledVillain;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct VillainEnergy {
+    pub current: f32,
+    pub max: f32,
+    pub drain_rate: f32,
+    pub recharge_rate: f32,
+}
+
+impl Default for VillainEnergy {
+    fn default() -> Self {
+        Self {
+            current: 100.0,
+            max: 100.0,
+            drain_rate: 3.333,
+            recharge_rate: 5.0,
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prop {
     pub destructible: bool,

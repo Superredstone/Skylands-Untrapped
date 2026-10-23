@@ -17,6 +17,130 @@ pub fn poll_portal_system(
     }
 }
 
+pub fn spawn_hero_actor(
+    commands: &mut Commands,
+    pos: Vec3,
+    rot: Quat,
+    vel: Vec3,
+    char_id: u16,
+    asset_server: Option<&GameAssetServer>,
+) -> Entity {
+    let (name, _elem) = get_character_info(char_id);
+    let (model_path, tex_path) = get_character_asset_paths(char_id);
+    let model = asset_server.and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok());
+    let damage = model
+        .as_deref()
+        .and_then(AttackDamage::from_model)
+        .unwrap_or_default();
+    let projectile = model
+        .as_deref()
+        .map(ProjectileParams::from_model)
+        .unwrap_or_default();
+    let collider = model
+        .as_deref()
+        .map(CharacterCollider::from_model)
+        .unwrap_or_default();
+    let model_params = model
+        .as_deref()
+        .map(ModelParameters::from_model)
+        .unwrap_or_default();
+
+    commands
+        .spawn((
+            ActorIdentity {
+                id: char_id as u32,
+                character_id: char_id,
+                name: name.to_string(),
+                is_villain: false,
+                model_path: Some(model_path.to_string()),
+                texture_path: tex_path.map(|s| s.to_string()),
+            },
+            Hero,
+            Transform::from_translation(pos).with_rotation(rot),
+            collider,
+            Velocity(vel),
+            MovementSpeed(model_params.ground_max_speed),
+            model_params,
+            Health::default(),
+            AttackCombo::default(),
+            damage,
+            projectile,
+            ActorAnimation::default(),
+        ))
+        .id()
+}
+
+pub fn spawn_controlled_villain_actor(
+    commands: &mut Commands,
+    pos: Vec3,
+    rot: Quat,
+    vel: Vec3,
+    char_id: u16,
+    energy: VillainEnergy,
+    asset_server: Option<&GameAssetServer>,
+) -> Entity {
+    let (name, _elem) = get_character_info(char_id);
+    let (model_path, tex_path) = get_character_asset_paths(char_id);
+    let model = asset_server.and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok());
+    let damage = model
+        .as_deref()
+        .and_then(AttackDamage::from_model)
+        .unwrap_or(AttackDamage {
+            primary: 35.0,
+            secondary: 50.0,
+            special: 40.0,
+        });
+    let projectile = model
+        .as_deref()
+        .map(ProjectileParams::from_model)
+        .unwrap_or(ProjectileParams {
+            speed: 30.0,
+            lifetime: 1.0,
+        });
+    let collider = model
+        .as_deref()
+        .map(CharacterCollider::from_model)
+        .unwrap_or(CharacterCollider {
+            radius: 0.6,
+            height: 1.8,
+            step_height: 0.35,
+            grounded: true,
+        });
+    let model_params = model
+        .as_deref()
+        .map(ModelParameters::from_model)
+        .unwrap_or_default();
+
+    commands
+        .spawn((
+            ActorIdentity {
+                id: 1000 + char_id as u32,
+                character_id: char_id,
+                name: name.to_string(),
+                is_villain: true,
+                model_path: Some(model_path.to_string()),
+                texture_path: tex_path.map(|s| s.to_string()),
+            },
+            Hero,
+            ControlledVillain,
+            Transform::from_translation(pos).with_rotation(rot),
+            collider,
+            Velocity(vel),
+            MovementSpeed(model_params.ground_max_speed),
+            model_params,
+            Health {
+                current: energy.current.round() as u32,
+                max: energy.max.round() as u32,
+            },
+            energy,
+            AttackCombo::default(),
+            damage,
+            projectile,
+            ActorAnimation::default(),
+        ))
+        .id()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn portal_gameplay_system(
     mut commands: Commands,
@@ -26,6 +150,7 @@ pub fn portal_gameplay_system(
     mut next_state: ResMut<NextState<GameState>>,
     mut capture_progress: ResMut<CaptureProgress>,
     mut audio_streaming: ResMut<PortalAudioStreaming>,
+    mut trapped_state: ResMut<TrappedVillainState>,
     actors: Query<(Entity, &ActorIdentity)>,
     env: Option<Res<EnvironmentCollision>>,
     asset_server: Option<Res<GameAssetServer>>,
@@ -65,6 +190,9 @@ pub fn portal_gameplay_system(
                     gameplay_state.active_villain_id = Some(char_id);
                     capture_progress.villain_id = char_id;
                     capture_progress.progress = 0.0;
+                    capture_progress.duration = 2.0;
+                    trapped_state.trapped_villain_id = Some(char_id);
+                    trapped_state.energy.current = trapped_state.energy.max;
                     next_state.set(GameState::VillainCapture);
 
                     let (r, g, b) = elem.rgb();
@@ -124,49 +252,16 @@ pub fn portal_gameplay_system(
                         }
                     }
 
-                    let model = asset_server
-                        .as_ref()
-                        .and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok());
-                    let damage = model
-                        .as_deref()
-                        .and_then(AttackDamage::from_model)
-                        .unwrap_or_default();
-                    let projectile = model
-                        .as_deref()
-                        .map(ProjectileParams::from_model)
-                        .unwrap_or_default();
-                    let collider = model
-                        .as_deref()
-                        .map(CharacterCollider::from_model)
-                        .unwrap_or_default();
-                    let model_params = model
-                        .as_deref()
-                        .map(ModelParameters::from_model)
-                        .unwrap_or_default();
-
                     // Spawn hero entity
                     let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
-                    commands.spawn((
-                        ActorIdentity {
-                            id: char_id as u32,
-                            character_id: char_id,
-                            name: name.to_string(),
-                            is_villain: false,
-                            model_path: Some(model_path.to_string()),
-                            texture_path: tex_path.map(|s| s.to_string()),
-                        },
-                        Hero,
-                        Transform::from_translation(hero_pos),
-                        collider,
-                        Velocity::default(),
-                        MovementSpeed(model_params.ground_max_speed),
-                        model_params,
-                        Health::default(),
-                        AttackCombo::default(),
-                        damage,
-                        projectile,
-                        ActorAnimation::default(),
-                    ));
+                    spawn_hero_actor(
+                        &mut commands,
+                        hero_pos,
+                        Quat::IDENTITY,
+                        Vec3::ZERO,
+                        char_id,
+                        asset_server.as_deref(),
+                    );
                 }
 
                 let tag = SkylanderTag {
@@ -184,12 +279,31 @@ pub fn portal_gameplay_system(
             PortalEvent::TagRemoved { tag_index: _ } => {
                 portal.set_color(PortalZone::All, 0, 0, 0);
                 portal.set_trap_light(0, 0, 0);
-                for (entity, ident) in &actors {
-                    if ident.is_villain {
-                        commands.entity(entity).despawn();
+                if trapped_state.control_mode == ActiveControlMode::Villain {
+                    for (entity, ident) in &actors {
+                        if ident.is_villain {
+                            commands.entity(entity).despawn();
+                        }
+                    }
+                    trapped_state.control_mode = ActiveControlMode::Hero;
+                    let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
+                    spawn_hero_actor(
+                        &mut commands,
+                        spawn_origin,
+                        Quat::IDENTITY,
+                        Vec3::ZERO,
+                        hero_id,
+                        asset_server.as_deref(),
+                    );
+                } else {
+                    for (entity, ident) in &actors {
+                        if ident.is_villain {
+                            commands.entity(entity).despawn();
+                        }
                     }
                 }
                 gameplay_state.active_villain_id = None;
+                trapped_state.is_unlocked = false;
                 next_state.set(GameState::Hub);
             }
             _ => {}
@@ -240,6 +354,202 @@ pub fn input_mapping_system(
         WiiButton::Two,
         keyboard.pressed(KeyCode::Digit2) || keyboard.pressed(KeyCode::Numpad2),
     );
+    input_state.set_button(
+        WiiButton::Minus,
+        keyboard.pressed(KeyCode::Minus)
+            || keyboard.pressed(KeyCode::NumpadSubtract)
+            || keyboard.pressed(KeyCode::Escape)
+            || keyboard.pressed(KeyCode::Backspace)
+            || keyboard.pressed(KeyCode::Tab),
+    );
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn villain_tag_team_swap_system(
+    mut commands: Commands,
+    time: Option<Res<Time<Fixed>>>,
+    input: Res<WiiInputState>,
+    mut trapped_state: ResMut<TrappedVillainState>,
+    gameplay_state: Res<PortalGameplayState>,
+    mut portal: ResMut<ActivePortal>,
+    mut audio_streaming: ResMut<PortalAudioStreaming>,
+    mut audio_events: EventWriter<WorldAudioCueEvent>,
+    asset_server: Option<Res<GameAssetServer>>,
+    hero_query: Query<(Entity, &Transform, &Velocity), (With<Hero>, Without<ControlledVillain>)>,
+    villain_query: Query<(Entity, &Transform, &Velocity), (With<Hero>, With<ControlledVillain>)>,
+) {
+    let dt = time
+        .as_ref()
+        .map(|t| {
+            if t.delta_secs() > 0.0 {
+                t.delta_secs()
+            } else {
+                t.timestep().as_secs_f32()
+            }
+        })
+        .unwrap_or(1.0 / 60.0);
+
+    if trapped_state.swap_cooldown > 0.0 {
+        trapped_state.swap_cooldown = (trapped_state.swap_cooldown - dt).max(0.0);
+    }
+
+    if input.is_down(WiiButton::Minus) && trapped_state.swap_cooldown <= 0.0 {
+        trapped_state.swap_cooldown = 0.5;
+
+        match trapped_state.control_mode {
+            ActiveControlMode::Hero => {
+                if trapped_state.is_unlocked
+                    && trapped_state.energy.current >= trapped_state.min_swap_energy
+                {
+                    if let Some(villain_id) = trapped_state.trapped_villain_id {
+                        if let Ok((hero_ent, hero_tf, hero_vel)) = hero_query.get_single() {
+                            let pos = hero_tf.translation;
+                            let rot = hero_tf.rotation;
+                            let vel = hero_vel.0;
+                            commands.entity(hero_ent).despawn();
+
+                            spawn_controlled_villain_actor(
+                                &mut commands,
+                                pos,
+                                rot,
+                                vel,
+                                villain_id,
+                                trapped_state.energy,
+                                asset_server.as_deref(),
+                            );
+
+                            trapped_state.control_mode = ActiveControlMode::Villain;
+                            let (_, elem) = get_character_info(villain_id);
+                            let (r, g, b) = elem.rgb();
+                            portal.set_trap_light(r, g, b);
+
+                            audio_streaming.sink.queue_villain_speech(villain_id, 1.5);
+                            while let Some(pkt) = audio_streaming.sink.pop_packet() {
+                                audio_streaming.queue.push_back(pkt);
+                            }
+
+                            audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainSwapped));
+                        }
+                    }
+                }
+            }
+            ActiveControlMode::Villain => {
+                if let Ok((villain_ent, villain_tf, villain_vel)) = villain_query.get_single() {
+                    let pos = villain_tf.translation;
+                    let rot = villain_tf.rotation;
+                    let vel = villain_vel.0;
+                    commands.entity(villain_ent).despawn();
+
+                    let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
+                    spawn_hero_actor(
+                        &mut commands,
+                        pos,
+                        rot,
+                        vel,
+                        hero_id,
+                        asset_server.as_deref(),
+                    );
+
+                    trapped_state.control_mode = ActiveControlMode::Hero;
+                    let (_, elem) =
+                        get_character_info(trapped_state.trapped_villain_id.unwrap_or(1010));
+                    let (r, g, b) = elem.rgb();
+                    portal.set_trap_light(r / 3, g / 3, b / 3);
+
+                    audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainTrapReturned));
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn villain_energy_system(
+    mut commands: Commands,
+    time: Option<Res<Time<Fixed>>>,
+    mut trapped_state: ResMut<TrappedVillainState>,
+    gameplay_state: Res<PortalGameplayState>,
+    mut portal: ResMut<ActivePortal>,
+    mut audio_streaming: ResMut<PortalAudioStreaming>,
+    mut audio_events: EventWriter<WorldAudioCueEvent>,
+    mut stats: ResMut<GameStats>,
+    asset_server: Option<Res<GameAssetServer>>,
+    mut villain_query: Query<
+        (
+            Entity,
+            &Transform,
+            &Velocity,
+            &mut Health,
+            &mut VillainEnergy,
+        ),
+        (With<Hero>, With<ControlledVillain>),
+    >,
+) {
+    let dt = time
+        .as_ref()
+        .map(|t| {
+            if t.delta_secs() > 0.0 {
+                t.delta_secs()
+            } else {
+                t.timestep().as_secs_f32()
+            }
+        })
+        .unwrap_or(1.0 / 60.0);
+
+    match trapped_state.control_mode {
+        ActiveControlMode::Villain => {
+            trapped_state.energy.current =
+                (trapped_state.energy.current - trapped_state.energy.drain_rate * dt).max(0.0);
+
+            if let Ok((villain_ent, villain_tf, villain_vel, mut health, mut energy)) =
+                villain_query.get_single_mut()
+            {
+                energy.current = trapped_state.energy.current;
+                health.current = trapped_state.energy.current.round() as u32;
+
+                if trapped_state.energy.current <= 0.0 {
+                    let pos = villain_tf.translation;
+                    let rot = villain_tf.rotation;
+                    let vel = villain_vel.0;
+                    commands.entity(villain_ent).despawn();
+
+                    let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
+                    spawn_hero_actor(
+                        &mut commands,
+                        pos,
+                        rot,
+                        vel,
+                        hero_id,
+                        asset_server.as_deref(),
+                    );
+
+                    trapped_state.control_mode = ActiveControlMode::Hero;
+                    trapped_state.swap_cooldown = 0.5;
+
+                    portal.set_trap_light(255, 0, 0);
+
+                    if let Some(villain_id) = trapped_state.trapped_villain_id {
+                        audio_streaming.sink.queue_villain_speech(villain_id, 1.5);
+                        while let Some(pkt) = audio_streaming.sink.pop_packet() {
+                            audio_streaming.queue.push_back(pkt);
+                        }
+                    }
+
+                    audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainTrapReturned));
+                    stats.active_prompt =
+                        Some("Villain energy depleted! Returned to trap.".to_string());
+                }
+            }
+        }
+        ActiveControlMode::Hero => {
+            if trapped_state.is_unlocked && trapped_state.energy.current < trapped_state.energy.max
+            {
+                trapped_state.energy.current = (trapped_state.energy.current
+                    + trapped_state.energy.recharge_rate * dt)
+                    .min(trapped_state.energy.max);
+            }
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -646,7 +956,7 @@ pub fn projectile_flight_system(
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn damage_system(
     mut commands: Commands,
     mut damage_events: EventReader<DamageEvent>,
@@ -657,7 +967,16 @@ pub fn damage_system(
         &Transform,
         Option<&Prop>,
         Option<&Villain>,
+        Option<&ControlledVillain>,
+        Option<&ActorIdentity>,
     )>,
+    mut trapped_state: Option<ResMut<TrappedVillainState>>,
+    mut capture_progress: Option<ResMut<CaptureProgress>>,
+    mut next_state: Option<ResMut<NextState<GameState>>>,
+    mut portal: Option<ResMut<ActivePortal>>,
+    mut audio_streaming: Option<ResMut<PortalAudioStreaming>>,
+    mut stats: Option<ResMut<GameStats>>,
+    gameplay_state: Option<Res<PortalGameplayState>>,
 ) {
     for ev in damage_events.read() {
         commands.spawn((
@@ -670,58 +989,104 @@ pub fn damage_system(
             Transform::from_translation(ev.position + Vec3::new(0.0, 1.0, 0.0)),
         ));
 
-        if let Ok((entity, mut health, transform, maybe_prop, maybe_villain)) =
-            target_query.get_mut(ev.target)
+        if let Ok((
+            entity,
+            mut health,
+            transform,
+            maybe_prop,
+            maybe_villain,
+            maybe_controlled,
+            maybe_ident,
+        )) = target_query.get_mut(ev.target)
         {
-            health.current = health.current.saturating_sub(ev.damage);
-            if health.current == 0 {
-                let pos = transform.translation;
-                if let Some(prop) = maybe_prop {
-                    if prop.destructible {
-                        audio_events.send(WorldAudioCueEvent(WorldAudioCue::PropDestroyed));
-                        commands.spawn((
-                            Collectible {
-                                value: 1,
-                                collected: false,
-                            },
-                            Transform::from_xyz(pos.x, pos.y, pos.z),
-                            CharacterCollider {
-                                radius: 0.5,
-                                height: 0.5,
-                                step_height: 0.0,
-                                grounded: true,
-                            },
-                        ));
-                        commands.spawn((
-                            Collectible {
-                                value: 5,
-                                collected: false,
-                            },
-                            Transform::from_xyz(pos.x + 0.3, pos.y, pos.z + 0.3),
-                            CharacterCollider {
-                                radius: 0.5,
-                                height: 0.5,
-                                step_height: 0.0,
-                                grounded: true,
-                            },
-                        ));
-                        commands.entity(entity).despawn();
+            if maybe_controlled.is_some() {
+                if let Some(ref mut ts) = trapped_state {
+                    ts.energy.current = (ts.energy.current - ev.damage as f32).max(0.0);
+                    health.current = ts.energy.current.round() as u32;
+                }
+            } else {
+                health.current = health.current.saturating_sub(ev.damage);
+                if health.current == 0 {
+                    let pos = transform.translation;
+                    if let Some(prop) = maybe_prop {
+                        if prop.destructible {
+                            audio_events.send(WorldAudioCueEvent(WorldAudioCue::PropDestroyed));
+                            commands.spawn((
+                                Collectible {
+                                    value: 1,
+                                    collected: false,
+                                },
+                                Transform::from_xyz(pos.x, pos.y, pos.z),
+                                CharacterCollider {
+                                    radius: 0.5,
+                                    height: 0.5,
+                                    step_height: 0.0,
+                                    grounded: true,
+                                },
+                            ));
+                            commands.spawn((
+                                Collectible {
+                                    value: 5,
+                                    collected: false,
+                                },
+                                Transform::from_xyz(pos.x + 0.3, pos.y, pos.z + 0.3),
+                                CharacterCollider {
+                                    radius: 0.5,
+                                    height: 0.5,
+                                    step_height: 0.0,
+                                    grounded: true,
+                                },
+                            ));
+                            commands.entity(entity).despawn();
+                        }
+                    } else if maybe_villain.is_some() {
+                        let has_trap = gameplay_state
+                            .as_ref()
+                            .is_some_and(|gs| gs.tags.iter().any(|t| t.is_trap));
+                        if has_trap && capture_progress.is_some() && next_state.is_some() {
+                            let char_id = maybe_ident.map(|i| i.character_id).unwrap_or(1001);
+                            if let Some(ref mut cp) = capture_progress {
+                                cp.villain_id = char_id;
+                                cp.progress = 0.0;
+                                cp.duration = 2.0;
+                                cp.target_position = pos;
+                            }
+                            if let Some(ref mut ns) = next_state {
+                                ns.set(GameState::VillainCapture);
+                            }
+                            let (_, elem) = get_character_info(char_id);
+                            let (r, g, b) = elem.rgb();
+                            if let Some(ref mut p) = portal {
+                                p.set_trap_light(r, g, b);
+                            }
+                            if let Some(ref mut stream) = audio_streaming {
+                                stream.sink.queue_villain_speech(char_id, 2.0);
+                                while let Some(pkt) = stream.sink.pop_packet() {
+                                    stream.queue.push_back(pkt);
+                                }
+                            }
+                            commands.entity(entity).despawn();
+                        } else {
+                            commands.spawn((
+                                Collectible {
+                                    value: 10,
+                                    collected: false,
+                                },
+                                Transform::from_xyz(pos.x, pos.y, pos.z),
+                                CharacterCollider {
+                                    radius: 0.5,
+                                    height: 0.5,
+                                    step_height: 0.0,
+                                    grounded: true,
+                                },
+                            ));
+                            if let Some(ref mut s) = stats {
+                                s.active_prompt =
+                                    Some("Insert a Trap to capture Villain!".to_string());
+                            }
+                            commands.entity(entity).despawn();
+                        }
                     }
-                } else if maybe_villain.is_some() {
-                    commands.spawn((
-                        Collectible {
-                            value: 10,
-                            collected: false,
-                        },
-                        Transform::from_xyz(pos.x, pos.y, pos.z),
-                        CharacterCollider {
-                            radius: 0.5,
-                            height: 0.5,
-                            step_height: 0.0,
-                            grounded: true,
-                        },
-                    ));
-                    commands.entity(entity).despawn();
                 }
             }
         }
@@ -846,13 +1211,76 @@ pub fn portal_audio_stream_system(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn villain_capture_system(
+    mut commands: Commands,
+    time: Option<Res<Time<Fixed>>>,
+    current_state: Res<State<GameState>>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut capture_progress: ResMut<CaptureProgress>,
+    mut trapped_state: ResMut<TrappedVillainState>,
+    mut portal: ResMut<ActivePortal>,
+    mut audio_events: EventWriter<WorldAudioCueEvent>,
+    mut stats: ResMut<GameStats>,
+    villain_actors: Query<(Entity, &ActorIdentity), (With<Villain>, Without<ControlledVillain>)>,
+) {
+    if *current_state.get() != GameState::VillainCapture {
+        return;
+    }
+
+    let dt = time
+        .as_ref()
+        .map(|t| {
+            if t.delta_secs() > 0.0 {
+                t.delta_secs()
+            } else {
+                t.timestep().as_secs_f32()
+            }
+        })
+        .unwrap_or(1.0 / 60.0);
+
+    let speed = if capture_progress.duration > 0.0 {
+        1.0 / capture_progress.duration
+    } else {
+        0.5
+    };
+    capture_progress.progress = (capture_progress.progress + dt * speed).min(1.0);
+
+    let (_, elem) = get_character_info(capture_progress.villain_id);
+    let (r, g, b) = elem.rgb();
+    let pulse = (capture_progress.progress * std::f32::consts::PI * 6.0)
+        .sin()
+        .abs()
+        * 0.5
+        + 0.5;
+    portal.set_trap_light(
+        (r as f32 * pulse) as u8,
+        (g as f32 * pulse) as u8,
+        (b as f32 * pulse) as u8,
+    );
+
+    if capture_progress.progress >= 1.0 {
+        trapped_state.is_unlocked = true;
+        trapped_state.trapped_villain_id = Some(capture_progress.villain_id);
+        trapped_state.energy.current = trapped_state.energy.max;
+        portal.set_trap_light(r, g, b);
+
+        for (ent, _) in &villain_actors {
+            commands.entity(ent).despawn();
+        }
+        audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainTrapped));
+        let (name, _) = get_character_info(capture_progress.villain_id);
+        stats.active_prompt = Some(format!("Captured {} in Trap! Press Minus to Swap.", name));
+        next_state.set(GameState::Hub);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn state_transition_update_system(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
     current_state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
-    mut capture_progress: ResMut<CaptureProgress>,
     mut transition_progress: ResMut<ZoneTransitionProgress>,
     mut stats: ResMut<GameStats>,
     mut hero_query: Query<&mut Transform, With<Hero>>,
@@ -870,12 +1298,7 @@ pub fn state_transition_update_system(
     };
 
     match current_state.get() {
-        GameState::VillainCapture => {
-            capture_progress.progress = (capture_progress.progress + dt * 0.5).min(1.0);
-            if capture_progress.progress >= 1.0 {
-                next_state.set(GameState::Hub);
-            }
-        }
+        GameState::VillainCapture => {}
         GameState::ZoneTransition => {
             transition_progress.timer += dt;
             if transition_progress.timer >= transition_progress.duration {
@@ -1688,5 +2111,344 @@ mod tests {
         // Completing final chapter caps at 18
         campaign.complete_chapter(18);
         assert_eq!(campaign.highest_unlocked_chapter, 18);
+    }
+
+    #[test]
+    fn test_villain_tag_team_swap_and_manual_return() {
+        let mut app = build_test_app();
+
+        // 1. Setup trapped villain ready in trap
+        {
+            let mut trapped_state = app.world_mut().resource_mut::<TrappedVillainState>();
+            trapped_state.is_unlocked = true;
+            trapped_state.trapped_villain_id = Some(1010);
+            trapped_state.energy.current = 100.0;
+        }
+
+        // Spawn Hero at (5, 0, 5)
+        let hero_ent = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".into(),
+                    is_villain: false,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Hero,
+                Transform::from_xyz(5.0, 0.0, 5.0),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                Health::default(),
+                AttackCombo::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+
+        // Press Minus to swap into Kaos
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::Minus);
+        step_fixed(&mut app);
+
+        // Previous hero entity is despawned
+        assert!(app.world().get_entity(hero_ent).is_err());
+
+        // Control mode is Villain
+        let state = app.world().resource::<TrappedVillainState>();
+        assert_eq!(state.control_mode, ActiveControlMode::Villain);
+
+        // Active controlled villain spawned at the hero's position
+        let mut villain_q = app
+            .world_mut()
+            .query_filtered::<(&Transform, &ActorIdentity), (With<Hero>, With<ControlledVillain>)>(
+            );
+        let (v_tf, v_ident) = villain_q.iter(app.world()).next().unwrap();
+        assert_eq!(v_ident.character_id, 1010);
+        assert_eq!(v_ident.name, "Kaos");
+        assert_eq!(v_tf.translation, Vec3::new(5.0, 0.0, 5.0));
+
+        // Advance past swap cooldown (0.5s = 30 ticks)
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .release(WiiButton::Minus);
+        for _ in 0..35 {
+            step_fixed(&mut app);
+        }
+
+        // Press Minus to swap back to Hero
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::Minus);
+        step_fixed(&mut app);
+
+        let state = app.world().resource::<TrappedVillainState>();
+        assert_eq!(state.control_mode, ActiveControlMode::Hero);
+
+        // Controlled villain entity despawned and hero entity restored
+        let mut hero_q = app
+            .world_mut()
+            .query_filtered::<(&Transform, &ActorIdentity), (With<Hero>, Without<ControlledVillain>)>();
+        let (h_tf, h_ident) = hero_q.iter(app.world()).next().unwrap();
+        assert_eq!(h_ident.character_id, 16);
+        assert_eq!(h_tf.translation, Vec3::new(5.0, 0.0, 5.0));
+    }
+
+    #[test]
+    fn test_villain_energy_drain_and_forced_trap_return() {
+        let mut app = build_test_app();
+
+        // Setup active controlled villain with low energy and rapid drain
+        {
+            let mut trapped_state = app.world_mut().resource_mut::<TrappedVillainState>();
+            trapped_state.control_mode = ActiveControlMode::Villain;
+            trapped_state.is_unlocked = true;
+            trapped_state.trapped_villain_id = Some(1010);
+            trapped_state.energy.current = 1.0;
+            trapped_state.energy.drain_rate = 60.0; // drains to 0 on next tick
+        }
+
+        let villain_ent = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 2010,
+                    character_id: 1010,
+                    name: "Kaos".into(),
+                    is_villain: true,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Hero,
+                ControlledVillain,
+                Transform::from_xyz(2.0, 0.0, -4.0),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                Health {
+                    current: 1,
+                    max: 100,
+                },
+                VillainEnergy {
+                    current: 1.0,
+                    max: 100.0,
+                    drain_rate: 60.0,
+                    recharge_rate: 5.0,
+                },
+                AttackCombo::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+
+        // Step one tick -> energy hits 0 -> triggers forced trap return
+        step_fixed(&mut app);
+
+        assert!(app.world().get_entity(villain_ent).is_err());
+
+        let state = app.world().resource::<TrappedVillainState>();
+        assert_eq!(state.control_mode, ActiveControlMode::Hero);
+        assert_eq!(state.energy.current, 0.0);
+
+        // Hero respawned at (2, 0, -4)
+        let mut hero_q = app
+            .world_mut()
+            .query_filtered::<&Transform, (With<Hero>, Without<ControlledVillain>)>();
+        let h_tf = hero_q.iter(app.world()).next().unwrap();
+        assert_eq!(h_tf.translation, Vec3::new(2.0, 0.0, -4.0));
+
+        // Audio streaming queued exhausted speech packet
+        let audio = app.world().resource::<PortalAudioStreaming>();
+        assert!(
+            !audio.queue.is_empty(),
+            "Speech packets queued on forced return"
+        );
+    }
+
+    #[test]
+    fn test_damage_drains_controlled_villain_energy() {
+        let mut app = build_test_app();
+
+        {
+            let mut trapped_state = app.world_mut().resource_mut::<TrappedVillainState>();
+            trapped_state.control_mode = ActiveControlMode::Villain;
+            trapped_state.is_unlocked = true;
+            trapped_state.trapped_villain_id = Some(1010);
+            trapped_state.energy.current = 100.0;
+            trapped_state.energy.drain_rate = 0.0; // isolate damage testing
+        }
+
+        let villain_ent = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 2010,
+                    character_id: 1010,
+                    name: "Kaos".into(),
+                    is_villain: true,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Hero,
+                ControlledVillain,
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                Health {
+                    current: 100,
+                    max: 100,
+                },
+                VillainEnergy::default(),
+            ))
+            .id();
+
+        // Deal 40 damage to controlled villain
+        app.world_mut()
+            .resource_mut::<Events<DamageEvent>>()
+            .send(DamageEvent {
+                target: villain_ent,
+                damage: 40,
+                position: Vec3::ZERO,
+            });
+
+        step_fixed(&mut app);
+
+        let state = app.world().resource::<TrappedVillainState>();
+        assert_eq!(state.energy.current, 60.0);
+    }
+
+    #[test]
+    fn test_in_trap_energy_recharging() {
+        let mut app = build_test_app();
+
+        {
+            let mut trapped_state = app.world_mut().resource_mut::<TrappedVillainState>();
+            trapped_state.control_mode = ActiveControlMode::Hero;
+            trapped_state.is_unlocked = true;
+            trapped_state.energy.current = 50.0;
+            trapped_state.energy.recharge_rate = 10.0; // 10 units / sec
+        }
+
+        // Run 60 ticks (1.0 second)
+        for _ in 0..60 {
+            step_fixed(&mut app);
+        }
+
+        let state = app.world().resource::<TrappedVillainState>();
+        assert!((state.energy.current - 60.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_trap_tag_removal_forces_return_to_hero() {
+        let mut app = build_test_app();
+
+        {
+            let mut trapped_state = app.world_mut().resource_mut::<TrappedVillainState>();
+            trapped_state.control_mode = ActiveControlMode::Villain;
+            trapped_state.is_unlocked = true;
+            trapped_state.trapped_villain_id = Some(1010);
+        }
+
+        app.world_mut().spawn((
+            ActorIdentity {
+                id: 2010,
+                character_id: 1010,
+                name: "Kaos".into(),
+                is_villain: true,
+                model_path: None,
+                texture_path: None,
+            },
+            Hero,
+            ControlledVillain,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        // Send TagRemoved event
+        app.world_mut()
+            .resource_mut::<Events<PortalEvent>>()
+            .send(PortalEvent::TagRemoved { tag_index: 0 });
+
+        step_fixed(&mut app);
+
+        let state = app.world().resource::<TrappedVillainState>();
+        assert_eq!(state.control_mode, ActiveControlMode::Hero);
+        assert!(!state.is_unlocked);
+
+        // Controlled villain despawned and hero restored
+        let mut villain_q = app
+            .world_mut()
+            .query_filtered::<Entity, With<ControlledVillain>>();
+        assert_eq!(villain_q.iter(app.world()).count(), 0);
+    }
+
+    #[test]
+    fn test_enemy_defeat_trapping_sequence_and_unlock() {
+        let mut app = build_test_app();
+
+        // Place a mock trap tag on portal
+        app.world_mut()
+            .resource_mut::<PortalGameplayState>()
+            .tags
+            .push(SkylanderTag {
+                uid: [0, 0, 0, 0],
+                character_id: 1001,
+                variant: 0,
+                nickname: "Trap".to_string(),
+                xp: 0,
+                money: 0,
+                is_trap: true,
+                villain_id: None,
+            });
+
+        // Spawn an enemy villain with 30 HP
+        let enemy_ent = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 1001,
+                    character_id: 1001,
+                    name: "Chompy Mage".into(),
+                    is_villain: true,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Villain,
+                Transform::from_xyz(0.0, 0.0, -2.0),
+                Health {
+                    current: 30,
+                    max: 30,
+                },
+                CharacterCollider::default(),
+            ))
+            .id();
+
+        // Deal fatal 30 damage to enemy villain
+        app.world_mut()
+            .resource_mut::<Events<DamageEvent>>()
+            .send(DamageEvent {
+                target: enemy_ent,
+                damage: 30,
+                position: Vec3::new(0.0, 0.0, -2.0),
+            });
+
+        step_fixed(&mut app);
+
+        // State transitioned to VillainCapture
+        let state = app.world().resource::<State<GameState>>();
+        assert_eq!(*state.get(), GameState::VillainCapture);
+
+        // Advance simulation until capture finishes (duration 2.0s = 120 ticks)
+        for _ in 0..130 {
+            step_fixed(&mut app);
+        }
+
+        // State returned to Hub and villain unlocked in trap
+        let state = app.world().resource::<State<GameState>>();
+        assert_eq!(*state.get(), GameState::Hub);
+
+        let trapped = app.world().resource::<TrappedVillainState>();
+        assert!(trapped.is_unlocked);
+        assert_eq!(trapped.trapped_villain_id, Some(1001));
+        assert_eq!(trapped.energy.current, trapped.energy.max);
     }
 }

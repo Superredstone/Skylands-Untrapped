@@ -9,6 +9,9 @@ pub enum WorldAudioCue {
     AttackHit,
     PropDestroyed,
     ZoneEntered(String),
+    VillainSwapped,
+    VillainTrapReturned,
+    VillainTrapped,
 }
 
 #[derive(Event, Debug, Clone, PartialEq, Eq)]

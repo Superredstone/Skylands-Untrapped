@@ -239,10 +239,53 @@ impl Default for GameStats {
     }
 }
 
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone)]
 pub struct CaptureProgress {
     pub villain_id: u16,
     pub progress: f32,
+    pub duration: f32,
+    pub target_position: Vec3,
+}
+
+impl Default for CaptureProgress {
+    fn default() -> Self {
+        Self {
+            villain_id: 0,
+            progress: 0.0,
+            duration: 2.0,
+            target_position: Vec3::ZERO,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveControlMode {
+    #[default]
+    Hero,
+    Villain,
+}
+
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct TrappedVillainState {
+    pub control_mode: ActiveControlMode,
+    pub trapped_villain_id: Option<u16>,
+    pub energy: crate::components::VillainEnergy,
+    pub is_unlocked: bool,
+    pub min_swap_energy: f32,
+    pub swap_cooldown: f32,
+}
+
+impl Default for TrappedVillainState {
+    fn default() -> Self {
+        Self {
+            control_mode: ActiveControlMode::Hero,
+            trapped_villain_id: None,
+            energy: crate::components::VillainEnergy::default(),
+            is_unlocked: false,
+            min_swap_energy: 15.0,
+            swap_cooldown: 0.0,
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Default)]

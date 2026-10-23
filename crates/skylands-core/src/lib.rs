@@ -50,6 +50,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<EnvironmentCollision>()
             .init_resource::<ActiveLevel>()
             .init_resource::<CampaignProgress>()
+            .init_resource::<TrappedVillainState>()
             .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
             .add_systems(Startup, systems::setup_default_scene)
@@ -66,22 +67,32 @@ impl Plugin for SkylandsCorePlugin {
                     systems::poll_portal_system,
                     systems::portal_gameplay_system,
                     systems::input_mapping_system,
+                    systems::villain_tag_team_swap_system,
                     apply_deferred,
                     systems::hero_movement_system,
                     systems::actor_physics_system,
                     systems::hero_combat_system,
-                    apply_deferred,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                FixedUpdate,
+                (
                     systems::projectile_flight_system,
                     systems::damage_system,
+                    apply_deferred,
+                    systems::villain_energy_system,
                     apply_deferred,
                     systems::collectible_pickup_system,
                     systems::zone_trigger_system,
                     systems::animation_state_system,
                     systems::portal_audio_stream_system,
+                    systems::villain_capture_system,
                     systems::state_transition_update_system,
                     apply_state_transitions,
                 )
-                    .chain(),
+                    .chain()
+                    .after(systems::hero_combat_system),
             );
     }
 }

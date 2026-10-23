@@ -133,7 +133,18 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [ ] HP/XP curve: needs the script VM (`OpUseMacro` / `ValueRHSVariant` arithmetic) in `global.bld`, so it moves to Phase 5 `ScriptSet`.
   - `ModelParameters` defaults come from DOL ctor `0x805a89fc` (SDA2 `r2` = `0x806f5a40`, `.sdata2` `0x806f05d4..`) with string unit definitions in `0x80586ef4`. Script base speed (`global.bld` `Return Value - Base Speed` 10/22) parsed when present.
   - Ghidra: `tools/rea-bridge/FindStatTables.java` (stat-string xrefs plus the `ModelParameters` ctor; writes local-only `/tmp/skylands-re/stats_dump.txt`).
-- [ ] Villain timer/energy, trap return rules, trapping sequence.
+- [x] Villain timer/energy, trap return rules, trapping sequence:
+  - `VillainEnergy` (100.0 max, 3.33/s active drain ~30s duration, 5.0/s in-trap recharge) & `TrappedVillainState` (control mode, unlocked villain ID, swap cooldown).
+  - Tag-team swap (`villain_tag_team_swap_system`): `WiiButton::Minus` (keyboard Minus/Tab/Escape/Backspace or gamepad Select) toggles control between Hero and Trapped Villain; controlled villain spawns with `Hero` + `ControlledVillain`, preserves position/velocity, loads villain bounds collider, kinematics (`ModelParameters`), and attacks; portal trap LED illuminates in element color; Traptanium speaker sink queues entrance speech.
+  - Trap return rules (`villain_energy_system`):
+    - Energy depletion (`current <= 0.0`): forced return to hero at villain position, portal speaker plays exhausted VO, flashing red trap LED.
+    - Manual return (`WiiButton::Minus`): returns to hero, preserves remaining energy to recharge in trap.
+    - Physical trap removal (`TagRemoved`): forces immediate return to hero, locks villain swap, extinguishes trap LED.
+    - Damage conversion: combat damage dealt to controlled villain directly deducts energy instead of health.
+  - Trapping sequence (`villain_capture_system` & `damage_system`):
+    - Defeating enemy villain triggers capture when a trap tag is present in portal; pulses trap LED with element color, queues villain capture speech on Traptanium speaker sink (`audio_streaming.sink.queue_villain_speech`), sets `GameState::VillainCapture`.
+    - Completing sequence unlocks villain in trap with 100% energy, drops capture bonus loot, and returns to `Hub`. If trap is missing, prompts `Insert a Trap to capture Villain!`.
+  - Tests: `test_villain_tag_team_swap_and_manual_return`, `test_villain_energy_drain_and_forced_trap_return`, `test_damage_drains_controlled_villain_energy`, `test_in_trap_energy_recharging`, `test_trap_tag_removal_forces_return_to_hero`, `test_enemy_defeat_trapping_sequence_and_unlock`.
 - [ ] Enemy AI state machines (melee, ranged), encounter arenas.
 - [ ] Save profile layout.
 - Constants go into Rust with a `// DOL 0x80xxxxxx` source note; no pasted decompiler output.
