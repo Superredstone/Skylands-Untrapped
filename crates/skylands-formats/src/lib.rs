@@ -17,7 +17,7 @@ pub use igb::{
     IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
     IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
     IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
-    IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance,
+    IgzFile, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance,
     ScriptValue, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};

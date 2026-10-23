@@ -1142,6 +1142,20 @@ impl IgzObject {
     }
 }
 
+/// Raw IGZ file: section table, fixup-derived tables and the object registry.
+#[derive(Debug, Clone)]
+pub struct IgzFile {
+    pub endian: IgbEndian,
+    pub version: u32,
+    pub sections: Vec<IgzChunkDescriptor>,
+    pub string_table: Vec<String>,
+    pub exid_formats: Vec<u32>,
+    pub tmhn_entries: Vec<(usize, usize)>,
+    /// `EXNM` handle index -> external object name.
+    pub external_types: Vec<String>,
+    pub objects: Option<IgzObjectList>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgzObjectList {
     pub list_object: IgzObject,
@@ -3492,7 +3506,8 @@ impl IgbModel {
         visited[node_idx] = false;
     }
 
-    pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+    /// Raw IGZ scan: section-0 fixup tables plus the object registry.
+    pub fn scan_igz(data: &[u8]) -> Result<IgzFile, IgbError> {
         let igz_header = IgzHeader::parse(data)?;
         let endian = igz_header.endian;
         let version = igz_header.version;
@@ -3675,6 +3690,35 @@ impl IgbModel {
         } else {
             None
         };
+        let external_types = exnm_names
+            .iter()
+            .map(|&i: &usize| string_table.get(i).cloned().unwrap_or_default())
+            .collect();
+        let _ = &_fixup_tables;
+        Ok(IgzFile {
+            endian,
+            version,
+            sections: igz_header.descriptors.clone(),
+            string_table,
+            exid_formats,
+            tmhn_entries,
+            external_types,
+            objects: igz_objects,
+        })
+    }
+
+    pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+        let IgzFile {
+            endian,
+            version,
+            sections,
+            string_table,
+            exid_formats,
+            tmhn_entries,
+            external_types,
+            objects: igz_objects,
+        } = Self::scan_igz(data)?;
+        let sections = &sections[..];
 
         let mut geo_transforms = std::collections::HashMap::new();
         let mut actor_placements = Vec::new();
@@ -3687,10 +3731,6 @@ impl IgbModel {
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
-            let external_types: Vec<String> = exnm_names
-                .iter()
-                .map(|&i| string_table.get(i).cloned().unwrap_or_default())
-                .collect();
             script_constants = Self::decode_script_constants(
                 data,
                 sections,
