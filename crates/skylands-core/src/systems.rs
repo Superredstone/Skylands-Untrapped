@@ -75,6 +75,19 @@ pub fn portal_gameplay_system(
                         audio_streaming.queue.push_back(pkt);
                     }
 
+                    let model = asset_server
+                        .as_ref()
+                        .and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok());
+                    let collider = model
+                        .as_deref()
+                        .map(CharacterCollider::from_model)
+                        .unwrap_or(CharacterCollider {
+                            radius: 0.6,
+                            height: 1.8,
+                            step_height: 0.35,
+                            grounded: true,
+                        });
+
                     // Spawn villain entity
                     let villain_pos = spawn_origin + Vec3::new(2.5, 0.2, 0.0);
                     commands.spawn((
@@ -88,12 +101,7 @@ pub fn portal_gameplay_system(
                         },
                         Villain,
                         Transform::from_translation(villain_pos),
-                        CharacterCollider {
-                            radius: 0.6,
-                            height: 1.8,
-                            step_height: 0.35,
-                            grounded: true,
-                        },
+                        collider,
                         Velocity::default(),
                         MovementSpeed::default(),
                         Health::default(),
@@ -122,6 +130,10 @@ pub fn portal_gameplay_system(
                         .as_deref()
                         .map(ProjectileParams::from_model)
                         .unwrap_or_default();
+                    let collider = model
+                        .as_deref()
+                        .map(CharacterCollider::from_model)
+                        .unwrap_or_default();
 
                     // Spawn hero entity
                     let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
@@ -136,12 +148,7 @@ pub fn portal_gameplay_system(
                         },
                         Hero,
                         Transform::from_translation(hero_pos),
-                        CharacterCollider {
-                            radius: 0.5,
-                            height: 1.8,
-                            step_height: 0.35,
-                            grounded: true,
-                        },
+                        collider,
                         Velocity::default(),
                         MovementSpeed(5.0),
                         Health::default(),
@@ -283,14 +290,26 @@ pub fn actor_physics_system(
             transform.translation.x += velocity.0.x * sub_dt;
             transform.translation.z += velocity.0.z * sub_dt;
 
-            let sphere_center = [
+            let feet_center = [
                 transform.translation.x,
                 transform.translation.y + collider.radius,
                 transform.translation.z,
             ];
-            if let Some(push) = env.mesh.resolve_sphere(sphere_center, collider.radius) {
+            if let Some(push) = env.mesh.resolve_sphere(feet_center, collider.radius) {
                 transform.translation.x += push[0];
                 transform.translation.z += push[2];
+            }
+
+            if collider.height > 2.0 * collider.radius {
+                let head_center = [
+                    transform.translation.x,
+                    transform.translation.y + collider.height - collider.radius,
+                    transform.translation.z,
+                ];
+                if let Some(push) = env.mesh.resolve_sphere(head_center, collider.radius) {
+                    transform.translation.x += push[0];
+                    transform.translation.z += push[2];
+                }
             }
 
             if velocity.0.y > 0.0 {

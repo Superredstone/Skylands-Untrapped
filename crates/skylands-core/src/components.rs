@@ -76,6 +76,24 @@ impl Default for CharacterCollider {
     }
 }
 
+impl CharacterCollider {
+    pub fn from_model(model: &skylands_formats::IgbModel) -> Self {
+        if let Some((min_pt, max_pt)) = model.primary_mesh_bounds() {
+            let height = (max_pt[1] - min_pt[1]).max(0.5);
+            let radius = (height * 0.28).clamp(0.45, 1.2);
+            let step_height = (height * 0.2).clamp(0.35, 0.85);
+            Self {
+                radius,
+                height,
+                step_height,
+                grounded: true,
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Deref, DerefMut)]
 pub struct Velocity(pub Vec3);
 
@@ -210,6 +228,79 @@ impl ProjectileParams {
 mod tests {
     use super::*;
     use skylands_formats::ScriptValue;
+
+    #[test]
+    fn test_character_collider_from_synthetic_model() {
+        use skylands_formats::{IgbMesh, IgbModel, IgbVertex, Skeleton};
+
+        let mut model = IgbModel::default();
+        let skel = Skeleton {
+            bones: vec![Default::default(); 10],
+            root: 0,
+            name_to_index: Default::default(),
+        };
+        model.skeletons.push(skel);
+
+        // Body mesh attached to primary rig (height 3.0)
+        let body_mesh = IgbMesh {
+            name: "Body".into(),
+            vertices: vec![
+                IgbVertex {
+                    position: [-0.5, 0.0, -0.5],
+                    ..Default::default()
+                },
+                IgbVertex {
+                    position: [0.5, 3.0, 0.5],
+                    ..Default::default()
+                },
+            ],
+            indices: vec![],
+            material_name: None,
+            skeleton: Some(0),
+            image_index: None,
+            base_color: None,
+        };
+
+        // Accessory mesh on secondary rig (height 10.0, should be ignored)
+        let accessory_mesh = IgbMesh {
+            name: "WingTrail".into(),
+            vertices: vec![
+                IgbVertex {
+                    position: [0.0, 0.0, 0.0],
+                    ..Default::default()
+                },
+                IgbVertex {
+                    position: [0.0, 10.0, 0.0],
+                    ..Default::default()
+                },
+            ],
+            indices: vec![],
+            material_name: None,
+            skeleton: Some(1),
+            image_index: None,
+            base_color: None,
+        };
+
+        model.meshes.push(body_mesh);
+        model.meshes.push(accessory_mesh);
+
+        let collider = CharacterCollider::from_model(&model);
+        assert!(
+            (collider.height - 3.0).abs() < 1e-4,
+            "height: {}",
+            collider.height
+        );
+        assert!(
+            (collider.radius - 0.84).abs() < 1e-4,
+            "radius: {}",
+            collider.radius
+        );
+        assert!(
+            (collider.step_height - 0.6).abs() < 1e-4,
+            "step_height: {}",
+            collider.step_height
+        );
+    }
 
     #[test]
     fn test_projectile_params_from_constants() {

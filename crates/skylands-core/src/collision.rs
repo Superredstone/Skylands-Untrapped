@@ -569,25 +569,6 @@ impl CollisionMesh {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CharacterCollider {
-    pub radius: f32,
-    pub height: f32,
-    pub step_height: f32,
-    pub grounded: bool,
-}
-
-impl Default for CharacterCollider {
-    fn default() -> Self {
-        Self {
-            radius: 0.5,
-            height: 1.8,
-            step_height: 0.35,
-            grounded: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub mesh: CollisionMesh,

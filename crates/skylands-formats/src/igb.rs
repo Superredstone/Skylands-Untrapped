@@ -1868,6 +1868,40 @@ impl IgbModel {
         }
     }
 
+    /// Computes the AABB of meshes attached to the primary character rig.
+    ///
+    /// Ignores accessory meshes, separate tails, and cinematic geometry.
+    /// Falls back to all non-empty meshes if no skeleton exists.
+    pub fn primary_mesh_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let primary_skel = self.primary_skeleton_index();
+        let mut min_pt = [f32::MAX, f32::MAX, f32::MAX];
+        let mut max_pt = [f32::MIN, f32::MIN, f32::MIN];
+        let mut has_pts = false;
+
+        let primary_matches = |m: &&IgbMesh| -> bool {
+            match primary_skel {
+                Some(skel_idx) => m.skeleton == Some(skel_idx) && !m.vertices.is_empty(),
+                None => !m.vertices.is_empty(),
+            }
+        };
+
+        for m in self.meshes.iter().filter(primary_matches) {
+            for v in &m.vertices {
+                has_pts = true;
+                for c in 0..3 {
+                    min_pt[c] = min_pt[c].min(v.position[c]);
+                    max_pt[c] = max_pt[c].max(v.position[c]);
+                }
+            }
+        }
+
+        if has_pts {
+            Some((min_pt, max_pt))
+        } else {
+            None
+        }
+    }
+
     pub fn stats(&self) -> (usize, usize, usize) {
         let mut vertex_count = 0;
         let mut triangle_count = 0;
@@ -6401,6 +6435,21 @@ mod tests {
             assert_eq!(model.primary_skeleton_index(), Some(1));
             let primary_skel = model.primary_skeleton().expect("primary skel");
             assert_eq!(primary_skel.bones.len(), 33);
+        }
+
+        // Test Primary Rig Mesh Bounds for Characters
+        if let Some(bytes) = read_character_bld("016_Spyro") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+            let (min_pt, max_pt) = model.primary_mesh_bounds().expect("spyro primary bounds");
+            let height = max_pt[1] - min_pt[1];
+            assert!((height - 1.77).abs() < 0.1, "spyro height {height}");
+        }
+
+        if let Some(bytes) = read_character_bld("462_Water_Crocky") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse snap shot");
+            let (min_pt, max_pt) = model.primary_mesh_bounds().expect("snap shot bounds");
+            let height = max_pt[1] - min_pt[1];
+            assert!((height - 4.28).abs() < 0.2, "snap shot height {height}");
         }
     }
 }
