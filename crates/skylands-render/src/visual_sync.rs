@@ -8,7 +8,7 @@ use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
-    ActorIdentity, Collectible, Element, Hero, Projectile, Prop, Villain,
+    ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -670,6 +670,7 @@ pub fn actor_visual_sync_system(
             Option<&Hero>,
             Option<&Villain>,
             Option<&Prop>,
+            Has<Enemy>,
         ),
         Or<(Without<Mesh3d>, Changed<ActorIdentity>)>,
     >,
@@ -680,9 +681,9 @@ pub fn actor_visual_sync_system(
         return;
     };
 
-    for (entity, ident, maybe_hero, maybe_villain, maybe_prop) in &actor_query {
+    for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy) in &actor_query {
         let is_hero = maybe_hero.is_some();
-        let is_villain = maybe_villain.is_some();
+        let is_villain = maybe_villain.is_some() || is_enemy;
 
         if is_hero || is_villain {
             let custom_visual = visual_registry.as_mut().and_then(|reg| {

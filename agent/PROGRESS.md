@@ -151,12 +151,22 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     - Defeating enemy villain triggers capture when a trap tag is present in portal; pulses trap LED with element color, queues villain capture speech on Traptanium speaker sink (`audio_streaming.sink.queue_villain_speech`), sets `GameState::VillainCapture`.
     - Completing sequence unlocks villain in trap with 100% energy, drops capture bonus loot, and returns to `Hub`. If trap is missing, prompts `Insert a Trap to capture Villain!`.
   - Tests: `test_villain_tag_team_swap_and_manual_return`, `test_villain_energy_drain_and_forced_trap_return`, `test_damage_drains_controlled_villain_energy`, `test_in_trap_energy_recharging`, `test_trap_tag_removal_forces_return_to_hero`, `test_enemy_defeat_trapping_sequence_and_unlock`.
-- [ ] Enemy AI state machines (melee, ranged), encounter arenas.
+- [x] Enemy AI state machines (melee, ranged). Arenas/encounter waves deferred until after Phase 5 (`OpSpawn` controller scripts need the VM).
+  - Survey of all 86 level `.bld` (47k `tfbActorInfo`): enemies are `Enemy_S4_<Type>[_<Part>].ai` (`_Enemies/__Sky4_Enemies/...`), e.g. Chompy x268, Troll_Near x255, AOESwarmer x132. Helper scripts (`_Projectile`, `_Controller`, `_Impact`, spawners, `Template`) are not enemies.
+  - `MarkerKind::Enemy(EnemyClass)` via `EnemyClass::from_script_stem`. Near/Far split follows `LevelSystems.ai` `XpShares_Near` / `XpShares_Far` / `XpShares_HeavyNear` / `XpShares_HeavyFar`. Far = stem keyword (`lobber`, `shooter`, `gunner`, `far`, `mage`, `magnet`, `tank`, ...). Keyword table, unverified in-game.
+  - Per-script constants are reachable: `tfbScriptInfo._opList` +0x14 -> `OpCodeList` (`+0x08` count, `+0x14` ptr array). Enemy scripts hold only state literals. Ranges used: `Enemy_S4_BirdHazard.ai` `aggroRange = 45`, `Enemy_S4_UndeadLobber.ai` / `StunGun.ai` `attackRange = 60`/`50`, `WilikinLobberGooSpitter.ai` `myProjectileSpeed = 50` (all ft, so x `FEET_TO_UNITS`).
+  - `Enemy` component (`Idle -> Chase -> Windup -> Recover`), `enemy_ai_system` after `hero_combat_system`. It targets the nearest hero (ties go to entity order) and steers with `ModelParameters` accel. Near = melee `DamageEvent`, Far = `Projectile { hostile: true }` that only hits heroes. No RNG, so the game stays deterministic.
+  - Enemy defeat: `Combat.ai` "Creature Death Generate Loot" -> `LootSystem.ai` `LootValue = 5`, one `Collectible { value: 5 }`. Fixed, no rarity/drop-rate roll.
+  - Hero defeat: `Portal_Manager.ai` "Tag Defeated" / "Request Player Needs Tag Message". The hero despawns, its character ID goes to `PortalGameplayState.defeated_heroes`, the same tag is refused until the level changes, and a prompt asks for another Skylander.
+  - Placeholders (need VM: `Minion_Tuning.ai` HP multiplier / difficulty formulas): enemy HP 100, melee 25, ranged 20, windup 0.5 s, recover 1.0 s, melee reach 1.5.
+  - Tests: `test_enemy_script_classification`, `test_level_enemy_markers` (ROM), `test_melee_enemy_chases_and_hits_hero`, `test_enemy_ignores_hero_outside_aggro_range`, `test_ranged_enemy_projectile_hurts_hero_not_enemies`, `test_enemy_defeat_drops_loot`, `test_defeated_hero_is_out_until_level_change`, `test_enemy_ai_is_deterministic`.
 - [ ] Save profile layout.
 - Constants go into Rust with a `// DOL 0x80xxxxxx` source note; no pasted decompiler output.
 
 ### Phase 5 - Scripts, text, audio, misc
 - [ ] `ScriptSet` / script VM (see `tools/igArchiveExtractor/Types/ScriptSet.cs`).
+- [ ] Encounter arenas / waves (`Arena_Challenge_*`, `_ArenaMaster2.ai`, `BattleMaster.ai`, `Enemy_Setup_00x_Controller.ai`), after the VM.
+- [ ] Enemy tuning from `Minion_Tuning.ai`, loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate", after the VM.
 - [ ] Localization strings (EU en).
 - [ ] Sound bank to event mapping.
 - [ ] Mock tag persistence (`.tag`). Real tag write-back + hotplug need human review (portal protocol).

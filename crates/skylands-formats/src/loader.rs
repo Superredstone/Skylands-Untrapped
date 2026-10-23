@@ -686,6 +686,36 @@ mod tests {
     }
 
     #[test]
+    fn test_level_enemy_markers() {
+        use crate::igb::{EnemyClass, MarkerKind};
+        let rel = "assets/files/level/Level_302_Chompywurm.bld";
+        let Some(path) = [rel.to_string(), format!("../../{rel}")]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists())
+        else {
+            return;
+        };
+        let mut loader = AssetLoader::default();
+        loader.mount(&path).expect("mount level");
+        let raw = loader.load_raw("level.bld").expect("load level.bld");
+        let model = IgbModel::parse_igz(&raw).expect("parse level");
+        let markers = model.extract_level_markers();
+        let count = |c| {
+            markers
+                .iter()
+                .filter(|m| m.kind == MarkerKind::Enemy(c))
+                .count()
+        };
+        assert!(count(EnemyClass::Near) > 0, "no melee enemies");
+        assert!(
+            markers.iter().any(|m| m.name.starts_with("Enemy_S4_Chompy")
+                && m.kind == MarkerKind::Enemy(EnemyClass::Near)),
+            "Chompy placements"
+        );
+    }
+
+    #[test]
     fn test_hub_level_entity_decoding_and_markers() {
         let p1 = Path::new("assets/files/level/Level_Hub_2014_01.bld");
         let p2 = Path::new("../../assets/files/level/Level_Hub_2014_01.bld");

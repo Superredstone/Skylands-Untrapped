@@ -199,6 +199,9 @@ pub struct PortalGameplayState {
     pub active_hero_character_id: Option<u16>,
     pub active_villain_id: Option<u16>,
     pub portal_light_color: Option<(u8, u8, u8)>,
+    /// Character IDs knocked out this level (`Portal_Manager.ai` "tag is defeated");
+    /// cleared on level change.
+    pub defeated_heroes: Vec<u16>,
 }
 
 #[derive(Resource, Debug, Clone)]

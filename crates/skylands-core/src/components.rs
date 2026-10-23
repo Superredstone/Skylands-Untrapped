@@ -34,6 +34,54 @@ pub struct Villain;
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControlledVillain;
 
+pub use skylands_formats::igb::EnemyClass;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnemyState {
+    Idle,
+    Chase,
+    Windup,
+    Recover,
+}
+
+/// Level enemy placed by an `Enemy_S4_*.ai` script.
+/// Ranges are script literals in feet: `Enemy_S4_BirdHazard.ai` `aggroRange = 45`,
+/// `Enemy_S4_UndeadLobber.ai` `attackRange = 60`.
+// ponytail: health/damage/timings are fixed; real values come from `Minion_Tuning.ai`
+// formulas (HP multiplier, difficulty), which need the Phase 5 script VM.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Enemy {
+    pub class: EnemyClass,
+    pub state: EnemyState,
+    pub timer: f32,
+    pub aggro_range: f32,
+    pub attack_range: f32,
+    pub damage: u32,
+}
+
+impl Enemy {
+    pub const HEALTH: u32 = 100;
+    pub const WINDUP: f32 = 0.5;
+    pub const RECOVER: f32 = 1.0;
+    /// `Enemy_S4_WilikinLobberGooSpitter.ai` `myProjectileSpeed = 50` (ft/s).
+    pub const PROJECTILE_SPEED: f32 = 50.0 * FEET_TO_UNITS;
+
+    pub fn new(class: EnemyClass) -> Self {
+        let (attack_range, damage) = match class {
+            EnemyClass::Near => (1.5, 25),
+            EnemyClass::Far => (60.0 * FEET_TO_UNITS, 20),
+        };
+        Self {
+            class,
+            state: EnemyState::Idle,
+            timer: 0.0,
+            aggro_range: 45.0 * FEET_TO_UNITS,
+            attack_range,
+            damage,
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct VillainEnergy {
     pub current: f32,
@@ -515,6 +563,8 @@ pub struct Projectile {
     pub max_lifetime: f32,
     pub damage: u32,
     pub radius: f32,
+    /// Fired by an enemy: hits heroes only.
+    pub hostile: bool,
 }
 
 #[derive(Component, Debug, Clone, PartialEq)]

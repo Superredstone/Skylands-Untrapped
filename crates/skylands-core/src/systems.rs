@@ -151,7 +151,7 @@ pub fn portal_gameplay_system(
     mut capture_progress: ResMut<CaptureProgress>,
     mut audio_streaming: ResMut<PortalAudioStreaming>,
     mut trapped_state: ResMut<TrappedVillainState>,
-    actors: Query<(Entity, &ActorIdentity)>,
+    actors: Query<(Entity, &ActorIdentity, Has<Hero>)>,
     env: Option<Res<EnvironmentCollision>>,
     asset_server: Option<Res<GameAssetServer>>,
 ) {
@@ -240,14 +240,18 @@ pub fn portal_gameplay_system(
                         Health::default(),
                         ActorAnimation::default(),
                     ));
+                } else if gameplay_state.defeated_heroes.contains(&char_id) {
+                    // `Portal_Manager.ai` "Request Player Needs Tag Message": defeated
+                    // Skylanders stay out until the level changes.
+                    continue;
                 } else {
                     gameplay_state.active_hero_character_id = Some(char_id);
                     let (r, g, b) = elem.rgb();
                     portal.set_color(*zone, r, g, b);
 
                     // Despawn existing heroes first
-                    for (entity, ident) in &actors {
-                        if !ident.is_villain {
+                    for (entity, ident, is_hero) in &actors {
+                        if is_hero && !ident.is_villain {
                             commands.entity(entity).despawn();
                         }
                     }
@@ -280,7 +284,7 @@ pub fn portal_gameplay_system(
                 portal.set_color(PortalZone::All, 0, 0, 0);
                 portal.set_trap_light(0, 0, 0);
                 if trapped_state.control_mode == ActiveControlMode::Villain {
-                    for (entity, ident) in &actors {
+                    for (entity, ident, _) in &actors {
                         if ident.is_villain {
                             commands.entity(entity).despawn();
                         }
@@ -296,7 +300,7 @@ pub fn portal_gameplay_system(
                         asset_server.as_deref(),
                     );
                 } else {
-                    for (entity, ident) in &actors {
+                    for (entity, ident, _) in &actors {
                         if ident.is_villain {
                             commands.entity(entity).despawn();
                         }
@@ -761,6 +765,7 @@ pub fn hero_combat_system(
             &CharacterCollider,
             Option<&Prop>,
             Option<&Villain>,
+            Option<&Enemy>,
         ),
         Without<Hero>,
     >,
@@ -839,6 +844,7 @@ pub fn hero_combat_system(
                             max_lifetime: projectile.lifetime,
                             damage: attack_damage.special.round() as u32,
                             radius: 0.5,
+                            hostile: false,
                         },
                         Velocity(fwd_norm * projectile.speed),
                         Transform::from_translation(hero_tf.translation + Vec3::new(0.0, 0.8, 0.0)),
@@ -855,11 +861,18 @@ pub fn hero_combat_system(
                     let hero_pos = hero_tf.translation;
                     let mut hits = Vec::new();
 
-                    for (target_entity, target_tf, collider, maybe_prop, maybe_villain) in
-                        &target_query
+                    for (
+                        target_entity,
+                        target_tf,
+                        collider,
+                        maybe_prop,
+                        maybe_villain,
+                        maybe_enemy,
+                    ) in &target_query
                     {
-                        let is_target =
-                            maybe_villain.is_some() || maybe_prop.is_some_and(|p| p.destructible);
+                        let is_target = maybe_villain.is_some()
+                            || maybe_enemy.is_some()
+                            || maybe_prop.is_some_and(|p| p.destructible);
                         if !is_target {
                             continue;
                         }
@@ -911,8 +924,10 @@ pub fn projectile_flight_system(
             &CharacterCollider,
             Option<&Prop>,
             Option<&Villain>,
+            Option<&Enemy>,
+            Has<Hero>,
         ),
-        (Without<Hero>, Without<Projectile>),
+        Without<Projectile>,
     >,
 ) {
     let dt = if time.delta_secs() > 0.0 {
@@ -931,8 +946,17 @@ pub fn projectile_flight_system(
         proj_tf.translation += velocity.0 * dt;
 
         let mut hit = false;
-        for (target_entity, target_tf, collider, maybe_prop, maybe_villain) in &target_query {
-            let is_target = maybe_villain.is_some() || maybe_prop.is_some_and(|p| p.destructible);
+        for (target_entity, target_tf, collider, maybe_prop, maybe_villain, maybe_enemy, is_hero) in
+            &target_query
+        {
+            let is_target = if proj.hostile {
+                is_hero
+            } else {
+                !is_hero
+                    && (maybe_villain.is_some()
+                        || maybe_enemy.is_some()
+                        || maybe_prop.is_some_and(|p| p.destructible))
+            };
             if !is_target {
                 continue;
             }
@@ -969,6 +993,8 @@ pub fn damage_system(
         Option<&Villain>,
         Option<&ControlledVillain>,
         Option<&ActorIdentity>,
+        Has<Enemy>,
+        Has<Hero>,
     )>,
     mut trapped_state: Option<ResMut<TrappedVillainState>>,
     mut capture_progress: Option<ResMut<CaptureProgress>>,
@@ -976,7 +1002,7 @@ pub fn damage_system(
     mut portal: Option<ResMut<ActivePortal>>,
     mut audio_streaming: Option<ResMut<PortalAudioStreaming>>,
     mut stats: Option<ResMut<GameStats>>,
-    gameplay_state: Option<Res<PortalGameplayState>>,
+    mut gameplay_state: Option<ResMut<PortalGameplayState>>,
 ) {
     for ev in damage_events.read() {
         commands.spawn((
@@ -997,6 +1023,8 @@ pub fn damage_system(
             maybe_villain,
             maybe_controlled,
             maybe_ident,
+            is_enemy,
+            is_hero,
         )) = target_query.get_mut(ev.target)
         {
             if maybe_controlled.is_some() {
@@ -1008,7 +1036,40 @@ pub fn damage_system(
                 health.current = health.current.saturating_sub(ev.damage);
                 if health.current == 0 {
                     let pos = transform.translation;
-                    if let Some(prop) = maybe_prop {
+                    if is_hero {
+                        // `Portal_Manager.ai` "Tag Defeated": the Skylander is out for this
+                        // level and the player must place another one on the portal.
+                        let char_id = maybe_ident.map(|i| i.character_id).unwrap_or(0);
+                        if let Some(ref mut gs) = gameplay_state {
+                            gs.defeated_heroes.push(char_id);
+                            gs.active_hero_character_id = None;
+                        }
+                        if let Some(ref mut s) = stats {
+                            let name = maybe_ident.map(|i| i.name.as_str()).unwrap_or("Skylander");
+                            s.active_prompt = Some(format!(
+                                "{name} has been defeated! Place a different Skylander on the Portal."
+                            ));
+                        }
+                        commands.entity(entity).despawn();
+                    } else if is_enemy {
+                        // `LootSystem.ai` "Creature Death Generate Loot": `LootValue = 5`.
+                        // ponytail: fixed drop; real one rolls rarity/drop-rate in the script VM.
+                        commands.spawn((
+                            LevelEntity,
+                            Collectible {
+                                value: 5,
+                                collected: false,
+                            },
+                            Transform::from_translation(pos),
+                            CharacterCollider {
+                                radius: 0.5,
+                                height: 0.5,
+                                step_height: 0.0,
+                                grounded: true,
+                            },
+                        ));
+                        commands.entity(entity).despawn();
+                    } else if let Some(prop) = maybe_prop {
                         if prop.destructible {
                             audio_events.send(WorldAudioCueEvent(WorldAudioCue::PropDestroyed));
                             commands.spawn((
@@ -1290,6 +1351,7 @@ pub fn state_transition_update_system(
     asset_server: Option<Res<GameAssetServer>>,
     level_entities_query: Query<Entity, With<LevelEntity>>,
     mut level_changed_events: EventWriter<LevelChangedEvent>,
+    mut gameplay_state: Option<ResMut<PortalGameplayState>>,
 ) {
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
@@ -1329,6 +1391,9 @@ pub fn state_transition_update_system(
 
                     for ent in &level_entities_query {
                         commands.entity(ent).despawn_recursive();
+                    }
+                    if let Some(ref mut gs) = gameplay_state {
+                        gs.defeated_heroes.clear();
                     }
 
                     if let Some(ref mut lvl) = active_level {
@@ -1496,6 +1561,16 @@ pub fn spawn_level_content(
                 ));
                 marker_id_counter += 1;
             }
+            skylands_formats::igb::MarkerKind::Enemy(class) => {
+                spawn_enemy(
+                    commands,
+                    marker_id_counter,
+                    &marker.name,
+                    class,
+                    Vec3::from(marker.position),
+                );
+                marker_id_counter += 1;
+            }
             _ => {}
         }
     }
@@ -1509,6 +1584,141 @@ pub fn spawn_level_content(
     }
 
     true
+}
+
+pub fn spawn_enemy(
+    commands: &mut Commands,
+    id: u32,
+    name: &str,
+    class: EnemyClass,
+    pos: Vec3,
+) -> Entity {
+    commands
+        .spawn((
+            LevelEntity,
+            ActorIdentity {
+                id,
+                character_id: 0,
+                name: name.to_string(),
+                is_villain: false,
+                model_path: None,
+                texture_path: None,
+            },
+            Enemy::new(class),
+            Health {
+                current: Enemy::HEALTH,
+                max: Enemy::HEALTH,
+            },
+            Transform::from_translation(pos),
+            CharacterCollider::default(),
+            Velocity::default(),
+            ModelParameters::default(),
+            ActorAnimation::default(),
+        ))
+        .id()
+}
+
+/// Per-tick enemy brain: Idle until a hero enters `aggro_range`, Chase into
+/// `attack_range`, Windup, then strike (melee hit or hostile projectile) and Recover.
+/// Target = nearest hero, ties broken by entity order, so runs are deterministic.
+#[allow(clippy::type_complexity)]
+pub fn enemy_ai_system(
+    mut commands: Commands,
+    time: Res<Time<Fixed>>,
+    mut damage_events: EventWriter<DamageEvent>,
+    heroes: Query<(Entity, &Transform), (With<Hero>, Without<Enemy>)>,
+    mut enemies: Query<(
+        &mut Enemy,
+        &mut Transform,
+        &mut Velocity,
+        &CharacterCollider,
+        &ModelParameters,
+    )>,
+) {
+    let dt = if time.delta_secs() > 0.0 {
+        time.delta_secs()
+    } else {
+        time.timestep().as_secs_f32()
+    };
+    let mut hero_list: Vec<(Entity, Vec3)> =
+        heroes.iter().map(|(e, t)| (e, t.translation)).collect();
+    hero_list.sort_by_key(|(e, _)| *e);
+
+    for (mut enemy, mut tf, mut vel, collider, params) in &mut enemies {
+        let pos = tf.translation;
+        let target = hero_list
+            .iter()
+            .map(|&(e, p)| (e, p, Vec2::new(p.x - pos.x, p.z - pos.z)))
+            .min_by(|a, b| a.2.length().total_cmp(&b.2.length()));
+        let Some((target, target_pos, to_target)) = target else {
+            enemy.state = EnemyState::Idle;
+            vel.0.x = 0.0;
+            vel.0.z = 0.0;
+            continue;
+        };
+        let dist = to_target.length();
+        let dir = to_target.normalize_or_zero();
+        let in_range = dist <= enemy.attack_range + collider.radius;
+
+        enemy.timer = (enemy.timer - dt).max(0.0);
+        enemy.state = match enemy.state {
+            EnemyState::Idle | EnemyState::Chase if dist > enemy.aggro_range => EnemyState::Idle,
+            EnemyState::Idle | EnemyState::Chase if in_range => {
+                enemy.timer = Enemy::WINDUP;
+                EnemyState::Windup
+            }
+            EnemyState::Idle | EnemyState::Chase => EnemyState::Chase,
+            EnemyState::Windup if enemy.timer > 0.0 => EnemyState::Windup,
+            EnemyState::Windup => {
+                match enemy.class {
+                    EnemyClass::Near if in_range => {
+                        damage_events.send(DamageEvent {
+                            target,
+                            damage: enemy.damage,
+                            position: target_pos,
+                        });
+                    }
+                    EnemyClass::Near => {}
+                    EnemyClass::Far => {
+                        commands.spawn((
+                            Projectile {
+                                lifetime: 0.0,
+                                max_lifetime: enemy.attack_range * 1.5 / Enemy::PROJECTILE_SPEED,
+                                damage: enemy.damage,
+                                radius: 0.5,
+                                hostile: true,
+                            },
+                            Velocity(Vec3::new(dir.x, 0.0, dir.y) * Enemy::PROJECTILE_SPEED),
+                            Transform::from_translation(pos + Vec3::new(0.0, 0.8, 0.0)),
+                        ));
+                    }
+                }
+                enemy.timer = Enemy::RECOVER;
+                EnemyState::Recover
+            }
+            EnemyState::Recover if enemy.timer > 0.0 => EnemyState::Recover,
+            EnemyState::Recover => EnemyState::Chase,
+        };
+
+        let target_h = if enemy.state == EnemyState::Chase {
+            dir * params.ground_max_speed
+        } else {
+            Vec2::ZERO
+        };
+        let current_h = Vec2::new(vel.0.x, vel.0.z);
+        let diff = target_h - current_h;
+        let max_step = params.ground_accel * dt;
+        let new_h = if diff.length() <= max_step {
+            target_h
+        } else {
+            current_h + diff.normalize() * max_step
+        };
+        vel.0.x = new_h.x;
+        vel.0.z = new_h.y;
+        if dir != Vec2::ZERO && enemy.state != EnemyState::Idle {
+            tf.rotation = Quat::from_rotation_y((-dir.x).atan2(-dir.y));
+        }
+    }
 }
 
 pub fn spawn_fallback_courtyard_content(commands: &mut Commands) {
@@ -2450,5 +2660,184 @@ mod tests {
         assert!(trapped.is_unlocked);
         assert_eq!(trapped.trapped_villain_id, Some(1001));
         assert_eq!(trapped.energy.current, trapped.energy.max);
+    }
+
+    fn spawn_test_hero(app: &mut App, pos: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".into(),
+                    is_villain: false,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Hero,
+                Transform::from_translation(pos),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                Health {
+                    current: 100,
+                    max: 100,
+                },
+                AttackCombo::default(),
+                ActorAnimation::default(),
+            ))
+            .id()
+    }
+
+    fn spawn_test_enemy(app: &mut App, class: EnemyClass, pos: Vec3) -> Entity {
+        let mut commands = app.world_mut().commands();
+        let e = spawn_enemy(&mut commands, 9000, "Enemy_S4_Test", class, pos);
+        app.world_mut().flush();
+        e
+    }
+
+    fn hero_health(app: &App, hero: Entity) -> u32 {
+        app.world().get::<Health>(hero).map_or(0, |h| h.current)
+    }
+
+    #[test]
+    fn test_melee_enemy_chases_and_hits_hero() {
+        let mut app = build_test_app();
+        let hero = spawn_test_hero(&mut app, Vec3::ZERO);
+        let enemy = spawn_test_enemy(&mut app, EnemyClass::Near, Vec3::new(0.0, 0.0, -6.0));
+
+        step_fixed(&mut app);
+        assert_eq!(
+            app.world().get::<Enemy>(enemy).unwrap().state,
+            EnemyState::Chase
+        );
+        for _ in 0..240 {
+            step_fixed(&mut app);
+        }
+        let z = app.world().get::<Transform>(enemy).unwrap().translation.z;
+        assert!(z > -3.0, "enemy closed in, z = {z}");
+        assert!(hero_health(&app, hero) < 100, "melee enemy hit the hero");
+    }
+
+    #[test]
+    fn test_enemy_ignores_hero_outside_aggro_range() {
+        let mut app = build_test_app();
+        let hero = spawn_test_hero(&mut app, Vec3::ZERO);
+        let enemy = spawn_test_enemy(&mut app, EnemyClass::Near, Vec3::new(0.0, 0.0, -30.0));
+        for _ in 0..60 {
+            step_fixed(&mut app);
+        }
+        assert_eq!(
+            app.world().get::<Enemy>(enemy).unwrap().state,
+            EnemyState::Idle
+        );
+        assert_eq!(hero_health(&app, hero), 100);
+    }
+
+    #[test]
+    fn test_ranged_enemy_projectile_hurts_hero_not_enemies() {
+        let mut app = build_test_app();
+        let hero = spawn_test_hero(&mut app, Vec3::ZERO);
+        let shooter = spawn_test_enemy(&mut app, EnemyClass::Far, Vec3::new(0.0, 0.0, -10.0));
+        // Melee ally sits in the line of fire but outside its own reach of the hero.
+        let ally = spawn_test_enemy(&mut app, EnemyClass::Near, Vec3::new(0.0, 0.0, -5.0));
+        app.world_mut().get_mut::<Enemy>(ally).unwrap().aggro_range = 0.0;
+
+        step_fixed(&mut app);
+        assert_eq!(
+            app.world().get::<Enemy>(shooter).unwrap().state,
+            EnemyState::Windup,
+            "10 units is inside 60 ft attack range: no chase"
+        );
+        for _ in 0..90 {
+            step_fixed(&mut app);
+        }
+        assert!(hero_health(&app, hero) < 100, "projectile hit the hero");
+        assert_eq!(
+            app.world().get::<Health>(ally).unwrap().current,
+            Enemy::HEALTH,
+            "hostile projectile passes through enemies"
+        );
+    }
+
+    #[test]
+    fn test_enemy_defeat_drops_loot() {
+        let mut app = build_test_app();
+        let enemy = spawn_test_enemy(&mut app, EnemyClass::Near, Vec3::new(3.0, 0.0, 0.0));
+        app.world_mut()
+            .resource_mut::<Events<DamageEvent>>()
+            .send(DamageEvent {
+                target: enemy,
+                damage: Enemy::HEALTH,
+                position: Vec3::new(3.0, 0.0, 0.0),
+            });
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(enemy).is_err());
+        let loot: Vec<u32> = app
+            .world_mut()
+            .query::<&Collectible>()
+            .iter(app.world())
+            .map(|c| c.value)
+            .collect();
+        assert_eq!(loot, vec![5]);
+        assert_eq!(
+            *app.world().resource::<State<GameState>>().get(),
+            GameState::Hub
+        );
+    }
+
+    #[test]
+    fn test_defeated_hero_is_out_until_level_change() {
+        let mut app = build_test_app();
+        let hero = spawn_test_hero(&mut app, Vec3::ZERO);
+        app.world_mut()
+            .resource_mut::<Events<DamageEvent>>()
+            .send(DamageEvent {
+                target: hero,
+                damage: 1000,
+                position: Vec3::ZERO,
+            });
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(hero).is_err());
+        assert_eq!(
+            app.world()
+                .resource::<PortalGameplayState>()
+                .defeated_heroes,
+            vec![16]
+        );
+
+        // Same Skylander back on the portal: refused.
+        app.world_mut()
+            .resource_mut::<Events<PortalEvent>>()
+            .send(PortalEvent::TagArrived {
+                tag_index: 1,
+                zone: PortalZone::LeftRing,
+            });
+        step_fixed(&mut app);
+        let heroes = app
+            .world_mut()
+            .query_filtered::<Entity, With<Hero>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(heroes, 0);
+    }
+
+    #[test]
+    fn test_enemy_ai_is_deterministic() {
+        let run = || {
+            let mut app = build_test_app();
+            let hero = spawn_test_hero(&mut app, Vec3::ZERO);
+            spawn_test_enemy(&mut app, EnemyClass::Near, Vec3::new(4.0, 0.0, -5.0));
+            spawn_test_enemy(&mut app, EnemyClass::Far, Vec3::new(-6.0, 0.0, 3.0));
+            for _ in 0..300 {
+                step_fixed(&mut app);
+            }
+            let mut q = app.world_mut().query::<(&Enemy, &Transform)>();
+            let enemies: Vec<_> = q
+                .iter(app.world())
+                .map(|(e, t)| (e.state, t.translation.to_array().map(f32::to_bits)))
+                .collect();
+            (hero_health(&app, hero), enemies)
+        };
+        assert_eq!(run(), run());
     }
 }

@@ -352,7 +352,79 @@ pub enum MarkerKind {
     Collectible,
     TriggerZone,
     Doorway,
+    Enemy(EnemyClass),
     Other,
+}
+
+/// Enemy combat class, after `LevelSystems.ai` `XpShares_Near` / `XpShares_Far`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnemyClass {
+    Near,
+    Far,
+}
+
+impl EnemyClass {
+    /// `Enemy_S4_<Type>[_<Part>].ai` -> class; `None` for helper scripts
+    /// (projectiles, controllers, spawners, VFX) attached to an enemy.
+    // ponytail: keyword tables from a survey of all level scripts; the VM decides in-game.
+    pub fn from_script_stem(stem: &str) -> Option<Self> {
+        const HELPER: &[&str] = &[
+            "projectile",
+            "controller",
+            "impact",
+            "beam",
+            "patch",
+            "muzzle",
+            "shield",
+            "exit",
+            "float",
+            "staff",
+            "puddle",
+            "attached",
+            "voidmaster",
+            "ninjitsu",
+            "blade",
+            "spike",
+            "bomb",
+            "test",
+            "pile",
+            "icebreak",
+            "uberpound",
+            "wholeegg",
+            "dome",
+            "streamer",
+        ];
+        const FAR: &[&str] = &[
+            "far",
+            "lobber",
+            "shooter",
+            "gunner",
+            "stungun",
+            "magnet",
+            "rocketeer",
+            "caster",
+            "thrower",
+            "launcher",
+            "mage",
+            "gunk",
+            "spitter",
+            "tank",
+        ];
+        let rest = stem.strip_prefix("enemy_s4_")?;
+        let mut parts = rest.split('_');
+        let kind = parts.next().filter(|k| !k.is_empty())?;
+        if kind.contains("spawner")
+            || kind == "template"
+            || parts.any(|p| HELPER.iter().any(|h| p.contains(h)))
+        {
+            return None;
+        }
+        Some(if FAR.iter().any(|f| kind.contains(f)) {
+            EnemyClass::Far
+        } else {
+            EnemyClass::Near
+        })
+    }
 }
 
 impl MarkerKind {
@@ -380,7 +452,7 @@ impl MarkerKind {
             }
             _ if stem.contains("teleporter") => Some(MarkerKind::Doorway),
             _ if stem.starts_with("door_opener") => Some(MarkerKind::TriggerZone),
-            _ => None,
+            _ => EnemyClass::from_script_stem(&stem).map(MarkerKind::Enemy),
         }
     }
 
@@ -6333,6 +6405,36 @@ mod tests {
                 [1.0, 0.0, 0.0, 1.0]
             ]
         );
+    }
+
+    #[test]
+    fn test_enemy_script_classification() {
+        let k = |s: &str| MarkerKind::from_script(&format!("C:/tfb/Content/Levels/_Enemies/{s}"));
+        assert_eq!(
+            k("Chompy/Enemy_S4_Chompy.ai"),
+            Some(MarkerKind::Enemy(EnemyClass::Near))
+        );
+        assert_eq!(
+            k("TrollNear/scripts/Enemy_S4_Troll_Near.ai"),
+            Some(MarkerKind::Enemy(EnemyClass::Near))
+        );
+        assert_eq!(
+            k("UndeadLobber/scripts/Enemy_S4_UndeadLobber.ai"),
+            Some(MarkerKind::Enemy(EnemyClass::Far))
+        );
+        assert_eq!(
+            k("NightmareFar/scripts/Enemy_S4_NightmareFar.ai"),
+            Some(MarkerKind::Enemy(EnemyClass::Far))
+        );
+        for helper in [
+            "RavenLobber/scripts/Enemy_S4_RavenLobber_Projectile.ai",
+            "StunGun/scripts/Enemy_S4_StunGun_MuzzleFlash_Controller.ai",
+            "NightmareSpawner/Enemy_S4_NightmareSpawner_V2.ai",
+            "Enemy_S4_Template.ai",
+            "Enemy_Gate_2014.ai",
+        ] {
+            assert_eq!(k(helper), None, "{helper}");
+        }
     }
 
     #[test]

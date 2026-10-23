@@ -72,6 +72,7 @@ impl Plugin for SkylandsCorePlugin {
                     systems::hero_movement_system,
                     systems::actor_physics_system,
                     systems::hero_combat_system,
+                    systems::enemy_ai_system,
                 )
                     .chain(),
             )
@@ -92,7 +93,7 @@ impl Plugin for SkylandsCorePlugin {
                     apply_state_transitions,
                 )
                     .chain()
-                    .after(systems::hero_combat_system),
+                    .after(systems::enemy_ai_system),
             );
     }
 }
