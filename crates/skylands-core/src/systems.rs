@@ -28,6 +28,7 @@ pub fn portal_gameplay_system(
     mut audio_streaming: ResMut<PortalAudioStreaming>,
     actors: Query<(Entity, &ActorIdentity)>,
     env: Option<Res<EnvironmentCollision>>,
+    asset_server: Option<Res<GameAssetServer>>,
 ) {
     let spawn_origin = env.map(|e| e.spawn_point).unwrap_or(Vec3::ZERO);
     for event in portal_events.read() {
@@ -110,6 +111,12 @@ pub fn portal_gameplay_system(
                         }
                     }
 
+                    let damage = asset_server
+                        .as_ref()
+                        .and_then(|s| s.loader.lock().ok()?.load_igb(model_path).ok())
+                        .and_then(|m| AttackDamage::from_model(&m))
+                        .unwrap_or_default();
+
                     // Spawn hero entity
                     let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
                     commands.spawn((
@@ -133,6 +140,7 @@ pub fn portal_gameplay_system(
                         MovementSpeed(5.0),
                         Health::default(),
                         AttackCombo::default(),
+                        damage,
                         ActorAnimation::default(),
                     ));
                 }
@@ -315,7 +323,10 @@ pub fn hero_combat_system(
     input: Res<WiiInputState>,
     mut audio_events: EventWriter<WorldAudioCueEvent>,
     mut damage_events: EventWriter<DamageEvent>,
-    mut hero_query: Query<(Entity, &Transform, &mut AttackCombo), With<Hero>>,
+    mut hero_query: Query<
+        (Entity, &Transform, &mut AttackCombo, Option<&AttackDamage>),
+        With<Hero>,
+    >,
     target_query: Query<
         (
             Entity,
@@ -333,7 +344,8 @@ pub fn hero_combat_system(
         time.timestep().as_secs_f32()
     };
 
-    for (_hero_entity, hero_tf, mut combo) in &mut hero_query {
+    for (_hero_entity, hero_tf, mut combo, attack_damage) in &mut hero_query {
+        let attack_damage = attack_damage.copied().unwrap_or_default();
         if combo.cooldown > 0.0 {
             combo.cooldown -= dt;
             if combo.cooldown <= 0.0 {
@@ -398,7 +410,7 @@ pub fn hero_combat_system(
                         Projectile {
                             lifetime: 0.0,
                             max_lifetime: 1.5,
-                            damage: 75,
+                            damage: attack_damage.special.round() as u32,
                             radius: 0.5,
                         },
                         Velocity(fwd_norm * PROJ_SPEED),
@@ -407,10 +419,11 @@ pub fn hero_combat_system(
                 }
                 AttackKind::PrimaryMelee | AttackKind::SecondarySweep => {
                     let (range, cos_half_angle, damage) = if kind == AttackKind::PrimaryMelee {
-                        (1.8f32, (45.0f32.to_radians()).cos(), 50u32)
+                        (1.8f32, (45.0f32.to_radians()).cos(), attack_damage.primary)
                     } else {
-                        (2.8f32, -1.0f32, 100u32)
+                        (2.8f32, -1.0f32, attack_damage.secondary)
                     };
+                    let damage = damage.round() as u32;
 
                     let hero_pos = hero_tf.translation;
                     let mut hits = Vec::new();
@@ -1216,6 +1229,71 @@ mod tests {
         step_fixed(&mut app);
         let coins = app.world().resource::<GameStats>().coins;
         assert!(coins > 0, "Coins collected by hero: {}", coins);
+    }
+
+    #[test]
+    fn test_melee_uses_character_attack_damage() {
+        let mut app = build_test_app();
+        app.world_mut().spawn((
+            Hero,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            CharacterCollider::default(),
+            Velocity::default(),
+            MovementSpeed(5.0),
+            AttackCombo::default(),
+            AttackDamage {
+                primary: 15.0,
+                secondary: 10.0,
+                special: 30.0,
+            },
+            ActorAnimation::default(),
+        ));
+        let villain = app
+            .world_mut()
+            .spawn((
+                Villain,
+                Health {
+                    current: 100,
+                    max: 100,
+                },
+                Transform::from_xyz(0.0, 0.0, -1.0),
+                CharacterCollider::default(),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::B);
+        step_fixed(&mut app);
+
+        assert_eq!(app.world().get::<Health>(villain).unwrap().current, 85);
+    }
+
+    #[test]
+    fn test_projectile_uses_character_special_damage() {
+        let mut app = build_test_app();
+        app.world_mut().spawn((
+            Hero,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            CharacterCollider::default(),
+            Velocity::default(),
+            MovementSpeed(5.0),
+            AttackCombo::default(),
+            AttackDamage {
+                primary: 15.0,
+                secondary: 10.0,
+                special: 12.5,
+            },
+            ActorAnimation::default(),
+        ));
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::One);
+        step_fixed(&mut app);
+
+        let mut q = app.world_mut().query::<&Projectile>();
+        let dmg: Vec<u32> = q.iter(app.world()).map(|p| p.damage).collect();
+        assert_eq!(dmg, vec![13]);
     }
 
     #[test]

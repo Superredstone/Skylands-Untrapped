@@ -675,6 +675,7 @@ mod tests {
             skeletons: Vec::new(),
             animations: Vec::new(),
             collision_primitives: Vec::new(),
+            script_constants: Vec::new(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {

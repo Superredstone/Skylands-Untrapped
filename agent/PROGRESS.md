@@ -120,6 +120,14 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 
 ### Phase 4 - Gameplay logic from DOL
 - [ ] Character stat tables (HP, speed, damage by element/level).
+  - Finding: stats are NOT DOL tables. They are script VM literals (`OpSetValue` -> `ValueStack` -> `OpCreateVariable` name; RHS `RHSValueStack._value` +0x24, `_type` +0x20 = `EXNM` handle `IntMeasurement`/`FloatMeasurement`). Per character in `<id>_<Name>.bld` (`BaseDamage_PrimaryAttack_Fire` = 15 for Spyro, `BaseDamage_PrimaryAttack_Harpoon` = 20 for Gill Grunt); global formulas in `permanent/global.bld` (`max health`, `HP multiplier`, `return next exp target`, `Difficulty - * Damage Mult`), mostly computed, not literals.
+  - [x] `IgbModel.script_constants` / `script_constant(name)` (`decode_script_constants`, `EXNM` parsed). Hero `AttackDamage` (primary/secondary/special, f32, rounded on hit; fallback 50/100/75) via `AttackDamage::from_constants`.
+    - Survey of 283 hero `.bld`, 109 with `BaseDamage_*`: older characters (`000`-`115`, minis) name slots `PrimaryAttack`/`SecondaryAttack`. Trap Team (`450`-`485`, 40/46) don't, and use fractional values (e.g. Snap Shot `Arrow_main` 12.5, `Melee_slam` 30, `JumpSlam` 25).
+    - Rule: named slot first, else file order. Special = first name containing projectile/missile/arrow/lob/shot/bullet/disc/frisbee/beam, else next unused entry, else primary. Heuristic, not verified against gameplay.
+    - Projectile speed/lifetime/radius still hardcoded (12.0 / 1.5 / 0.5); the script `missile speed` / `projectile velocity` (40-175) needs the engine unit scale.
+  - [ ] HP/XP curve: needs the script VM (`OpUseMacro` / `ValueRHSVariant` arithmetic) in `global.bld`, so it moves to Phase 5 `ScriptSet`.
+  - `ModelParameters` is not serialized in any asset (0 hits in `assets/files`). The defaults come from the DOL ctor `0x805a89fc` (SDA2 `r2` = `0x806f5a40`, `.sdata2` `0x806f05d4..`) and are not wired in yet: groundMaxSpeed 20, groundAccel 160, groundDecel 80, groundTurnRate 720, airMaxSpeed 20, airAccel 160, airDecel 80, airTurnRate 1440, jumpMaxSpeed 300, jumpAccel 4.8, jumpInitialSpeed 32 (gravity fields not set by the ctor). These are engine units (cm/s?) and need a unit scale before replacing `EnvironmentCollision`. `global.bld` script: `jump impulse vertical` 49.7, `Return Value - Base Speed` 10/22.
+  - Ghidra: `tools/rea-bridge/FindStatTables.java` (stat-string xrefs plus the `ModelParameters` ctor; writes local-only `/tmp/skylands-re/stats_dump.txt`).
 - [ ] Villain timer/energy, trap return rules, trapping sequence.
 - [ ] Enemy AI state machines (melee, ranged), encounter arenas.
 - [ ] Save profile layout.

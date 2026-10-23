@@ -101,6 +101,18 @@ pub mod meta_fields {
         pub const OBJECT_OWNER: usize = 0x48;
     }
 
+    /// Script VM ops (`OpSetValue` 0x24, `ValueStack` 0x1c, `RHSValueStack` 0x28).
+    pub mod script {
+        pub const SET_VALUE_LHS: usize = 0x1c;
+        pub const SET_VALUE_RHS: usize = 0x20;
+        /// `ValueStack` -> `OpCreateVariable`.
+        pub const VALUE_STACK_VARIABLE: usize = 0x1c;
+        pub const CREATE_VARIABLE_NAME: usize = 0x1c;
+        /// External metaobject handle (index into `MNXE`).
+        pub const RHS_TYPE: usize = 0x20;
+        pub const RHS_VALUE: usize = 0x24;
+    }
+
     pub mod animation_component {
         pub const NOW_PLAYING: usize = 0x08;
         pub const OWNER: usize = 0x14;
@@ -1478,6 +1490,33 @@ pub struct IgbModel {
     pub skeletons: Vec<Skeleton>,
     pub animations: Vec<AnimationClip>,
     pub collision_primitives: Vec<CollisionPrimitive>,
+    /// Literal script assignments (`var = number`), in file order.
+    pub script_constants: Vec<(String, ScriptValue)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScriptValue {
+    Int(i32),
+    Float(f32),
+}
+
+impl ScriptValue {
+    pub fn as_f32(self) -> f32 {
+        match self {
+            Self::Int(v) => v as f32,
+            Self::Float(v) => v,
+        }
+    }
+}
+
+impl IgbModel {
+    /// First literal assigned to script variable `name`.
+    pub fn script_constant(&self, name: &str) -> Option<ScriptValue> {
+        self.script_constants
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| *v)
+    }
 }
 
 impl Default for IgbModel {
@@ -1503,6 +1542,7 @@ impl Default for IgbModel {
             skeletons: Vec::new(),
             animations: Vec::new(),
             collision_primitives: Vec::new(),
+            script_constants: Vec::new(),
         }
     }
 }
@@ -1596,6 +1636,7 @@ impl IgbModel {
                 skeletons: Vec::new(),
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
+                script_constants: Vec::new(),
             });
         }
 
@@ -1626,6 +1667,7 @@ impl IgbModel {
                 skeletons: Vec::new(),
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
+                script_constants: Vec::new(),
             });
         }
 
@@ -1802,6 +1844,7 @@ impl IgbModel {
             skeletons,
             animations,
             collision_primitives: Vec::new(),
+            script_constants: Vec::new(),
         })
     }
 
@@ -3120,6 +3163,60 @@ impl IgbModel {
             .collect()
     }
 
+    /// Literal script assignments: `OpSetValue._LHS` -> `ValueStack` -> `OpCreateVariable`
+    /// (name +0x1c); `_RHS` -> `RHSValueStack` (directly or via `ValueRHSVariant._varOp1`)
+    /// whose `_type` is an `EXNM` handle naming `IntMeasurement` or `FloatMeasurement`.
+    /// Character gameplay tuning (e.g. `BaseDamage_PrimaryAttack_Fire`) lives here.
+    pub fn decode_script_constants(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        external_types: &[String],
+    ) -> Vec<(String, ScriptValue)> {
+        use meta_fields::script;
+        let types: std::collections::HashMap<usize, &str> = objects
+            .iter()
+            .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
+            .collect();
+        let rd = |o: usize| data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian));
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let typed = |o: usize, t: &str| ptr(o).filter(|p| types.get(p) == Some(&t));
+        let cstr = |o: usize| -> Option<String> {
+            let start = ptr(o)?;
+            let len = data.get(start..)?.iter().position(|&b| b == 0)?;
+            std::str::from_utf8(&data[start..start + len])
+                .ok()
+                .map(str::to_string)
+        };
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("OpSetValue"))
+            .filter_map(|o| {
+                let lhs = typed(o.offset + script::SET_VALUE_LHS, "ValueStack")?;
+                let var = typed(lhs + script::VALUE_STACK_VARIABLE, "OpCreateVariable")?;
+                let name = cstr(var + script::CREATE_VARIABLE_NAME)?;
+                let rhs =
+                    typed(o.offset + script::SET_VALUE_RHS, "RHSValueStack").or_else(|| {
+                        let v = typed(o.offset + script::SET_VALUE_RHS, "ValueRHSVariant")?;
+                        typed(v + 0x08, "RHSValueStack")
+                    })?;
+                let raw = rd(rhs + script::RHS_VALUE)?;
+                let kind = external_types.get(rd(rhs + script::RHS_TYPE)? as usize)?;
+                let value = match kind.as_str() {
+                    "IntMeasurement" => ScriptValue::Int(raw as i32),
+                    "FloatMeasurement" => ScriptValue::Float(f32::from_bits(raw)),
+                    _ => return None,
+                };
+                Some((name, value))
+            })
+            .collect()
+    }
+
     pub fn decode_collision_primitives(placements: &[ActorPlacement]) -> Vec<CollisionPrimitive> {
         placements
             .iter()
@@ -3314,6 +3411,7 @@ impl IgbModel {
         let mut rvtb_offsets = Vec::new();
         let mut exid_formats = Vec::new();
         let mut tmhn_entries = Vec::new();
+        let mut exnm_names = Vec::new();
 
         if let Some(sec0) = sections.first() {
             if sec0.offset < data.len() {
@@ -3341,6 +3439,8 @@ impl IgbModel {
                             | b"DIXE"
                             | b"TMHN"
                             | b"NHMT"
+                            | b"EXNM"
+                            | b"MNXE"
                     );
 
                     if is_match {
@@ -3430,6 +3530,14 @@ impl IgbModel {
                                         tmhn_entries.push((base + rel_off, sz));
                                     }
                                 }
+                            } else if tag == *b"EXNM" || tag == *b"MNXE" {
+                                // (namespace, name) string-table index pairs, high bit = flag.
+                                for k in 0..(count as usize) {
+                                    if k * 8 + 8 <= payload.len() {
+                                        let n = Self::read_u32(payload, k * 8 + 4, endian);
+                                        exnm_names.push((n & 0x7FFF_FFFF) as usize);
+                                    }
+                                }
                             }
 
                             pos += size as usize;
@@ -3466,12 +3574,24 @@ impl IgbModel {
         let mut actor_placements = Vec::new();
         let mut geo_materials = std::collections::HashMap::new();
         let mut collision_primitives = Vec::new();
+        let mut script_constants = Vec::new();
         if let Some(ref list) = igz_objects {
             geo_transforms =
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
+            let external_types: Vec<String> = exnm_names
+                .iter()
+                .map(|&i| string_table.get(i).cloned().unwrap_or_default())
+                .collect();
+            script_constants = Self::decode_script_constants(
+                data,
+                sections,
+                &list.objects,
+                endian,
+                &external_types,
+            );
         }
 
         // Extract geometry, vertex buffer, index buffer, and vertex format objects from registry
@@ -4153,6 +4273,7 @@ impl IgbModel {
             skeletons,
             animations,
             collision_primitives,
+            script_constants,
         })
     }
 
@@ -5100,6 +5221,7 @@ mod tests {
             skeletons: vec![],
             animations: vec![],
             collision_primitives: vec![],
+            script_constants: Vec::new(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -5211,6 +5333,7 @@ mod tests {
             skeletons: vec![],
             animations: vec![],
             collision_primitives: vec![],
+            script_constants: Vec::new(),
         };
 
         let markers = model.extract_level_markers();
@@ -5478,6 +5601,7 @@ mod tests {
             skeletons: vec![skeleton],
             animations: vec![clip.clone()],
             collision_primitives: vec![],
+            script_constants: Vec::new(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -5566,6 +5690,57 @@ mod tests {
         assert!(model.animations.iter().any(|a| a.name == "idle"));
         let empty = Skeleton::default();
         assert!(model.animations[0].sample_pose(0.5, &empty).is_empty());
+    }
+
+    #[test]
+    fn test_script_constants_character_damage() {
+        let Some(bytes) = read_character_bld("016_Spyro") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        let get = |n| model.script_constant(n);
+        assert_eq!(
+            get("BaseDamage_PrimaryAttack_Fire"),
+            Some(ScriptValue::Int(15))
+        );
+        assert_eq!(
+            get("BaseDamage_SecondaryAttack_Charge"),
+            Some(ScriptValue::Int(10))
+        );
+        assert_eq!(get("BaseDamage_DiveBomb"), Some(ScriptValue::Int(50)));
+        assert_eq!(
+            get("PrimaryAttack_Range_Base"),
+            Some(ScriptValue::Float(0.45))
+        );
+
+        let Some(bytes) = read_character_bld("014_GillGrunt") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse gill grunt");
+        assert_eq!(
+            model.script_constant("BaseDamage_PrimaryAttack_Harpoon"),
+            Some(ScriptValue::Int(20))
+        );
+
+        let Some(bytes) = read_character_bld("462_Water_Crocky") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse snap shot");
+        let damage: Vec<_> = model
+            .script_constants
+            .iter()
+            .filter(|(n, _)| n.starts_with("BaseDamage_"))
+            .take(3)
+            .map(|(n, v)| (n.as_str(), v.as_f32()))
+            .collect();
+        assert_eq!(
+            damage,
+            [
+                ("BaseDamage_Arrow_main", 12.5),
+                ("BaseDamage_Melee_slam", 30.0),
+                ("BaseDamage_JumpSlam", 25.0)
+            ]
+        );
     }
 
     #[test]
