@@ -59,6 +59,12 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Cameras: follow, free-fly, showcase orbit. Viewer `--viewer`. HUD.
 - [x] Viewer mode isolates hero showcase without triggering Kaos trap capture state.
 - [x] Dynamic HUD stats in viewer mode (vertex & triangle count from active character mesh).
+- [x] Skylanders-themed Debug Menu (`debug_menu.rs`):
+  - F12 hotkey toggles debug menu (replaces direct free cam hotkey); Escape exits free cam.
+  - Skylanders Trap Team visual styling: dark slate/obsidian dialog, antique gold runic borders, Traptanium cyan highlights, element-coded badge pills.
+  - Selectable Skylanders roster (Trap Masters, Classics, Villains) with live model swapping and animation preview bar (Idle, Walk, Run, Attacks).
+  - Level Warp changer: Academy Hub + all 18 Trap Team campaign chapters with seamless `ZoneTransitionEvent` / `ZoneTransitionProgress`.
+  - Camera & Telemetry panel: Free Cam button activation with cursor management, live engine FPS/delta, Hero XYZ/velocity/health/coins, Camera eye/pitch/yaw, Portal device/tag/LED state, level collision triangle metrics.
 
 ### Extractor (`crates/skylands-extractor`)
 - [x] First-run extraction via `wit` (devenv fallback), validation of `sys/main.dol`, `global.arc`, `global.bld`.

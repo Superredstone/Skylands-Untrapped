@@ -151,10 +151,10 @@ pub fn free_cam_system(
         return;
     };
 
-    if keyboard.just_pressed(KeyCode::F12) {
-        free_cam.enabled = !free_cam.enabled;
+    if free_cam.enabled && keyboard.just_pressed(KeyCode::Escape) {
+        free_cam.enabled = false;
         if let Ok(mut window) = windows.get_single_mut() {
-            window.cursor_options = free_cam_cursor(free_cam.enabled);
+            window.cursor_options = free_cam_cursor(false);
         }
     }
 
@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn test_free_cam_toggle_captures_cursor() {
+    fn test_free_cam_escape_releases_cursor() {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<FreeCamState>()
@@ -284,22 +284,24 @@ mod tests {
             .spawn((Window::default(), PrimaryWindow))
             .id();
 
-        let press_f12 = |app: &mut App| {
-            let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-            kb.reset_all();
-            kb.press(KeyCode::F12);
-            app.update();
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .release(KeyCode::F12);
-        };
+        // Enable free cam and set locked cursor
+        app.world_mut().resource_mut::<FreeCamState>().enabled = true;
+        app.world_mut()
+            .get_mut::<Window>(win)
+            .unwrap()
+            .cursor_options = free_cam_cursor(true);
+        app.update();
 
-        press_f12(&mut app);
         let opts = &app.world().get::<Window>(win).unwrap().cursor_options;
         assert_ne!(opts.grab_mode, CursorGrabMode::None);
         assert!(!opts.visible);
 
-        press_f12(&mut app);
+        // Press Escape to exit free cam
+        let mut kb = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        kb.press(KeyCode::Escape);
+        app.update();
+
+        assert!(!app.world().resource::<FreeCamState>().enabled);
         let opts = &app.world().get::<Window>(win).unwrap().cursor_options;
         assert_eq!(opts.grab_mode, CursorGrabMode::None);
         assert!(opts.visible);

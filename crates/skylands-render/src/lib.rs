@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod debug_menu;
 pub mod hud;
 pub mod mesh_conversion;
 pub mod texture_conversion;
@@ -8,6 +9,10 @@ pub mod visual_sync;
 pub use camera::{
     camera_follow_system, free_cam_system, orbit_cam_system, setup_camera, setup_lighting,
     FreeCamState, MainCamera, OrbitCameraState,
+};
+pub use debug_menu::{
+    debug_menu_interaction_system, debug_menu_telemetry_system, debug_menu_toggle_system,
+    setup_debug_menu_ui, DebugMenuState, DebugTab,
 };
 pub use hud::{damage_popup_ui_system, hud_update_system, setup_hud_ui};
 pub use mesh_conversion::{
@@ -38,6 +43,7 @@ impl Plugin for SkylandsRenderPlugin {
             .init_resource::<CharacterVisualRegistry>()
             .init_resource::<ModelVisualRegistry>()
             .init_resource::<FreeCamState>()
+            .init_resource::<DebugMenuState>()
             .insert_resource(OrbitCameraState {
                 active: self.viewer_mode,
                 ..default()
@@ -53,6 +59,7 @@ impl Plugin for SkylandsRenderPlugin {
                     setup_lighting,
                     setup_environment_and_assets,
                     setup_hud_ui,
+                    setup_debug_menu_ui,
                 ),
             )
             .add_systems(
@@ -67,6 +74,9 @@ impl Plugin for SkylandsRenderPlugin {
                     viewer_controls_system,
                     hud_update_system,
                     damage_popup_ui_system,
+                    debug_menu_toggle_system,
+                    debug_menu_interaction_system,
+                    debug_menu_telemetry_system,
                 ),
             );
     }
