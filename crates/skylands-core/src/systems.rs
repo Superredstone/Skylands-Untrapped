@@ -87,6 +87,10 @@ pub fn portal_gameplay_system(
                             step_height: 0.35,
                             grounded: true,
                         });
+                    let model_params = model
+                        .as_deref()
+                        .map(ModelParameters::from_model)
+                        .unwrap_or_default();
 
                     // Spawn villain entity
                     let villain_pos = spawn_origin + Vec3::new(2.5, 0.2, 0.0);
@@ -103,7 +107,8 @@ pub fn portal_gameplay_system(
                         Transform::from_translation(villain_pos),
                         collider,
                         Velocity::default(),
-                        MovementSpeed::default(),
+                        MovementSpeed(model_params.ground_max_speed),
+                        model_params,
                         Health::default(),
                         ActorAnimation::default(),
                     ));
@@ -134,6 +139,10 @@ pub fn portal_gameplay_system(
                         .as_deref()
                         .map(CharacterCollider::from_model)
                         .unwrap_or_default();
+                    let model_params = model
+                        .as_deref()
+                        .map(ModelParameters::from_model)
+                        .unwrap_or_default();
 
                     // Spawn hero entity
                     let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
@@ -150,7 +159,8 @@ pub fn portal_gameplay_system(
                         Transform::from_translation(hero_pos),
                         collider,
                         Velocity::default(),
-                        MovementSpeed(5.0),
+                        MovementSpeed(model_params.ground_max_speed),
+                        model_params,
                         Health::default(),
                         AttackCombo::default(),
                         damage,
@@ -232,7 +242,9 @@ pub fn input_mapping_system(
     );
 }
 
+#[allow(clippy::type_complexity)]
 pub fn hero_movement_system(
+    time: Option<Res<Time<Fixed>>>,
     input: Res<WiiInputState>,
     env: Res<EnvironmentCollision>,
     mut query: Query<
@@ -241,21 +253,94 @@ pub fn hero_movement_system(
             &MovementSpeed,
             &CharacterCollider,
             &mut Transform,
+            Option<&ModelParameters>,
         ),
         With<Hero>,
     >,
 ) {
-    for (mut velocity, speed, collider, mut transform) in &mut query {
-        velocity.0.x = input.stick[0] * speed.0;
-        velocity.0.z = -input.stick[1] * speed.0;
+    let dt = time
+        .as_ref()
+        .map(|t| {
+            if t.delta_secs() > 0.0 {
+                t.delta_secs()
+            } else {
+                t.timestep().as_secs_f32()
+            }
+        })
+        .unwrap_or(1.0 / 60.0);
 
-        if input.stick[0].abs() > 0.1 || input.stick[1].abs() > 0.1 {
-            let angle = input.stick[0].atan2(-input.stick[1]);
-            transform.rotation = Quat::from_rotation_y(angle);
-        }
+    for (mut velocity, speed, collider, mut transform, maybe_params) in &mut query {
+        if let Some(params) = maybe_params {
+            let (max_speed, accel, decel, turn_rate) = if collider.grounded {
+                (
+                    params.ground_max_speed,
+                    params.ground_accel,
+                    params.ground_decel,
+                    params.ground_turn_rate,
+                )
+            } else {
+                (
+                    params.air_max_speed,
+                    params.air_accel,
+                    params.air_decel,
+                    params.air_turn_rate,
+                )
+            };
 
-        if collider.grounded && input.is_down(WiiButton::A) {
-            velocity.0.y = env.jump_impulse;
+            let stick_len =
+                (input.stick[0] * input.stick[0] + input.stick[1] * input.stick[1]).sqrt();
+            if stick_len > 0.1 {
+                let stick_mag = stick_len.min(1.0);
+                let target_dir = Vec2::new(input.stick[0], -input.stick[1]) / stick_len;
+                let target_h = target_dir * (max_speed * stick_mag);
+                let current_h = Vec2::new(velocity.0.x, velocity.0.z);
+                let diff = target_h - current_h;
+                let max_step = accel * dt;
+                let new_h = if diff.length() <= max_step {
+                    target_h
+                } else {
+                    current_h + diff.normalize() * max_step
+                };
+                velocity.0.x = new_h.x;
+                velocity.0.z = new_h.y;
+
+                let target_angle = input.stick[0].atan2(-input.stick[1]);
+                let current_angle = transform.rotation.to_euler(EulerRot::YXZ).0;
+                let diff = (target_angle - current_angle).rem_euclid(std::f32::consts::TAU);
+                let signed_diff = if diff > std::f32::consts::PI {
+                    diff - std::f32::consts::TAU
+                } else {
+                    diff
+                };
+                let max_turn = turn_rate.to_radians() * dt;
+                let turn = signed_diff.clamp(-max_turn, max_turn);
+                transform.rotation = Quat::from_rotation_y(current_angle + turn);
+            } else {
+                let current_h = Vec2::new(velocity.0.x, velocity.0.z);
+                let speed_len = current_h.length();
+                if speed_len > 0.0 {
+                    let drop = (decel * dt).min(speed_len);
+                    let new_h = current_h * ((speed_len - drop) / speed_len);
+                    velocity.0.x = new_h.x;
+                    velocity.0.z = new_h.y;
+                }
+            }
+
+            if collider.grounded && input.is_down(WiiButton::A) {
+                velocity.0.y = params.jump_initial_speed;
+            }
+        } else {
+            velocity.0.x = input.stick[0] * speed.0;
+            velocity.0.z = -input.stick[1] * speed.0;
+
+            if input.stick[0].abs() > 0.1 || input.stick[1].abs() > 0.1 {
+                let angle = input.stick[0].atan2(-input.stick[1]);
+                transform.rotation = Quat::from_rotation_y(angle);
+            }
+
+            if collider.grounded && input.is_down(WiiButton::A) {
+                velocity.0.y = env.jump_impulse;
+            }
         }
     }
 }
@@ -1186,6 +1271,79 @@ mod tests {
         let vel = app.world().get::<Velocity>(hero_id).unwrap().0;
         let jump_imp = app.world().resource::<EnvironmentCollision>().jump_impulse;
         assert_eq!(vel.y, jump_imp);
+    }
+
+    #[test]
+    fn test_hero_movement_with_model_parameters() {
+        let mut app = build_test_app();
+
+        let params = ModelParameters::default();
+        let hero_id = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".into(),
+                    is_villain: false,
+                    model_path: None,
+                    texture_path: None,
+                },
+                Hero,
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                CharacterCollider {
+                    radius: 0.5,
+                    height: 1.8,
+                    step_height: 0.35,
+                    grounded: true,
+                },
+                Velocity::default(),
+                MovementSpeed(params.ground_max_speed),
+                params,
+                Health::default(),
+                AttackCombo::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+
+        // 1. First tick accelerates towards stick
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .set_stick(1.0, 0.0);
+        step_fixed(&mut app);
+
+        let vel1 = app.world().get::<Velocity>(hero_id).unwrap().0;
+        assert!(vel1.x > 0.0 && vel1.x < params.ground_max_speed);
+
+        // 2. Run enough ticks to reach max speed
+        for _ in 0..20 {
+            step_fixed(&mut app);
+        }
+        let vel_max = app.world().get::<Velocity>(hero_id).unwrap().0;
+        assert!((vel_max.x - params.ground_max_speed).abs() < 1e-3);
+
+        // 3. Releasing stick decelerates smoothly
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .set_stick(0.0, 0.0);
+        step_fixed(&mut app);
+        let vel_decel = app.world().get::<Velocity>(hero_id).unwrap().0;
+        assert!(vel_decel.x < params.ground_max_speed);
+        assert!(vel_decel.x > 0.0);
+
+        for _ in 0..20 {
+            step_fixed(&mut app);
+        }
+        let vel_stopped = app.world().get::<Velocity>(hero_id).unwrap().0;
+        assert!(vel_stopped.x.abs() < 1e-4);
+
+        // 4. Jump uses ModelParameters.jump_initial_speed
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::A);
+        step_fixed(&mut app);
+        let vel_jump = app.world().get::<Velocity>(hero_id).unwrap().0;
+        assert!((vel_jump.y - params.jump_initial_speed).abs() < 1e-3);
     }
 
     #[test]

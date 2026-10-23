@@ -224,6 +224,81 @@ impl ProjectileParams {
     }
 }
 
+// DOL 0x805a89fc, units verified in DOL 0x80586ef4 ("ft / sec", "ft / sec / sec", "deg / sec")
+pub const FEET_TO_UNITS: f32 = 0.3048;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ModelParameters {
+    pub ground_max_speed: f32,
+    pub ground_accel: f32,
+    pub ground_decel: f32,
+    pub ground_turn_rate: f32, // deg/s
+    pub air_max_speed: f32,
+    pub air_accel: f32,
+    pub air_decel: f32,
+    pub air_turn_rate: f32, // deg/s
+    pub jump_max_speed: f32,
+    pub jump_accel: f32,
+    pub jump_initial_speed: f32,
+}
+
+impl Default for ModelParameters {
+    fn default() -> Self {
+        Self {
+            ground_max_speed: 20.0 * FEET_TO_UNITS,
+            ground_accel: 160.0 * FEET_TO_UNITS,
+            ground_decel: 80.0 * FEET_TO_UNITS,
+            ground_turn_rate: 720.0,
+            air_max_speed: 20.0 * FEET_TO_UNITS,
+            air_accel: 160.0 * FEET_TO_UNITS,
+            air_decel: 80.0 * FEET_TO_UNITS,
+            air_turn_rate: 1440.0,
+            jump_max_speed: 300.0 * FEET_TO_UNITS,
+            jump_accel: 4.8 * FEET_TO_UNITS,
+            jump_initial_speed: 32.0 * FEET_TO_UNITS,
+        }
+    }
+}
+
+impl ModelParameters {
+    pub const fn raw_dol() -> Self {
+        Self {
+            ground_max_speed: 20.0,
+            ground_accel: 160.0,
+            ground_decel: 80.0,
+            ground_turn_rate: 720.0,
+            air_max_speed: 20.0,
+            air_accel: 160.0,
+            air_decel: 80.0,
+            air_turn_rate: 1440.0,
+            jump_max_speed: 300.0,
+            jump_accel: 4.8,
+            jump_initial_speed: 32.0,
+        }
+    }
+
+    pub fn from_model(model: &skylands_formats::IgbModel) -> Self {
+        Self::from_constants(&model.script_constants)
+    }
+
+    pub fn from_constants(constants: &[(String, skylands_formats::ScriptValue)]) -> Self {
+        let mut params = Self::default();
+        for (name, val) in constants {
+            let l = name.to_ascii_lowercase();
+            let v = val.as_f32();
+            if v > 0.0 && v.is_finite() {
+                if l.contains("base speed") || l == "speed" {
+                    params.ground_max_speed = v * FEET_TO_UNITS;
+                    params.air_max_speed = v * FEET_TO_UNITS;
+                } else if l.contains("jump impulse vertical") || l.contains("jump initial speed") {
+                    params.jump_initial_speed = v * FEET_TO_UNITS;
+                }
+            }
+        }
+        params
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +437,29 @@ mod tests {
         assert_eq!((d.primary, d.secondary, d.special), (4.0, 4.0, 4.0));
 
         assert!(AttackDamage::from_constants(&consts(&[("speed", 1.0)])).is_none());
+    }
+
+    #[test]
+    fn test_model_parameters_defaults_and_constants() {
+        let raw = ModelParameters::raw_dol();
+        assert_eq!(raw.ground_max_speed, 20.0);
+        assert_eq!(raw.ground_accel, 160.0);
+        assert_eq!(raw.ground_decel, 80.0);
+        assert_eq!(raw.ground_turn_rate, 720.0);
+        assert_eq!(raw.air_turn_rate, 1440.0);
+        assert_eq!(raw.jump_initial_speed, 32.0);
+
+        let def = ModelParameters::default();
+        assert!((def.ground_max_speed - 20.0 * FEET_TO_UNITS).abs() < 1e-4);
+        assert!((def.jump_initial_speed - 32.0 * FEET_TO_UNITS).abs() < 1e-4);
+
+        let constants = consts(&[
+            ("Return Value - Base Speed", 15.0),
+            ("jump impulse vertical", 50.0),
+        ]);
+        let custom = ModelParameters::from_constants(&constants);
+        assert!((custom.ground_max_speed - 15.0 * FEET_TO_UNITS).abs() < 1e-4);
+        assert!((custom.jump_initial_speed - 50.0 * FEET_TO_UNITS).abs() < 1e-4);
     }
 }
 
