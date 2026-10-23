@@ -1,14 +1,14 @@
 # AGENTS.md
 
 ## Environment & Commands
-Host runs NixOS. Standard tools require `nix-shell` (configured in `shell.nix` with dynamic graphics libs):
-- Run GUI: `nix-shell --run "cargo run -p skylands-app"`
-- Run Headless: `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
-- Build: `nix-shell --run "cargo build"`
-- Test: `nix-shell --run "cargo test"`
-- Single test: `nix-shell --run "cargo test <test_name>"`
-- Format & Lint: `nix-shell --run "cargo fmt --all && cargo clippy --all-targets --all-features"`
-- ISO extract tool: `nix-shell -p wiimms-iso-tools --run "wit extract <rom.wbfs> <dest>"`
+Host runs NixOS. Standard tools require `devenv` (configured in `devenv.nix` with dynamic graphics libs and Wiimms ISO tools, or automatic via `direnv`):
+- Run GUI: `devenv shell -- cargo run -p skylands-app`
+- Run Headless: `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
+- Build: `devenv shell -- cargo build`
+- Test: `devenv shell -- cargo test`
+- Single test: `devenv shell -- cargo test <test_name>`
+- Format & Lint: `devenv shell -- cargo fmt --all && devenv shell -- cargo clippy --all-targets --all-features`
+- ISO extract tool: `devenv shell -- wit extract <rom.wbfs> <dest>`
 - Ghidra headless: `/run/current-system/sw/bin/ghidra` or REA CLI (`npx rea-agents@6.7.0`)
 
 ## Constraints & Rules
@@ -47,10 +47,10 @@ Engineering notes and reverse engineering documentation live in `agent/` and `to
 | `packaging/flatpak/` | `packaging/flatpak/cargo-sources.json` and `.github/workflows/ci.yml` |
 
 ## Done means
-- Format check passes: `nix-shell --run "cargo fmt --all -- --check"`
-- Lint passes with no warnings: `nix-shell --run "cargo clippy --workspace --all-targets -- -D warnings"`
-- Test suite passes: `nix-shell --run "cargo test --workspace"`
-- Headless verification passes: `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
+- Format check passes: `devenv shell -- cargo fmt --all -- --check`
+- Lint passes with no warnings: `devenv shell -- cargo clippy --workspace --all-targets -- -D warnings`
+- Test suite passes: `devenv shell -- cargo test --workspace`
+- Headless verification passes: `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
 - Any behavior change ships with a test that fails without the change.
 
 ## Never merges without a human

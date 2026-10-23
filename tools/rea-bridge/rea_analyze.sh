@@ -50,7 +50,14 @@ case "$INPUT" in
         ;;
     *)
         echo "[1/3] Extracting main.dol from $INPUT..."
-        nix-shell -p wiimms-iso-tools --run "wit extract '$INPUT' '$WORK_DIR' --overwrite --files +sys/main.dol"
+        if command -v wit >/dev/null 2>&1; then
+            wit extract "$INPUT" "$WORK_DIR" --overwrite --files +sys/main.dol
+        elif command -v devenv >/dev/null 2>&1; then
+            devenv shell -- wit extract "$INPUT" "$WORK_DIR" --overwrite --files +sys/main.dol
+        else
+            echo "Error: 'wit' not found in PATH or devenv"
+            exit 1
+        fi
         ELF_PATH="$WORK_DIR/main.elf"
         echo "[2/3] Converting main.dol to PowerPC ELF..."
         python3 tools/rea-bridge/dol2elf.py "$WORK_DIR/sys/main.dol" "$ELF_PATH"

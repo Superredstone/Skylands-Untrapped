@@ -55,6 +55,6 @@ maintainers, and it will be promptly reviewed and, if appropriate, removed.
 
 Contributions are welcome! Please make sure:
 1. No copyrighted game assets or ROM files are submitted.
-2. Code passes formatting and clippy lints (`nix-shell --run "cargo fmt --all && cargo clippy --all-targets --all-features"`).
+2. Code passes formatting and clippy lints (`devenv shell -- cargo fmt --all && devenv shell -- cargo clippy --all-targets --all-features`).
 3. Changes include tests verifying new behavior.
 4. Review [`AGENTS.md`](./AGENTS.md) for full development workflow and architecture details.

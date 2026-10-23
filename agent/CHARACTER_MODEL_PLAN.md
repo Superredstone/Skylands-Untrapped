@@ -56,9 +56,9 @@ When selecting a character (via `--character`, `--viewer`, or mock portal), user
 ---
 
 ## Verification Commands
-- `nix-shell --run "cargo fmt --all -- --check"`
-- `nix-shell --run "cargo clippy --workspace --all-targets -- -D warnings"`
-- `nix-shell --run "cargo test --workspace"`
-- `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
-- `nix-shell --run "cargo run -p skylands-app -- --viewer --character spyro"`
-- `nix-shell --run "cargo run -p skylands-app -- --viewer --character snapshot"`
+- `devenv shell -- cargo fmt --all -- --check`
+- `devenv shell -- cargo clippy --workspace --all-targets -- -D warnings`
+- `devenv shell -- cargo test --workspace`
+- `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
+- `devenv shell -- cargo run -p skylands-app -- --viewer --character spyro`
+- `devenv shell -- cargo run -p skylands-app -- --viewer --character snapshot`

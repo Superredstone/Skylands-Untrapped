@@ -8,3 +8,9 @@ ghidra_project/
 .rea/
 *.elf
 *.dol
+
+# Devenv & direnv
+.devenv*
+devenv.local.*
+.direnv
+

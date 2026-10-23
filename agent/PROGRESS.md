@@ -61,7 +61,7 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Dynamic HUD stats in viewer mode (vertex & triangle count from active character mesh).
 
 ### Extractor (`crates/skylands-extractor`)
-- [x] First-run extraction via `wit` (nix-shell fallback), validation of `sys/main.dol`, `global.arc`, `global.bld`.
+- [x] First-run extraction via `wit` (devenv fallback), validation of `sys/main.dol`, `global.arc`, `global.bld`.
 
 ### Performance
 - Dev profile `opt-level = 1`, deps `opt-level = 3`.
@@ -162,8 +162,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - Every decoded format ships a test that skips when ROM is absent.
 
 ## Verification
-- `nix-shell --run "cargo fmt --all -- --check"`
-- `nix-shell --run "cargo clippy --workspace --all-targets -- -D warnings"`
-- `nix-shell --run "cargo test --workspace"`
-- `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
-- Viewer: `nix-shell --run "cargo run -p skylands-app -- --viewer --character spyro"`
+- `devenv shell -- cargo fmt --all -- --check`
+- `devenv shell -- cargo clippy --workspace --all-targets -- -D warnings`
+- `devenv shell -- cargo test --workspace`
+- `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
+- Viewer: `devenv shell -- cargo run -p skylands-app -- --viewer --character spyro`

@@ -6,8 +6,8 @@
 
 ## How Has This Been Tested?
 <!-- Describe the tests you ran to verify your changes. Include commands used. -->
-- `nix-shell --run "cargo test --workspace"`
-- `nix-shell --run "cargo run -p skylands-app -- --headless --ticks 120"`
+- `devenv shell -- cargo test --workspace`
+- `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
 
 ## Checklist
 - [ ] No copyrighted game assets or ROM files committed

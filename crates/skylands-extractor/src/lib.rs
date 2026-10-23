@@ -80,23 +80,31 @@ impl Extractor {
                 return Err(ExtractorError::WitFailed(err_msg));
             }
             Err(e) => {
-                // If direct wit invocation failed (e.g. NixOS PATH), attempt nix-shell fallback
+                // If direct wit invocation failed, attempt devenv fallback
                 info!(
-                    "Direct 'wit' not found in PATH, attempting nix-shell fallback: {}",
+                    "Direct 'wit' not found in PATH, attempting devenv fallback: {}",
                     e
                 );
-                let nix_cmd = format!(
-                    "wit extract \"{}\" \"{}\" --overwrite",
-                    self.rom_path.display(),
-                    self.dest_path.display()
-                );
-                let nix_status = Command::new("nix-shell")
-                    .args(["-p", "wiimms-iso-tools", "--run", &nix_cmd])
-                    .status()?;
-                if !nix_status.success() {
-                    return Err(ExtractorError::WitFailed(
-                        "nix-shell wit extraction failed".into(),
-                    ));
+                let dev_status = Command::new("devenv")
+                    .args([
+                        "shell",
+                        "--",
+                        "wit",
+                        "extract",
+                        &self.rom_path.to_string_lossy(),
+                        &self.dest_path.to_string_lossy(),
+                        "--overwrite",
+                    ])
+                    .status();
+                match dev_status {
+                    Ok(s) if s.success() => {
+                        info!("wit extraction via devenv finished successfully.");
+                    }
+                    _ => {
+                        return Err(ExtractorError::WitFailed(
+                            "wit extraction failed (tried direct PATH and devenv shell)".into(),
+                        ));
+                    }
                 }
             }
         }
