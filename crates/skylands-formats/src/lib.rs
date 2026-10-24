@@ -11,7 +11,7 @@ pub mod texture;
 pub use archive::{hash_path, ArchiveMount, ArchiveReader, FileEntry};
 pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
-pub use havok::{parse_havok_animation, HAVOK_TAG};
+pub use havok::{parse_havok_animation, parse_havok_skeleton, HavokRig, HAVOK_TAG};
 pub use igb::{
     compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, quat_to_mat4, sample_quat,
     sample_vec3, slerp_quat, transform_point, ActorPlacement, AnimationClip, AttrFormat,

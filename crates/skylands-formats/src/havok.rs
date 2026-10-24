@@ -1,4 +1,5 @@
 use crate::igb::{AnimationClip, BoneTrack, Keyframe, Skeleton};
+use std::collections::HashMap;
 use std::f32::consts::PI;
 
 pub const HAVOK_TAG: [u8; 8] = [0x57, 0xe0, 0xe0, 0x57, 0x10, 0xc0, 0xc0, 0x10];
@@ -379,10 +380,147 @@ impl HavokSplineTrack {
     }
 }
 
+/// `__data__` section of a big-endian Havok 2013 packfile: local fixups (pointer
+/// field -> target) and objects from the virtual fixups (offset, class name).
+struct Packfile<'a> {
+    data: &'a [u8],
+    local: HashMap<usize, usize>,
+    objects: Vec<(usize, &'a str)>,
+}
+
+impl<'a> Packfile<'a> {
+    fn parse(file: &'a [u8]) -> Option<Self> {
+        if file.get(0..8)? != HAVOK_TAG {
+            return None;
+        }
+        let be = |o: usize| -> Option<usize> {
+            Some(u32::from_be_bytes(file.get(o..o + 4)?.try_into().ok()?) as usize)
+        };
+        // Section headers (0x30) from 0x40: tag[20], absoluteDataStart, then
+        // local/global/virtual fixups, exports, imports, end (relative to the data start).
+        let section = |tag: &[u8]| -> Option<usize> {
+            (0..be(20)?).map(|i| 0x40 + i * 0x30).find(|&h| {
+                file.get(h..h + tag.len()) == Some(tag) && file.get(h + tag.len()) == Some(&0)
+            })
+        };
+
+        let cn = section(b"__classnames__")?;
+        let (cn_start, cn_end) = (be(cn + 20)?, be(cn + 20)? + be(cn + 24)?);
+        // Class name entries: u32 signature, 0x09, name\0. Fixups refer to the name offset.
+        let mut class_names = HashMap::new();
+        let mut p = cn_start;
+        while p + 5 < cn_end.min(file.len()) && file[p + 4] == 0x09 {
+            let len = file[p + 5..].iter().position(|&b| b == 0)?;
+            let name = std::str::from_utf8(&file[p + 5..p + 5 + len]).ok()?;
+            class_names.insert(p + 5 - cn_start, name);
+            p += 5 + len + 1;
+        }
+
+        let ds = section(b"__data__")?;
+        let data = file.get(be(ds + 20)?..)?;
+        let rel = |i: usize| be(ds + 24 + i * 4);
+        let (local_start, global_start, virtual_start, exports) =
+            (rel(0)?, rel(1)?, rel(2)?, rel(3)?);
+        let word = |o: usize| -> Option<usize> {
+            Some(u32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?) as usize)
+        };
+
+        let mut local = HashMap::new();
+        for k in (local_start..global_start).step_by(8) {
+            let src = word(k)?;
+            if src == 0xffff_ffff {
+                break;
+            }
+            local.insert(src, word(k + 4)?);
+        }
+        let mut objects = Vec::new();
+        for k in (virtual_start..exports).step_by(12) {
+            let src = word(k)?;
+            if src == 0xffff_ffff {
+                break;
+            }
+            if let Some(&name) = class_names.get(&word(k + 8)?) {
+                objects.push((src, name));
+            }
+        }
+        Some(Self {
+            data,
+            local,
+            objects,
+        })
+    }
+
+    fn u32(&self, o: usize) -> Option<usize> {
+        Some(u32::from_be_bytes(self.data.get(o..o + 4)?.try_into().ok()?) as usize)
+    }
+
+    fn cstr(&self, field: usize) -> Option<String> {
+        let at = *self.local.get(&field)?;
+        let s = self.data.get(at..)?;
+        let end = s.iter().position(|&b| b == 0)?;
+        Some(String::from_utf8_lossy(&s[..end]).into_owned())
+    }
+}
+
+/// Bone names of the first `hkaSkeleton` in a Havok rig packfile (`tfbPhysicsBody` +0x18).
+/// `hkaSkeleton`: `_name` +0x08, `_parentIndices` +0x0c, `_bones` +0x18 (array: ptr, size,
+/// capacity; `hkaBone` is 8 bytes, `_name` first), `_referencePose` +0x24.
+pub fn parse_havok_skeleton(file: &[u8]) -> Option<Vec<String>> {
+    let pf = Packfile::parse(file)?;
+    let &(skel, _) = pf.objects.iter().find(|(_, c)| *c == "hkaSkeleton")?;
+    let bones = *pf.local.get(&(skel + 0x18))?;
+    (0..pf.u32(skel + 0x1c)?)
+        .map(|i| pf.cstr(bones + i * 8))
+        .collect()
+}
+
+/// Havok rig skeleton bone names, paired with the `igSkeleton2` (index into
+/// `IgbModel.skeletons`) of the same `tfbPhysicsBody`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HavokRig {
+    pub skeleton: usize,
+    pub bones: Vec<String>,
+}
+
+/// Bone name without the Maya namespace (`Kaos_export:J_origin` -> `j_origin`).
+fn base_bone_name(name: &str) -> String {
+    name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase()
+}
+
+/// Maps Havok track bone indices to `igSkeleton2` bones by name. The rig is the one with
+/// one bone per track (the binding indexes it), else the one matching the most names.
+/// Ties keep the first rig (Spyro has two identical 8-bone tail rigs).
+fn map_tracks_by_name(
+    track_bones: &[usize],
+    skeletons: &[Skeleton],
+    rigs: &[HavokRig],
+) -> Option<(usize, Vec<Option<usize>>)> {
+    rigs.iter()
+        .rev()
+        .filter(|r| track_bones.iter().all(|&b| b < r.bones.len()))
+        .filter_map(|r| {
+            let skel = skeletons.get(r.skeleton)?;
+            let names: Vec<String> = skel.bones.iter().map(|b| base_bone_name(&b.name)).collect();
+            let map: Vec<Option<usize>> = track_bones
+                .iter()
+                .map(|&b| {
+                    let want = base_bone_name(&r.bones[b]);
+                    names.iter().position(|n| *n == want)
+                })
+                .collect();
+            let hits = map.iter().flatten().count();
+            Some((r.bones.len() == track_bones.len(), hits, r.skeleton, map))
+        })
+        .filter(|&(_, hits, ..)| hits > 0)
+        .max_by_key(|&(exact, hits, ..)| (exact, hits))
+        .map(|(_, _, skeleton, map)| (skeleton, map))
+}
+
 pub fn parse_havok_animation(
     data: &[u8],
     clip_name: &str,
     skeletons: &[Skeleton],
+    rigs: &[HavokRig],
 ) -> Option<AnimationClip> {
     if data.len() < 0x200 || data.get(0..8)? != HAVOK_TAG {
         return None;
@@ -511,26 +649,34 @@ pub fn parse_havok_animation(
         }
     }
 
-    let target_idx = skeletons
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.bones.len() > num_tracks)
-        .min_by_key(|(_, s)| s.bones.len() - num_tracks)
-        .map(|(i, _)| i)
-        .or_else(|| (!skeletons.is_empty()).then_some(0));
-    let target_skel = target_idx.map(|i| &skeletons[i]);
-
-    let bone_offset = if let Some(skel) = target_skel {
-        if !skel.bones.is_empty()
-            && skel.bones[0].name.eq_ignore_ascii_case("unnamed bone")
-            && skel.bones.len() > num_tracks
-        {
-            1
-        } else {
-            0
+    // Tracks index the Havok rig skeleton, whose bone order differs from `igSkeleton2`
+    // (Spyro: `J_root_B`, legs and tail come before `J_neck`), so map them by bone name.
+    let (target_idx, bone_map) = match map_tracks_by_name(&bone_indices, skeletons, rigs) {
+        Some((skeleton, map)) => (Some(skeleton), map),
+        None => {
+            // ponytail: no rig (synthetic files): assume `igSkeleton2` order behind `Unnamed bone`.
+            let target_idx = skeletons
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.bones.len() > num_tracks)
+                .min_by_key(|(_, s)| s.bones.len() - num_tracks)
+                .map(|(i, _)| i)
+                .or_else(|| (!skeletons.is_empty()).then_some(0));
+            let offset = target_idx.map_or(1, |i| {
+                let skel = &skeletons[i];
+                usize::from(
+                    skel.bones.len() > num_tracks
+                        && skel
+                            .bones
+                            .first()
+                            .is_some_and(|b| b.name.eq_ignore_ascii_case("unnamed bone")),
+                )
+            });
+            (
+                target_idx,
+                bone_indices.iter().map(|&b| Some(b + offset)).collect(),
+            )
         }
-    } else {
-        1
     };
 
     if block_data_off + data_len > sec2_data.len() {
@@ -560,7 +706,8 @@ pub fn parse_havok_animation(
 
     for t in 0..num_tracks {
         let (pos_q, rot_q, scale_q, pos_type, rot_type, scale_type) = masks[t];
-        let target_bone = bone_indices[t] + bone_offset;
+        // Unmatched tracks are still decoded to advance through the block, then dropped.
+        let target_bone = bone_map[t].unwrap_or(usize::MAX);
 
         let has_spline_pos = (pos_type & 0x70) != 0;
         let has_spline_rot = (rot_type & 0xf0) != 0;
@@ -842,7 +989,7 @@ pub fn parse_havok_animation(
     };
 
     let mut bone_tracks = Vec::with_capacity(num_tracks);
-    for st in &tracks {
+    for st in tracks.iter().filter(|st| st.bone_index != usize::MAX) {
         let is_fully_static =
             st.spline_pos.is_none() && st.spline_rot.is_none() && st.spline_scale.is_none();
         if is_fully_static {
@@ -898,6 +1045,53 @@ mod tests {
     }
 
     #[test]
+    fn test_map_tracks_by_name() {
+        use crate::igb::Bone;
+        let skel = |names: &[&str]| {
+            Skeleton::new(
+                names
+                    .iter()
+                    .map(|n| Bone {
+                        name: n.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                0,
+            )
+        };
+        let skeletons = [
+            skel(&["Unnamed bone", "J_root", "J_neck", "J_tail"]),
+            skel(&["Unnamed bone", "J_root", "J_tail"]),
+        ];
+        let rigs = [
+            HavokRig {
+                skeleton: 0,
+                bones: vec!["ns:J_root".into(), "ns:J_tail".into(), "ns:J_neck".into()],
+            },
+            HavokRig {
+                skeleton: 1,
+                bones: vec!["J_root".into(), "J_tail".into()],
+            },
+        ];
+        // Three tracks: the body rig (one bone per track), mapped by name, not index + 1.
+        let (target, map) = map_tracks_by_name(&[0, 1, 2], &skeletons, &rigs).unwrap();
+        assert_eq!(target, 0);
+        assert_eq!(map, vec![Some(1), Some(3), Some(2)]);
+        // Two tracks: the tail rig matches the track count exactly.
+        let (target, map) = map_tracks_by_name(&[0, 1], &skeletons, &rigs).unwrap();
+        assert_eq!(target, 1);
+        assert_eq!(map, vec![Some(1), Some(2)]);
+        // Names missing from the skinning skeleton stay unmapped.
+        let odd = [HavokRig {
+            skeleton: 1,
+            bones: vec!["J_root".into(), "J_wing".into()],
+        }];
+        let (_, map) = map_tracks_by_name(&[0, 1], &skeletons, &odd).unwrap();
+        assert_eq!(map, vec![Some(1), None]);
+        assert!(map_tracks_by_name(&[0], &skeletons, &[]).is_none());
+    }
+
+    #[test]
     fn test_find_knot_span() {
         let knots = vec![0, 0, 3, 11, 14, 18, 24, 24];
         let span = find_knot_span(1, 12.0, 5, &knots);
@@ -927,7 +1121,7 @@ mod tests {
         let mut pos = 0;
         while pos + 8 <= bld_data.len() {
             if bld_data[pos..pos + 8] == raw_tag {
-                if let Some(clip) = parse_havok_animation(&bld_data[pos..], "test", &[]) {
+                if let Some(clip) = parse_havok_animation(&bld_data[pos..], "test", &[], &[]) {
                     if clip.tracks.len() == 49 {
                         clips.push(clip);
                     }

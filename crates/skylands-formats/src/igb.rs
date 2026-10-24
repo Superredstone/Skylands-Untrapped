@@ -1332,6 +1332,154 @@ pub fn slerp_quat(q1: &[f32; 4], q2: &[f32; 4], t: f32) -> [f32; 4] {
     }
 }
 
+/// Translation, rotation (xyzw) and scale composed like Havok `hkQsTransform`: a parent's
+/// scale does not scale the child's translation (Kaos `J_root` has scale 1.4 and its
+/// children's animated translations are 1.4x the matrix-derived rest offsets).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QsTransform {
+    t: [f32; 3],
+    r: [f32; 4],
+    s: [f32; 3],
+}
+
+impl QsTransform {
+    /// Decomposes an affine T*R*S matrix (column-major, no shear).
+    fn from_mat(m: &[f32; 16]) -> Self {
+        let col = |c: usize| [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+        let s = [0, 1, 2].map(|c| {
+            let v = col(c);
+            (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+        });
+        let r = |row: usize, c: usize| {
+            if s[c] > 1e-8 {
+                m[c * 4 + row] / s[c]
+            } else {
+                f32::from(u8::from(row == c))
+            }
+        };
+        let trace = r(0, 0) + r(1, 1) + r(2, 2);
+        let q = if trace > 0.0 {
+            let k = (trace + 1.0).sqrt() * 2.0;
+            [
+                (r(2, 1) - r(1, 2)) / k,
+                (r(0, 2) - r(2, 0)) / k,
+                (r(1, 0) - r(0, 1)) / k,
+                0.25 * k,
+            ]
+        } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
+            let k = (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).sqrt() * 2.0;
+            [
+                0.25 * k,
+                (r(0, 1) + r(1, 0)) / k,
+                (r(0, 2) + r(2, 0)) / k,
+                (r(2, 1) - r(1, 2)) / k,
+            ]
+        } else if r(1, 1) > r(2, 2) {
+            let k = (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).sqrt() * 2.0;
+            [
+                (r(0, 1) + r(1, 0)) / k,
+                0.25 * k,
+                (r(1, 2) + r(2, 1)) / k,
+                (r(0, 2) - r(2, 0)) / k,
+            ]
+        } else {
+            let k = (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).sqrt() * 2.0;
+            [
+                (r(0, 2) + r(2, 0)) / k,
+                (r(1, 2) + r(2, 1)) / k,
+                0.25 * k,
+                (r(1, 0) - r(0, 1)) / k,
+            ]
+        };
+        Self {
+            t: [m[12], m[13], m[14]],
+            r: q,
+            s,
+        }
+    }
+
+    fn to_mat(self) -> [f32; 16] {
+        compose_transform(&self.t, &self.r, &self.s)
+    }
+
+    /// `self * child`: `t = t + R t_c`, `R = R R_c`, `s = s s_c`.
+    fn mul(&self, child: &Self) -> Self {
+        let rt = quat_rotate(&self.r, &child.t);
+        Self {
+            t: [0, 1, 2].map(|i| self.t[i] + rt[i]),
+            r: quat_mul(&self.r, &child.r),
+            s: [0, 1, 2].map(|i| self.s[i] * child.s[i]),
+        }
+    }
+
+    /// `x` such that `self.mul(&x) == world`.
+    fn local_of(&self, world: &Self) -> Self {
+        let inv = [-self.r[0], -self.r[1], -self.r[2], self.r[3]];
+        let d = [0, 1, 2].map(|i| world.t[i] - self.t[i]);
+        Self {
+            t: quat_rotate(&inv, &d),
+            r: quat_mul(&inv, &world.r),
+            s: [0, 1, 2].map(|i| {
+                if self.s[i].abs() > 1e-8 {
+                    world.s[i] / self.s[i]
+                } else {
+                    world.s[i]
+                }
+            }),
+        }
+    }
+}
+
+fn quat_mul(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+fn quat_rotate(q: &[f32; 4], v: &[f32; 3]) -> [f32; 3] {
+    let p = quat_mul(
+        &quat_mul(q, &[v[0], v[1], v[2], 0.0]),
+        &[-q[0], -q[1], -q[2], q[3]],
+    );
+    [p[0], p[1], p[2]]
+}
+
+/// Resolves each bone against its parent chain (`compose(parent_world, local)`).
+fn resolve_hierarchy<T: Copy>(
+    skeleton: &Skeleton,
+    local: &[T],
+    compose: impl Fn(&T, &T) -> T,
+) -> Vec<T> {
+    let n = skeleton.bones.len();
+    let mut global: Vec<Option<T>> = vec![None; n];
+    fn visit<T: Copy>(
+        idx: usize,
+        skeleton: &Skeleton,
+        local: &[T],
+        global: &mut [Option<T>],
+        compose: &impl Fn(&T, &T) -> T,
+    ) -> T {
+        if let Some(g) = global[idx] {
+            return g;
+        }
+        let g = match skeleton.bones[idx].parent {
+            Some(p) if p < skeleton.bones.len() && p != idx => {
+                let pg = visit(p, skeleton, local, global, compose);
+                compose(&pg, &local[idx])
+            }
+            _ => local[idx],
+        };
+        global[idx] = Some(g);
+        g
+    }
+    (0..n)
+        .map(|i| visit(i, skeleton, local, &mut global, &compose))
+        .collect()
+}
+
 pub fn quat_to_mat4(q: &[f32; 4]) -> [f32; 16] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
     let x2 = x + x;
@@ -1450,54 +1598,41 @@ impl AnimationClip {
             0.0
         };
 
-        let mut local_transforms: Vec<[f32; 16]> =
-            skeleton.bones.iter().map(|b| b.local_transform).collect();
+        // Rest pose from the matrix hierarchy (bind pose for decoded rigs), re-expressed as
+        // `hkQsTransform` locals so Havok tracks replace them in the same convention.
+        let locals: Vec<[f32; 16]> = skeleton.bones.iter().map(|b| b.local_transform).collect();
+        let rest: Vec<QsTransform> = resolve_hierarchy(skeleton, &locals, mat4_mul)
+            .iter()
+            .map(QsTransform::from_mat)
+            .collect();
+        let mut local: Vec<QsTransform> = skeleton
+            .bones
+            .iter()
+            .enumerate()
+            .map(
+                |(i, b)| match b.parent.filter(|&p| p < rest.len() && p != i) {
+                    Some(p) => rest[p].local_of(&rest[i]),
+                    None => rest[i],
+                },
+            )
+            .collect();
 
         for track in &self.tracks {
-            if track.bone_index >= local_transforms.len() {
+            if track.bone_index >= local.len() {
                 continue;
             }
-            let pos = sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]);
-            let rot = sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let scale = sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]);
-            local_transforms[track.bone_index] = compose_transform(&pos, &rot, &scale);
+            local[track.bone_index] = QsTransform {
+                t: sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]),
+                r: sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                s: sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]),
+            };
         }
 
-        let mut computed = vec![false; skeleton.bones.len()];
-        let mut global_transforms = vec![mat4_identity(); skeleton.bones.len()];
-
-        fn compute_bone(
-            idx: usize,
-            skeleton: &Skeleton,
-            local: &[[f32; 16]],
-            global: &mut [[f32; 16]],
-            computed: &mut [bool],
-        ) {
-            if computed[idx] {
-                return;
-            }
-            if let Some(p) = skeleton.bones[idx].parent {
-                if p < skeleton.bones.len() && p != idx {
-                    compute_bone(p, skeleton, local, global, computed);
-                    global[idx] = mat4_mul(&global[p], &local[idx]);
-                    computed[idx] = true;
-                    return;
-                }
-            }
-            global[idx] = local[idx];
-            computed[idx] = true;
-        }
-
-        for i in 0..skeleton.bones.len() {
-            compute_bone(
-                i,
-                skeleton,
-                &local_transforms,
-                &mut global_transforms,
-                &mut computed,
-            );
-        }
-
+        let global_transforms: Vec<[f32; 16]> =
+            resolve_hierarchy(skeleton, &local, QsTransform::mul)
+                .into_iter()
+                .map(QsTransform::to_mat)
+                .collect();
         global_transforms
     }
 
@@ -2924,6 +3059,38 @@ impl IgbModel {
         Some((Skeleton::new(bones, 0), blend_to_bone))
     }
 
+    /// Havok rig skeletons: `tfbPhysicsBody` `+0x14` size (low 27 bits), `+0x18` -> Havok
+    /// packfile with an `hkaSkeleton`; `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` ->
+    /// `igSkeleton2` (index via `skeleton_by_offset`). Clip tracks index these rigs.
+    fn decode_havok_rigs(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        skeleton_by_offset: &std::collections::HashMap<usize, (usize, Vec<u32>)>,
+    ) -> Vec<crate::havok::HavokRig> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsBody"))
+            .filter_map(|body| {
+                let skel = ptr(body.offset + 0x28).and_then(|l| ptr(l + 0x0c))?;
+                let &(skeleton, _) = skeleton_by_offset.get(&skel)?;
+                let size = (rd(body.offset + 0x14)? & 0x07ff_ffff) as usize;
+                let hk = ptr(body.offset + 0x18)?;
+                let bones = crate::havok::parse_havok_skeleton(data.get(hk..hk + size)?)?;
+                Some(crate::havok::HavokRig { skeleton, bones })
+            })
+            .collect()
+    }
+
     /// Maps each `igGeometryAttr` offset to the `igSkeleton2` offset that skins it:
     /// `tfbPhysicsBody` `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` -> skeleton;
     /// `+0x30` -> `tfbBodyEntityInfo` `+0x14` -> `DrawableList` -> `Drawable` `+0x0c` -> attr.
@@ -3773,6 +3940,7 @@ impl IgbModel {
         let mut skeletons = Vec::new();
         let mut skeleton_by_offset = std::collections::HashMap::new();
         let mut attr_skeleton = std::collections::HashMap::new();
+        let mut havok_rigs = Vec::new();
         if let Some(ref obj_list) = igz_objects {
             for obj in &obj_list.objects {
                 if obj.type_name.as_deref() != Some("igSkeleton2") {
@@ -3786,6 +3954,13 @@ impl IgbModel {
                 }
             }
             attr_skeleton = Self::skinned_attr_links(data, sections, &obj_list.objects, endian);
+            havok_rigs = Self::decode_havok_rigs(
+                data,
+                sections,
+                &obj_list.objects,
+                endian,
+                &skeleton_by_offset,
+            );
         }
 
         if let Some(ref obj_list) = igz_objects {
@@ -4338,9 +4513,12 @@ impl IgbModel {
                 };
                 let norm_name = name.to_ascii_lowercase();
 
-                if let Some(clip) =
-                    crate::havok::parse_havok_animation(hk_data, &norm_name, &skeletons)
-                {
+                if let Some(clip) = crate::havok::parse_havok_animation(
+                    hk_data,
+                    &norm_name,
+                    &skeletons,
+                    &havok_rigs,
+                ) {
                     animations.push(clip);
                 }
             }
@@ -5938,6 +6116,95 @@ mod tests {
         let idle = clips.iter().find(|a| a.name == "idle").expect("body idle");
         assert!((idle.duration - 1.07).abs() < 1e-2, "{}", idle.duration);
         assert!(clips.iter().any(|a| a.name == "walk"));
+    }
+
+    /// Mean |frame-0 track translation - rest translation| over non-root tracks, both as
+    /// `hkQsTransform` locals. Roots and `J_attach*` prop bones move in idle; skip them.
+    fn idle_rest_mismatch(name: &str) -> Option<(f32, usize, usize)> {
+        let bytes = read_character_bld(name)?;
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let sk = model.primary_skeleton().expect("primary rig");
+        let clips = model.primary_animations();
+        let idle = clips.iter().find(|a| a.name == "idle").expect("idle");
+        let world =
+            |j: usize| QsTransform::from_mat(&mat4_affine_inverse(&sk.bones[j].inverse_bind_pose));
+        let len = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let (mut sum, mut n) = (0.0, 0);
+        for t in &idle.tracks {
+            let bone = &sk.bones[t.bone_index];
+            let lower = bone.name.to_ascii_lowercase();
+            if lower.contains("root") || lower.contains("attach") {
+                continue;
+            }
+            let Some(p) = bone.parent else { continue };
+            let rest = world(p).local_of(&world(t.bone_index));
+            let anim = sample_vec3(&t.positions, 0.0).unwrap();
+            sum += (len(anim) - len(rest.t)).abs();
+            n += 1;
+        }
+        Some((sum / n.max(1) as f32, idle.tracks.len(), n))
+    }
+
+    #[test]
+    fn test_havok_tracks_follow_rig_bone_names() {
+        // Spyro's Havok rig lists `J_root_B`, legs and tail before `J_neck`; index-order
+        // binding put leg motion on the head (`J_neck` got 0.312 instead of 0.266).
+        let Some((mismatch, tracks, checked)) = idle_rest_mismatch("016_Spyro") else {
+            return;
+        };
+        assert_eq!(tracks, 49);
+        assert!(checked > 40, "{checked}");
+        assert!(mismatch < 0.03, "Spyro idle vs rest: {mismatch}");
+    }
+
+    #[test]
+    fn test_havok_scaled_rig_kaos() {
+        // `J_root` scale 1.4: child translations are not scaled by it (hkQsTransform).
+        let Some((mismatch, _, _)) = idle_rest_mismatch("1010_Kaos") else {
+            return;
+        };
+        assert!(mismatch < 0.03, "Kaos idle vs rest: {mismatch}");
+    }
+
+    #[test]
+    fn test_pose_parent_scale_does_not_scale_child_translation() {
+        let mut root_local = mat4_identity();
+        for i in [0, 5, 10] {
+            root_local[i] = 2.0;
+        }
+        let skeleton = Skeleton::new(
+            vec![
+                Bone {
+                    name: "root".into(),
+                    parent: None,
+                    inverse_bind_pose: mat4_affine_inverse(&root_local),
+                    local_transform: root_local,
+                },
+                Bone {
+                    name: "child".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            0,
+        );
+        let track = BoneTrack {
+            bone_index: 1,
+            positions: vec![Keyframe::new(0.0, [1.0, 0.0, 0.0])],
+            rotations: vec![Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0])],
+            scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+        };
+        let world =
+            AnimationClip::new("t", 1.0, vec![track]).sample_global_transforms(0.0, &skeleton);
+        assert!(
+            (world[1][12] - 1.0).abs() < 1e-5,
+            "child x = {}",
+            world[1][12]
+        );
+        assert!((world[1][0] - 2.0).abs() < 1e-5, "scale is inherited");
+        // Rest pose (no tracks) still reproduces the matrix hierarchy.
+        let rest = AnimationClip::new("bind", 0.0, vec![]).sample_global_transforms(0.0, &skeleton);
+        assert!((rest[0][0] - 2.0).abs() < 1e-5);
     }
 
     #[test]

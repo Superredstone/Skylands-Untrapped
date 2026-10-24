@@ -39,3 +39,11 @@
    - Joint entities were spawned with `b.local_transform` (parent-relative), but spawned as flat direct children of the actor root.
    - At spawn before the first animation tick, joints collapsed into a heap at the root.
    - Initial transform of each joint must be `mat4_affine_inverse(&b.inverse_bind_pose)` (bind pose in root/model space).
+
+6. **Animation tracks bound to the wrong bones** (fixed):
+   - Symptom: bind pose (animation off) rendered correctly in `--viewer`; any clip crumpled the mesh (tail stretched, body folded, wings floating).
+   - Havok tracks follow the Havok rig skeleton order, not `igSkeleton2` order. Spyro `hkaSkeleton`: `J_vertical, J_root, J_root_B, J_hip_BL..J_foot_BL, J_hip_BR..J_foot_BR, J_tail_1..J_tail_0, J_root_F, J_hip_FL.., J_hip_FR.., J_neck, J_head, J_eye_*, J_jaw, J_lipCorners, J_pupil_*, J_wing_*` (49). `igSkeleton2`: `Unnamed bone, J_vertical, J_root, J_root_F, J_neck, J_head, J_jaw, ...` (50). The `hkaAnimationBinding` indices (identity, `originalSkeletonName` `SpyroJr:J_vertical`) index the Havok rig; we applied them to `igSkeleton2` with a `+1` offset, so head bones got leg tracks.
+   - Rig location: `tfbPhysicsBody` `+0x14` size (low 27 bits), `+0x18` -> Havok packfile (`hkRootLevelContainer` -> `hkaAnimationContainer` -> `hkaSkeleton`); `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` -> the matching `igSkeleton2`. One rig per skeleton (Spyro: body + 2 tails, Kaos: head + body).
+   - `hkaSkeleton` (2013, BE, 32-bit): `_name` +0x08, `_parentIndices` +0x0c, `_bones` +0x18 (`hkaBone` 8 bytes, name first), `_referencePose` +0x24 (`hkQsTransform` 48 bytes). Arrays are (ptr, size, capacity); pointers via `__data__` local fixups, classes via virtual fixups.
+   - Fix: `parse_havok_skeleton` + `HavokRig`; `parse_havok_animation` maps track -> rig bone name -> `igSkeleton2` bone (namespace stripped: `Kaos_export:J_origin`). Rig = one bone per track, else most name hits. Unmatched tracks are dropped.
+   - Scaled rigs (Kaos `J_root` / hips scale 1.4): Havok composes `hkQsTransform` (`t = t_p + R_p t_c`, `R = R_p R_c`, `s = s_p s_c`), so a parent's scale does not scale child translations. `sample_global_transforms` now composes that way; rest locals are re-derived from the bind pose in the same convention. Frame-0 vs rest bone-length mismatch: Kaos 0.118 -> 0.010, Spyro 0.17 -> < 0.01.

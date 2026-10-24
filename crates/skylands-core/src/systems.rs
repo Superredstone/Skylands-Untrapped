@@ -252,7 +252,7 @@ pub fn portal_gameplay_system(
                     // Despawn existing heroes first
                     for (entity, ident, is_hero) in &actors {
                         if is_hero && !ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
 
@@ -286,7 +286,7 @@ pub fn portal_gameplay_system(
                 if trapped_state.control_mode == ActiveControlMode::Villain {
                     for (entity, ident, _) in &actors {
                         if ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                     trapped_state.control_mode = ActiveControlMode::Hero;
@@ -302,7 +302,7 @@ pub fn portal_gameplay_system(
                 } else {
                     for (entity, ident, _) in &actors {
                         if ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                 }
@@ -410,7 +410,7 @@ pub fn villain_tag_team_swap_system(
                             let pos = hero_tf.translation;
                             let rot = hero_tf.rotation;
                             let vel = hero_vel.0;
-                            commands.entity(hero_ent).despawn();
+                            commands.entity(hero_ent).despawn_recursive();
 
                             spawn_controlled_villain_actor(
                                 &mut commands,
@@ -442,7 +442,7 @@ pub fn villain_tag_team_swap_system(
                     let pos = villain_tf.translation;
                     let rot = villain_tf.rotation;
                     let vel = villain_vel.0;
-                    commands.entity(villain_ent).despawn();
+                    commands.entity(villain_ent).despawn_recursive();
 
                     let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
                     spawn_hero_actor(
@@ -515,7 +515,7 @@ pub fn villain_energy_system(
                     let pos = villain_tf.translation;
                     let rot = villain_tf.rotation;
                     let vel = villain_vel.0;
-                    commands.entity(villain_ent).despawn();
+                    commands.entity(villain_ent).despawn_recursive();
 
                     let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
                     spawn_hero_actor(
@@ -939,7 +939,7 @@ pub fn projectile_flight_system(
     for (proj_entity, mut proj_tf, velocity, mut proj) in &mut proj_query {
         proj.lifetime += dt;
         if proj.lifetime >= proj.max_lifetime {
-            commands.entity(proj_entity).despawn();
+            commands.entity(proj_entity).despawn_recursive();
             continue;
         }
 
@@ -975,7 +975,7 @@ pub fn projectile_flight_system(
         }
 
         if hit {
-            commands.entity(proj_entity).despawn();
+            commands.entity(proj_entity).despawn_recursive();
         }
     }
 }
@@ -1050,7 +1050,7 @@ pub fn damage_system(
                                 "{name} has been defeated! Place a different Skylander on the Portal."
                             ));
                         }
-                        commands.entity(entity).despawn();
+                        commands.entity(entity).despawn_recursive();
                     } else if is_enemy {
                         // `LootSystem.ai` "Creature Death Generate Loot": `LootValue = 5`.
                         // ponytail: fixed drop; real one rolls rarity/drop-rate in the script VM.
@@ -1068,7 +1068,7 @@ pub fn damage_system(
                                 grounded: true,
                             },
                         ));
-                        commands.entity(entity).despawn();
+                        commands.entity(entity).despawn_recursive();
                     } else if let Some(prop) = maybe_prop {
                         if prop.destructible {
                             audio_events.send(WorldAudioCueEvent(WorldAudioCue::PropDestroyed));
@@ -1098,7 +1098,7 @@ pub fn damage_system(
                                     grounded: true,
                                 },
                             ));
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     } else if maybe_villain.is_some() {
                         let has_trap = gameplay_state
@@ -1126,7 +1126,7 @@ pub fn damage_system(
                                     stream.queue.push_back(pkt);
                                 }
                             }
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         } else {
                             commands.spawn((
                                 Collectible {
@@ -1145,7 +1145,7 @@ pub fn damage_system(
                                 s.active_prompt =
                                     Some("Insert a Trap to capture Villain!".to_string());
                             }
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                 }
@@ -1172,7 +1172,7 @@ pub fn collectible_pickup_system(
                 collectible.collected = true;
                 stats.coins += collectible.value;
                 audio_events.send(WorldAudioCueEvent(WorldAudioCue::PickupCollected));
-                commands.entity(entity).despawn();
+                commands.entity(entity).despawn_recursive();
             }
         }
     }
@@ -1346,7 +1346,7 @@ pub fn villain_capture_system(
         portal.set_trap_light(r, g, b);
 
         for (ent, _) in &villain_actors {
-            commands.entity(ent).despawn();
+            commands.entity(ent).despawn_recursive();
         }
         audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainTrapped));
         let (name, _) = get_character_info(capture_progress.villain_id);
@@ -2395,6 +2395,9 @@ mod tests {
                 ActorAnimation::default(),
             ))
             .id();
+        // Render-side children (skeleton joints, skinned submeshes) go with the actor.
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut().entity_mut(hero_ent).add_child(joint);
 
         // Press Minus to swap into Kaos
         app.world_mut()
@@ -2404,6 +2407,7 @@ mod tests {
 
         // Previous hero entity is despawned
         assert!(app.world().get_entity(hero_ent).is_err());
+        assert!(app.world().get_entity(joint).is_err(), "orphaned child");
 
         // Control mode is Villain
         let state = app.world().resource::<TrappedVillainState>();

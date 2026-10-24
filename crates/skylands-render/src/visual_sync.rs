@@ -107,6 +107,11 @@ impl ModelVisualRegistry {
 #[derive(Component)]
 pub struct CharacterSubmeshEntity;
 
+/// Actor whose visual has been built. Skinned characters keep their meshes on
+/// `CharacterSubmeshEntity` children, so `Mesh3d` on the actor can't mark this.
+#[derive(Component)]
+pub struct ActorVisual;
+
 pub type SubmeshVisual = (Handle<Mesh>, Handle<StandardMaterial>);
 
 #[derive(Resource, Clone, Default)]
@@ -715,7 +720,7 @@ pub fn actor_visual_sync_system(
             Option<&Prop>,
             Has<Enemy>,
         ),
-        Or<(Without<Mesh3d>, Changed<ActorIdentity>)>,
+        Or<(Without<ActorVisual>, Changed<ActorIdentity>)>,
     >,
     collectible_query: Query<(Entity, &Collectible), Without<Mesh3d>>,
     projectile_query: Query<Entity, (With<Projectile>, Without<Mesh3d>)>,
@@ -725,6 +730,7 @@ pub fn actor_visual_sync_system(
     };
 
     for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy) in &actor_query {
+        commands.entity(entity).insert(ActorVisual);
         let is_hero = maybe_hero.is_some();
         let is_villain = maybe_villain.is_some() || is_enemy;
 
@@ -746,14 +752,14 @@ pub fn actor_visual_sync_system(
             if let Some((mesh, mat)) = custom_visual {
                 if let Ok(old_anim) = anim_query.get(entity) {
                     for &j in &old_anim.joints {
-                        commands.entity(j).despawn();
+                        commands.entity(j).despawn_recursive();
                     }
                     commands.entity(entity).remove::<SkinnedMesh>();
                     commands.entity(entity).remove::<CharacterAnimator>();
                 }
                 for (child, parent) in &submesh_query {
                     if parent.get() == entity {
-                        commands.entity(child).despawn();
+                        commands.entity(child).despawn_recursive();
                     }
                 }
 
@@ -1245,6 +1251,102 @@ mod tests {
             "Root joint animated to Y=0.5, got {}",
             root_tf.translation.y
         );
+    }
+
+    #[test]
+    fn test_multi_submesh_character_is_built_once() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        app.init_resource::<CharacterVisualRegistry>();
+
+        let mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(ProceduralMesh::prop_cube(0.5).to_bevy());
+        let mat = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.insert_resource(RenderMeshAssets {
+            courtyard_mesh: mesh.clone(),
+            courtyard_material: mat.clone(),
+            pedestal_mesh: mesh.clone(),
+            pedestal_material: mat.clone(),
+            hero_mesh: mesh.clone(),
+            hero_material: mat.clone(),
+            villain_mesh: mesh.clone(),
+            villain_material: mat.clone(),
+            prop_mesh: mesh.clone(),
+            prop_material: mat.clone(),
+            coin_mesh: mesh.clone(),
+            coin_material: mat.clone(),
+            gem_mesh: mesh.clone(),
+            gem_material: mat.clone(),
+            projectile_mesh: mesh.clone(),
+            projectile_material: mat.clone(),
+        });
+
+        let bone = skylands_formats::Bone {
+            name: "root".to_string(),
+            parent: None,
+            inverse_bind_pose: skylands_formats::mat4_identity(),
+            local_transform: skylands_formats::mat4_identity(),
+        };
+        let model = std::sync::Arc::new(skylands_formats::IgbModel {
+            skeletons: vec![skylands_formats::Skeleton::new(vec![bone], 0)],
+            animations: vec![skylands_formats::AnimationClip::new("idle", 1.0, vec![])],
+            ..default()
+        });
+        let key = "16:016_spyro.bld".to_string();
+        {
+            let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
+            reg.cache.insert(key.clone(), (mesh.clone(), mat.clone()));
+            // Body + wings: meshes live on children, the actor itself has no `Mesh3d`.
+            reg.submeshes.insert(
+                key.clone(),
+                vec![(mesh.clone(), mat.clone()), (mesh.clone(), mat.clone())],
+            );
+            reg.models.insert(key, model);
+        }
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".to_string(),
+                    is_villain: false,
+                    model_path: Some("016_Spyro.bld".to_string()),
+                    texture_path: None,
+                },
+                Hero,
+            ))
+            .id();
+        app.add_systems(Update, actor_visual_sync_system);
+        app.update();
+        let joints = app
+            .world()
+            .get::<CharacterAnimator>(entity)
+            .unwrap()
+            .joints
+            .clone();
+        let children = app.world().get::<Children>(entity).unwrap().len();
+
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<CharacterAnimator>(entity).unwrap().joints,
+            joints,
+            "visual must not be rebuilt every frame (animation restarts)"
+        );
+        assert_eq!(app.world().get::<Children>(entity).unwrap().len(), children);
     }
 
     #[test]

@@ -103,6 +103,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - Done: Spyro idle animates in `--viewer`.
 - [x] Gameplay-driven animation: `animation_state_name` (core) picks `idle`/`walk`/`run`/`jump`/`fall`/`attack_*` for heroes, villains and enemies (`EnemyState::Windup` = `attack`). `character_animation_system` follows `ActorAnimation` (viewer clip only when `viewer_mode`; before, the always-present `ViewerSettings` pinned everyone to idle). `resolve_clip` maps states to file clip names with fallbacks (`combatidle`, `jumpstanding`, `falling`, `spinattack`...); attacks and jump play once.
   - Clip names are the last `_` segment of the `.ma` path (`CrockWarrior_CombatIdle.ma` -> `combatidle`). `AnimationClip.skeleton` records the Havok target rig; `IgbModel::primary_animations` drops secondary-rig clips (Kaos `kaosHead_Idle` 8.53 s vs `Kaos_Idle` 1.07 s).
+  - [x] Tracks are bound by bone name through the Havok rig skeleton (`tfbPhysicsBody` `+0x18`, `hkaSkeleton`), not by index; poses compose as `hkQsTransform` (scaled rigs). See `agent/CHARACTER_RENDERING.md` item 6. Tests: `test_havok_tracks_follow_rig_bone_names`, `test_havok_scaled_rig_kaos`, `test_map_tracks_by_name`, `test_pose_parent_scale_does_not_scale_child_translation`.
+  - [x] Visual sync no longer rebuilds skinned multi-submesh characters every frame (`ActorVisual` marker; animation restarted each frame and `Children` leaked). Actor despawns are recursive so joints/submeshes don't outlive their actor.
   - [ ] Hurt (`damagefront`), landing, idle-to-walk transitions, blending between clips, walk playback rate from speed. Debug-menu animation preview is overridden by gameplay state outside viewer mode.
 
 ### Phase 2 - DOL tooling & Alchemy metadata
