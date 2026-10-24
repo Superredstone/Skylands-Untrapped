@@ -2,6 +2,7 @@
 //! pure value logic (macros, set/check value, arithmetic). Layout notes: `agent/SCRIPT_VM.md`.
 
 use crate::igb::{IgbEndian, IgbModel, IgzFile};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -107,6 +108,29 @@ pub enum Op {
     CreateVariable {
         var: usize,
     },
+    /// `OpSlideValue`: move `lhs` to `target` over `seconds` (latent; owns a
+    /// completion block of `br` ops).
+    SlideValue {
+        lhs: Vec<Ref>,
+        target: Rhs,
+        seconds: Option<Rhs>,
+    },
+    /// `OpDisplace`: move the object at `target` by `len` along heading/pitch (degrees).
+    Displace {
+        target: Vec<Ref>,
+        mode: i32,
+        len: Option<Rhs>,
+        heading: Option<Rhs>,
+        pitch: Option<Rhs>,
+    },
+    /// `OpRemove`: despawn the object at `target`.
+    Remove {
+        target: Vec<Ref>,
+    },
+    /// Event blocks of a script (`OpPreScript` / `OpStartUp` / `OpShutDown`).
+    PreScript,
+    StartUp,
+    ShutDown,
     /// Anything else (spawn, movement, sound...): skipped by the evaluator.
     Other(String),
 }
@@ -323,6 +347,27 @@ impl Reader<'_> {
             },
             "OpCreateVariable" => Op::CreateVariable { var: o },
             "OpMacroInterface" => Op::Interface,
+            "OpSlideValue" => match self.rhs_at(o + 0x20) {
+                Some(target) => Op::SlideValue {
+                    lhs: self.lhs(o + 0x1c),
+                    target,
+                    seconds: self.rhs_at(o + 0x24),
+                },
+                None => Op::Other(t.into()),
+            },
+            "OpDisplace" => Op::Displace {
+                target: self.lhs(o + 0x1c),
+                mode: self.u32(o + 0x20).unwrap_or(0) as i32,
+                len: self.rhs_at(o + 0x24),
+                heading: self.rhs_at(o + 0x28),
+                pitch: self.rhs_at(o + 0x2c),
+            },
+            "OpRemove" => Op::Remove {
+                target: self.lhs(o + 0x1c),
+            },
+            "OpPreScript" => Op::PreScript,
+            "OpStartUp" => Op::StartUp,
+            "OpShutDown" => Op::ShutDown,
             "OpCheckReference" | "OpCheckMembership" | "OpSetReference" => {
                 let set = t == "OpSetReference";
                 let p = |f: usize| {
@@ -350,11 +395,15 @@ impl Reader<'_> {
 impl ScriptSet {
     /// Decode every `tfbScriptInfo` in an IGZ (`level.bld`) file.
     pub fn parse(data: &[u8]) -> Option<Self> {
-        let file = IgbModel::scan_igz(data).ok()?;
+        Self::from_file(data, &IgbModel::scan_igz(data).ok()?)
+    }
+
+    /// `parse` over an already scanned file.
+    pub fn from_file(data: &[u8], file: &IgzFile) -> Option<Self> {
         let objects = &file.objects.as_ref()?.objects;
         let r = Reader {
             data,
-            file: &file,
+            file,
             types: objects
                 .iter()
                 .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
@@ -420,6 +469,21 @@ impl ScriptSet {
             roots: file.roots.clone(),
             export_base: file.external_types.len(),
         })
+    }
+
+    /// Name hashes of an engine path (`my.orientation.facing`): every step is a
+    /// handle outside `global.bld`. `None` for script objects and global exports.
+    pub fn engine_key(&self, path: &[Ref]) -> Option<Vec<u32>> {
+        let global = name_hash("global.bld");
+        path.iter()
+            .map(|r| match *r {
+                Ref::Handle(h) if self.handle_ns.get(h as usize) != Some(&global) => {
+                    self.handle_ids.get(h as usize).copied()
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|k| !k.is_empty())
     }
 
     pub fn var_name(&self, var: usize) -> &str {
@@ -539,6 +603,36 @@ impl ScriptSet {
                     macro_def.unwrap_or(0)
                 ),
                 Op::CreateVariable { var } => format!("var {}", self.ref_name(&Ref::Obj(*var))),
+                Op::SlideValue {
+                    lhs,
+                    target,
+                    seconds,
+                } => format!(
+                    "slide {} -> {} over {}",
+                    self.path_str(lhs),
+                    self.rhs_str(target),
+                    seconds.as_ref().map_or("-".into(), |r| self.rhs_str(r))
+                ),
+                Op::Displace {
+                    target,
+                    mode,
+                    len,
+                    heading,
+                    pitch,
+                } => {
+                    let r = |r: &Option<Rhs>| r.as_ref().map_or("-".into(), |r| self.rhs_str(r));
+                    format!(
+                        "displace {} mode={mode} len={} heading={} pitch={}",
+                        self.path_str(target),
+                        r(len),
+                        r(heading),
+                        r(pitch)
+                    )
+                }
+                Op::Remove { target } => format!("remove {}", self.path_str(target)),
+                Op::PreScript => "PRESCRIPT".into(),
+                Op::StartUp => "STARTUP".into(),
+                Op::ShutDown => "SHUTDOWN".into(),
                 Op::Other(t) => t.clone(),
             };
             let _ = writeln!(
@@ -580,45 +674,93 @@ enum Flow {
 pub struct Vm<'a> {
     set: &'a ScriptSet,
     global: Option<&'a ScriptSet>,
-    vars: HashMap<Vec<Ref>, Value>,
+    pub(crate) vars: HashMap<Vec<Ref>, Value>,
     loops: HashMap<usize, i32>,
-    /// A path through a check op means its LHS; through a loop op, its counter.
-    aliases: HashMap<usize, &'a Op>,
-    macros: HashMap<usize, (usize, usize)>,
+    index: Cow<'a, VmIndex>,
     steps: u32,
     depth: u32,
+    /// Engine state by name-hash path (`ScriptSet::engine_key`): reads fall back to it,
+    /// writes to engine paths land here.
+    pub engine: HashMap<Vec<u32>, Value>,
+    /// Engine actions the scripts asked for, in execution order.
+    pub effects: Vec<Effect>,
     /// Engine state read before any write (spawned objects, save data, other files),
     /// in first-read order. Such reads yield 0.
     pub unbound: Vec<String>,
 }
 
-impl<'a> Vm<'a> {
-    /// `global` resolves `global.bld` handles to their initial values.
-    pub fn new(set: &'a ScriptSet, global: Option<&'a ScriptSet>) -> Self {
-        let mut aliases = HashMap::new();
-        let mut macros = HashMap::new();
+/// Engine action requested by a script op.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    /// `OpSlideValue` at op `op` started: `lhs` goes `from` -> `to` over `seconds`.
+    Slide {
+        op: usize,
+        lhs: Vec<Ref>,
+        from: f32,
+        to: f32,
+        seconds: f32,
+    },
+    /// `OpDisplace` of the engine object `target` (name-hash path).
+    Displace {
+        target: Vec<u32>,
+        len: f32,
+        heading: f32,
+        pitch: f32,
+    },
+    /// `OpRemove` of the engine object `target` (name-hash path).
+    Remove { target: Vec<u32> },
+}
+
+/// Per-set lookup tables, shared by every `Vm` over the set.
+#[derive(Debug, Clone, Default)]
+pub struct VmIndex {
+    /// A path through a check op means its LHS; through a loop op, its counter.
+    aliases: HashMap<usize, (usize, usize)>,
+    macros: HashMap<usize, (usize, usize)>,
+}
+
+impl VmIndex {
+    pub fn new(set: &ScriptSet) -> Self {
+        let mut index = Self::default();
         for (si, s) in set.scripts.iter().enumerate() {
             for (oi, ins) in s.ops.iter().enumerate() {
                 match &ins.op {
                     Op::CheckValue { .. } | Op::LoopValue { .. } => {
-                        aliases.insert(ins.offset, &ins.op);
+                        index.aliases.insert(ins.offset, (si, oi));
                     }
                     Op::DefineMacro { .. } => {
-                        macros.entry(ins.offset).or_insert((si, oi));
+                        index.macros.entry(ins.offset).or_insert((si, oi));
                     }
                     _ => {}
                 }
             }
         }
+        index
+    }
+}
+
+impl<'a> Vm<'a> {
+    /// `global` resolves `global.bld` handles to their initial values.
+    pub fn new(set: &'a ScriptSet, global: Option<&'a ScriptSet>) -> Self {
+        Self::with_index(set, global, Cow::Owned(VmIndex::new(set)))
+    }
+
+    /// `Vm` over a prebuilt index (one per set, many runs).
+    pub fn with_index(
+        set: &'a ScriptSet,
+        global: Option<&'a ScriptSet>,
+        index: Cow<'a, VmIndex>,
+    ) -> Self {
         Self {
             set,
             global,
             vars: HashMap::new(),
             loops: HashMap::new(),
-            aliases,
-            macros,
+            index,
             steps: 0,
             depth: 0,
+            engine: HashMap::new(),
+            effects: Vec::new(),
             unbound: Vec::new(),
         }
     }
@@ -714,7 +856,7 @@ impl<'a> Vm<'a> {
     fn use_macro(&mut self, si: usize, at: usize, target: Option<usize>) -> Result<usize, VmError> {
         let (_, after) = self.params(si, at);
         let site = self.param_rhs(si, at);
-        let Some(&(tsi, toi)) = target.and_then(|t| self.macros.get(&t)) else {
+        let Some(&(tsi, toi)) = target.and_then(|t| self.index.macros.get(&t)) else {
             // Defined in another file: every parameter keeps its literal.
             let what = format!("macro @{:x}", target.unwrap_or(0));
             if !self.unbound.contains(&what) {
@@ -747,6 +889,11 @@ impl<'a> Vm<'a> {
             }
         }
         Ok(after)
+    }
+
+    /// Run ops `[from, to)` of script `si`.
+    pub fn run_range(&mut self, si: usize, from: usize, to: usize) -> Result<(), VmError> {
+        self.run(si, from, to).map(|_| ())
     }
 
     fn run(&mut self, si: usize, from: usize, to: usize) -> Result<Flow, VmError> {
@@ -801,7 +948,66 @@ impl<'a> Vm<'a> {
                     pc = end;
                 }
                 Op::UseMacro { target } => pc = self.use_macro(si, pc - 1, *target)?,
-                Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::Other(_) => {}
+                // Event blocks other than the one being run.
+                Op::StartUp | Op::ShutDown => pc += skip,
+                // The block after a slide configures its slider (`looping`, ...).
+                Op::SlideValue {
+                    lhs,
+                    target,
+                    seconds,
+                } => {
+                    let from = self.read(lhs).as_f32();
+                    let to = self.eval(target)?.as_f32();
+                    let seconds = match seconds {
+                        Some(r) => self.eval(r)?.as_f32(),
+                        None => 0.0,
+                    };
+                    if let Ok(lhs) = self.canon(lhs) {
+                        self.effects.push(Effect::Slide {
+                            op: ins.offset,
+                            lhs,
+                            from,
+                            to,
+                            seconds,
+                        });
+                    }
+                }
+                Op::Displace {
+                    target,
+                    len,
+                    heading,
+                    pitch,
+                    ..
+                } => {
+                    if let Some(target) = self.set.engine_key(target) {
+                        let mut f = |r: &Option<Rhs>| -> Result<f32, VmError> {
+                            Ok(match r {
+                                Some(r) => self.eval(r)?.as_f32(),
+                                None => 0.0,
+                            })
+                        };
+                        let (len, heading, pitch) = (f(len)?, f(heading)?, f(pitch)?);
+                        self.effects.push(Effect::Displace {
+                            target,
+                            len,
+                            heading,
+                            pitch,
+                        });
+                    }
+                }
+                // Only when nothing unresolved (save data, other files) led here:
+                // `Persephone_2014.ai` removes herself on a save flag we cannot read.
+                Op::Remove { target } => {
+                    if let Some(target) = self.set.engine_key(target) {
+                        if self.unbound.is_empty() {
+                            self.effects.push(Effect::Remove { target });
+                        }
+                    }
+                }
+                // Blocks of ops that need live objects (find variable, spawn, for each,
+                // user behaviors): skipped, as if nothing was found.
+                Op::Other(_) => pc += skip,
+                Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::PreScript => {}
             }
         }
         Ok(Flow::Next)
@@ -834,7 +1040,12 @@ impl<'a> Vm<'a> {
         let mut p = path.to_vec();
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
-            match self.aliases.get(o) {
+            let alias = self
+                .index
+                .aliases
+                .get(o)
+                .map(|&(si, oi)| &self.set.scripts[si].ops[oi].op);
+            match alias {
                 Some(Op::CheckValue { lhs, .. }) => {
                     p = lhs.iter().chain(&p[1..]).copied().collect();
                 }
@@ -853,6 +1064,9 @@ impl<'a> Vm<'a> {
             Err(i) => return Value::Int(i),
         };
         if let Some(v) = self.vars.get(&path) {
+            return *v;
+        }
+        if let Some(v) = self.set.engine_key(&path).and_then(|k| self.engine.get(&k)) {
             return *v;
         }
         let init = match path[..] {
@@ -881,7 +1095,14 @@ impl<'a> Vm<'a> {
 
     fn write(&mut self, path: &[Ref], v: Value) {
         if let Ok(p) = self.canon(path) {
-            self.vars.insert(p, v);
+            match self.set.engine_key(&p) {
+                Some(k) => {
+                    self.engine.insert(k, v);
+                }
+                None => {
+                    self.vars.insert(p, v);
+                }
+            }
         }
     }
 }

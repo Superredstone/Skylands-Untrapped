@@ -377,7 +377,7 @@ impl CollisionMesh {
 
         // 1. Incorporate dedicated analytical collision primitives (boxes, props, obstacles)
         for prim in &igb.collision_primitives {
-            if prim.is_solid || prim.is_actor_surface {
+            if prim.blocks_movement {
                 for tri in prim.to_world_triangles() {
                     let t = Triangle::new(tri[0], tri[1], tri[2]);
                     if t.is_valid() {
@@ -419,6 +419,9 @@ impl CollisionMesh {
 
         if !igb.geometries.is_empty() {
             for inst in instances {
+                if igb.non_colliding_nodes.contains(&inst.node_index) {
+                    continue;
+                }
                 if let Some(geo) = igb.geometries.get(inst.geometry_index) {
                     if !should_include(&geo.name) {
                         continue;
@@ -659,6 +662,11 @@ mod tests {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {
@@ -746,6 +754,8 @@ mod tests {
             is_solid: true,
             interacts_with_world: true,
             is_actor_surface: true,
+            is_actor_physics_object: false,
+            blocks_movement: true,
         });
 
         let col = CollisionMesh::from_igb(&igb);
@@ -769,5 +779,64 @@ mod tests {
         );
         let p = push.unwrap();
         assert!(p[2] > 0.0, "Push must be outward (+Z), got {:?}", p);
+    }
+
+    #[test]
+    fn test_non_blocking_volumes_and_decor_nodes_do_not_collide() {
+        use skylands_formats::igb::{
+            mat4_identity, IgbGeometryNode, IgbMesh, IgbObjectType, IgbSceneNode, IgbVertex,
+        };
+        use skylands_formats::{CollisionPrimitive, CollisionShapeType};
+
+        let mut igb = IgbModel::default();
+        let vertex = |p: [f32; 3]| IgbVertex {
+            position: p,
+            ..Default::default()
+        };
+        igb.geometries.push(IgbGeometryNode {
+            name: "statue".to_string(),
+            vertex_buffer_index: None,
+            index_buffer_index: None,
+            attr_list_index: None,
+            material_index: None,
+            mesh: Some(IgbMesh {
+                vertices: vec![
+                    vertex([0.0, 0.0, 0.0]),
+                    vertex([1.0, 0.0, 0.0]),
+                    vertex([0.0, 0.0, 1.0]),
+                ],
+                indices: vec![0, 1, 2],
+                ..Default::default()
+            }),
+        });
+        for _ in 0..2 {
+            igb.nodes.push(IgbSceneNode {
+                name: "node_statue".to_string(),
+                type_id: IgbObjectType::IgNode,
+                children: Vec::new(),
+                geometry_index: Some(0),
+                transform: mat4_identity(),
+                marker: None,
+            });
+        }
+        // Second placement belongs to a non-solid actor (a bird, a light ray).
+        igb.non_colliding_nodes.insert(1);
+        // Default camera/emitter volume: solid flag only.
+        igb.collision_primitives.push(CollisionPrimitive {
+            name: "CameraDummy".to_string(),
+            shape_type: CollisionShapeType::Box,
+            local_position: [0.0; 3],
+            local_rotation_deg: [0.0; 3],
+            extents: [3.0, 6.0, 3.0],
+            world_transform: mat4_identity(),
+            is_solid: true,
+            interacts_with_world: true,
+            is_actor_surface: false,
+            is_actor_physics_object: false,
+            blocks_movement: false,
+        });
+
+        let col = CollisionMesh::from_igb(&igb);
+        assert_eq!(col.triangles.len(), 1);
     }
 }

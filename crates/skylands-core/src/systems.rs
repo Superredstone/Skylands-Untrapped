@@ -1494,6 +1494,7 @@ pub fn spawn_level_content(
     }
 
     let markers = model.extract_level_markers();
+    let mut scripts: Option<Option<LevelScripts>> = None;
     let mut marker_id_counter = 5000u32;
     let mut has_spawn = false;
     let mut tuning: Option<EnemyTuning> = None;
@@ -1533,7 +1534,16 @@ pub fn spawn_level_content(
                 marker_id_counter += 1;
             }
             skylands_formats::igb::MarkerKind::Prop => {
-                commands.spawn((
+                let script = marker
+                    .script
+                    .as_deref()
+                    .filter(|_| marker.animated)
+                    .and_then(|name| {
+                        let program = scripts.get_or_insert_with(|| level_scripts(loader, &path));
+                        Some((program.as_ref()?.0.find(name)?, program.clone()?))
+                    });
+                let base = Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform));
+                let mut prop = commands.spawn((
                     LevelEntity,
                     ActorIdentity {
                         id: marker_id_counter,
@@ -1543,7 +1553,10 @@ pub fn spawn_level_content(
                         model_path: None,
                         texture_path: None,
                     },
-                    Prop { destructible: true },
+                    // Script-animated scenery (windmills, birds) cannot be smashed.
+                    Prop {
+                        destructible: !marker.animated,
+                    },
                     Health {
                         current: 50,
                         max: 50,
@@ -1556,6 +1569,23 @@ pub fn spawn_level_content(
                         grounded: true,
                     },
                 ));
+                if marker.drawn_by_level {
+                    prop.insert(LevelDrawnModel);
+                }
+                if let Some((si, _)) = script {
+                    let mut state = skylands_formats::ActorScriptState::default();
+                    use skylands_formats::script_runtime::field;
+                    state.set(&[field::MY, field::SCALE, field::UNIFORM], 100.0);
+                    prop.insert((
+                        ActorScript {
+                            script: si,
+                            marker_node: marker.node_index,
+                            state,
+                            base,
+                        },
+                        base,
+                    ));
+                }
                 marker_id_counter += 1;
             }
             skylands_formats::igb::MarkerKind::Collectible => {
@@ -1599,6 +1629,11 @@ pub fn spawn_level_content(
         }
     }
 
+    match scripts.flatten() {
+        Some(s) => commands.insert_resource(s),
+        None => commands.remove_resource::<LevelScripts>(),
+    }
+
     if !has_spawn {
         if let Some(ref mut env) = env_col {
             if let Some((hit_y, _)) = env.mesh.raycast_down([0.0, 50.0, 0.0], 500.0) {
@@ -1608,6 +1643,44 @@ pub fn spawn_level_content(
     }
 
     true
+}
+
+/// The level's scripts with `global.bld` for global handles.
+fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Option<LevelScripts> {
+    let parse = |p: &str| skylands_formats::ScriptSet::parse(&loader.load_raw(p).ok()?);
+    let program = skylands_formats::ScriptProgram::new(parse(level_path)?, parse("global.bld"));
+    Some(LevelScripts(std::sync::Arc::new(program)))
+}
+
+/// One script tick per `ActorScript`, then its engine state is applied to the actor:
+/// `orientation` angles (degrees, relative to the placement; facing = yaw about +Y,
+/// tilt = X, roll = Z, composed `Rz * Ry * Rx` like placements), `vertical offset`,
+/// `OpDisplace` and `scale.uniform`. `OpRemove my` despawns the actor.
+pub fn actor_script_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    scripts: Option<Res<LevelScripts>>,
+    mut actors: Query<(Entity, &mut ActorScript, &mut Transform)>,
+) {
+    use skylands_formats::script_runtime::field::*;
+    let Some(scripts) = scripts else { return };
+    let dt = time.delta_secs();
+    for (entity, mut actor, mut transform) in &mut actors {
+        let actor = &mut *actor;
+        scripts.0.tick(actor.script, &mut actor.state, dt);
+        let st = &actor.state;
+        if st.removed {
+            commands.entity(entity).despawn_recursive();
+            continue;
+        }
+        let angle = |f| st.get(&[MY, ORIENTATION, f]).unwrap_or(0.0).to_radians();
+        let turn = Quat::from_euler(EulerRot::ZYX, angle(ROLL), angle(FACING), angle(TILT));
+        let lift = Vec3::Y * st.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
+        let scale = st.get(&[MY, SCALE, UNIFORM]).unwrap_or(100.0) / 100.0;
+        transform.translation = actor.base.translation + lift + Vec3::from(st.displacement);
+        transform.rotation = actor.base.rotation * turn;
+        transform.scale = actor.base.scale * scale;
+    }
 }
 
 /// Enemy stats from the level's scripts and `global.bld`; defaults when either is
@@ -2972,5 +3045,166 @@ mod tests {
             .unwrap();
         let anim = app.world().get::<ActorAnimation>(enemy).unwrap();
         assert_eq!(anim.current_clip.as_deref(), Some("walk"));
+    }
+
+    /// `PRESCRIPT { STARTUP {} SHUTDOWN {} body }` over handles `my`,
+    /// `orientation`, `relative facing`, `Script Timer`.
+    fn scripted_level(body: Vec<skylands_formats::script::Op>) -> LevelScripts {
+        use skylands_formats::script::{name_hash, Instr, Op, Script};
+        use skylands_formats::script_runtime::field::*;
+        let ins = |offset, br, op| Instr {
+            offset,
+            flags: 0,
+            br,
+            op,
+        };
+        let mut ops = vec![
+            ins(1, body.len() as u16 + 2, Op::PreScript),
+            ins(2, 0, Op::StartUp),
+            ins(3, 0, Op::ShutDown),
+        ];
+        ops.extend(
+            body.into_iter()
+                .enumerate()
+                .map(|(i, op)| ins(10 + i, 0, op)),
+        );
+        let ids = vec![MY, ORIENTATION, RELATIVE_FACING, SCRIPT_TIMER];
+        let set = skylands_formats::ScriptSet {
+            scripts: vec![Script {
+                name: "Windmill.ai".into(),
+                ops,
+            }],
+            handle_ns: vec![name_hash("level.bld"); ids.len()],
+            handle_ids: ids,
+            ..Default::default()
+        };
+        LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
+            set, None,
+        )))
+    }
+
+    fn spawn_scripted(app: &mut App, scripts: LevelScripts, base: Transform) -> Entity {
+        app.insert_resource(scripts);
+        app.world_mut()
+            .spawn((
+                ActorScript {
+                    script: 0,
+                    marker_node: 7,
+                    state: Default::default(),
+                    base,
+                },
+                base,
+            ))
+            .id()
+    }
+
+    #[test]
+    fn test_actor_script_spins_placed_prop() {
+        use skylands_formats::script::{Op, Operand, Ref, Rhs, Value};
+        let spin = Op::SetValue {
+            lhs: vec![Ref::Handle(0), Ref::Handle(1), Ref::Handle(2)],
+            rhs: Rhs {
+                a: Operand::Lit(Value::Int(-2)),
+                arith: -1,
+                b: None,
+                func: 0,
+            },
+        };
+        let mut app = build_test_app();
+        let base = Transform::from_xyz(1.0, 2.0, 3.0);
+        let mill = spawn_scripted(&mut app, scripted_level(vec![spin]), base);
+        for _ in 0..45 {
+            step_fixed(&mut app);
+        }
+        let t = app.world().get::<Transform>(mill).unwrap();
+        // 45 ticks x -2 degrees = a quarter turn clockwise about +Y.
+        let expected = Quat::from_rotation_y((-90f32).to_radians());
+        assert!(
+            t.rotation.dot(expected).abs() > 1.0 - 1e-6,
+            "{:?}",
+            t.rotation
+        );
+        assert_eq!(t.translation, base.translation);
+    }
+
+    #[test]
+    fn test_actor_script_remove_despawns_prop() {
+        use skylands_formats::script::{Op, Operand, Ref, Rhs, Value};
+        let check = Op::CheckValue {
+            lhs: vec![Ref::Handle(3)],
+            rel: 2,
+            rhs: Rhs {
+                a: Operand::Lit(Value::Int(0)),
+                arith: -1,
+                b: None,
+                func: 0,
+            },
+        };
+        let remove = Op::Remove {
+            target: vec![Ref::Handle(0)],
+        };
+        let mut app = build_test_app();
+        let scripts = scripted_level(vec![check, remove]);
+        // `br` 1 on the check guards the remove.
+        let mut program = std::sync::Arc::try_unwrap(scripts.0).ok().unwrap();
+        program.set.scripts[0].ops[3].br = 1;
+        let scripts = LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
+            program.set,
+            None,
+        )));
+        let prop = spawn_scripted(&mut app, scripts, Transform::IDENTITY);
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(prop).is_err());
+    }
+
+    #[test]
+    fn test_hub_props_run_their_scripts() {
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("level/Level_Hub_2014_01.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("permanent/global.bld")).unwrap();
+        loader
+            .mount(dir.join("level/Level_Hub_2014_01.bld"))
+            .unwrap();
+        let mut app = build_test_app();
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        assert!(spawn_level_content(
+            &mut commands,
+            &loader,
+            "Level_Hub_2014_01.bld",
+            None,
+            &CampaignProgress::default(),
+        ));
+        queue.apply(world);
+        let mut q = world.query::<(&ActorScript, &Transform)>();
+        let before: Vec<_> = q.iter(world).map(|(a, t)| (a.marker_node, *t)).collect();
+        eprintln!("hub scripted actors: {}", before.len());
+        assert!(before.len() >= 10, "{}", before.len());
+        for _ in 0..120 {
+            step_fixed(&mut app);
+        }
+        let world = app.world_mut();
+        let mut q = world.query::<(&ActorScript, &Transform)>();
+        let moved = q
+            .iter(world)
+            .filter(|(a, t)| {
+                before.iter().any(|(n, b)| {
+                    *n == a.marker_node
+                        && (b.rotation != t.rotation || b.translation != t.translation)
+                })
+            })
+            .count();
+        let errors = q
+            .iter(world)
+            .filter(|(a, _)| a.state.error.is_some())
+            .count();
+        eprintln!("moved after 2 s: {moved}, errors: {errors}");
+        assert!(moved >= 5, "{moved}");
+        assert_eq!(errors, 0);
     }
 }

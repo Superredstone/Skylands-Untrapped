@@ -164,6 +164,25 @@ pub struct Prop {
     pub destructible: bool,
 }
 
+/// Placed actor driven by its `.ai` script (`skylands_formats::ScriptProgram`).
+/// Script orientation angles turn the actor relative to its placement; `vertical
+/// offset` and `OpDisplace` move it, `scale.uniform` (percent) scales it.
+#[derive(Component, Debug, Clone)]
+pub struct ActorScript {
+    /// Index into the level's `ScriptProgram`.
+    pub script: usize,
+    /// Level marker node; the renderer draws this actor's model apart from the level.
+    pub marker_node: usize,
+    pub state: skylands_formats::ActorScriptState,
+    /// Placement transform.
+    pub base: Transform,
+}
+
+/// Actor whose model is already part of the level render mesh; it needs no visual
+/// of its own.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelDrawnModel;
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Collectible {
     pub value: u32,

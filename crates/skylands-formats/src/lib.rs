@@ -5,6 +5,7 @@ pub mod havok;
 pub mod igb;
 pub mod loader;
 pub mod script;
+pub mod script_runtime;
 pub mod sprite;
 pub mod texture;
 
@@ -24,6 +25,7 @@ pub use igb::{
 };
 pub use loader::{AssetError, AssetLoader};
 pub use script::{enemy_stats, EnemyStats, LevelupTable, ScriptSet, Vm, VmError};
+pub use script_runtime::{ActorScriptState, ScriptProgram};
 pub use sprite::{SpriteDef, SpriteLibrary};
 pub use texture::{
     decode_cmpr, decode_dxt1, decode_dxt1_block, decode_gx_rgba8, decode_rgb565, TextureError,

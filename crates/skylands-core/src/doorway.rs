@@ -162,6 +162,9 @@ mod tests {
                 node_index: 0,
                 geometry_index: None,
                 mesh: None,
+                drawn_by_level: false,
+                script: None,
+                animated: false,
             },
             LevelMarker {
                 name: "Transit_00_MainHall-LandingArea".to_string(),
@@ -171,6 +174,9 @@ mod tests {
                 node_index: 1,
                 geometry_index: None,
                 mesh: None,
+                drawn_by_level: false,
+                script: None,
+                animated: false,
             },
         ];
 

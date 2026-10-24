@@ -524,11 +524,7 @@ impl MarkerKind {
             Some(MarkerKind::Doorway)
         } else if lower.starts_with("portal_") || lower.starts_with("zone_") {
             Some(MarkerKind::TriggerZone)
-        } else if lower.starts_with("prop_")
-            || lower.starts_with('^')
-            || lower.contains("light")
-            || lower.contains("lantern")
-        {
+        } else if lower.starts_with("prop_") || lower.starts_with('^') {
             Some(MarkerKind::Prop)
         } else if lower.starts_with("pickup_")
             || lower.starts_with("coin_")
@@ -577,6 +573,13 @@ pub struct CollisionPrimitive {
     pub is_solid: bool,
     pub interacts_with_world: bool,
     pub is_actor_surface: bool,
+    /// `_isActorPhysicsObject` (0x40).
+    pub is_actor_physics_object: bool,
+    /// Static obstacle for the level: the actor starts active, draws no model (a model
+    /// collides through its mesh), the volume is an actor surface or physics object and
+    /// is not mesh-shaped (that shape needs a model).
+    /// The default 3x6x3 `_isSolid` box on cameras, emitters and triggers is not one.
+    pub blocks_movement: bool,
 }
 
 impl CollisionPrimitive {
@@ -637,6 +640,12 @@ pub struct ActorPlacement {
     /// `.ai` script path, if the actor has one.
     pub script: Option<String>,
     pub collision: Option<CollisionPrimitive>,
+    /// `_activityState` == active; inactive actors are templates scripts spawn later.
+    pub active: bool,
+    /// `_scaleVec`, percent per axis.
+    pub scale: [f32; 3],
+    /// `tfbPhysicsModel` object offset drawn at the placement.
+    pub model: Option<usize>,
 }
 
 impl ActorPlacement {
@@ -653,6 +662,28 @@ impl ActorPlacement {
         m[12..15].copy_from_slice(&self.position);
         m
     }
+
+    /// Whether the level draws this actor's model. Enemies and collectibles become
+    /// gameplay entities with their own visuals, so the level leaves them out.
+    pub fn draws_level_model(&self) -> bool {
+        self.active
+            && self.model.is_some()
+            && !matches!(
+                self.kind(),
+                Some(MarkerKind::Enemy(_)) | Some(MarkerKind::Collectible)
+            )
+    }
+
+    /// `transform` with `_scaleVec` / 100 applied.
+    pub fn model_transform(&self) -> [f32; 16] {
+        let mut m = self.transform();
+        for (col, s) in self.scale.iter().enumerate() {
+            for row in 0..3 {
+                m[col * 4 + row] *= s / 100.0;
+            }
+        }
+        m
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -664,6 +695,13 @@ pub struct LevelMarker {
     pub node_index: usize,
     pub geometry_index: Option<usize>,
     pub mesh: Option<IgbMesh>,
+    /// The level scene draws this actor's model (`ActorPlacement::draws_level_model`).
+    pub drawn_by_level: bool,
+    /// `.ai` script path of the placing actor.
+    pub script: Option<String>,
+    /// The script animates the actor; its model is drawn apart from the level
+    /// (`IgbModel::node_owner`).
+    pub animated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1825,6 +1863,17 @@ pub struct IgbModel {
     /// The level's sky layer. Drawn around the camera, so it is kept out of the
     /// scene graph (and collision); transforms are in sky layer space.
     pub sky_instances: Vec<SceneInstance>,
+    /// Scene nodes drawn but not collided with (models of non-solid actors).
+    pub non_colliding_nodes: std::collections::HashSet<usize>,
+    /// Marker nodes whose actor model the level scene draws.
+    pub level_drawn_markers: std::collections::HashSet<usize>,
+    /// Prop marker nodes whose script moves, turns, scales or removes the actor
+    /// (`ScriptProgram::animates_self`). Their model is not part of the static level.
+    pub animated_markers: std::collections::HashSet<usize>,
+    /// Geometry node -> marker node of the animated actor that draws it.
+    pub node_owner: std::collections::HashMap<usize, usize>,
+    /// Marker node -> `.ai` script path.
+    pub marker_scripts: std::collections::HashMap<usize, String>,
 }
 
 /// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
@@ -1891,6 +1940,11 @@ impl Default for IgbModel {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         }
     }
 }
@@ -2044,6 +2098,11 @@ impl IgbModel {
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
                 sky_instances: Vec::new(),
+                non_colliding_nodes: Default::default(),
+                level_drawn_markers: Default::default(),
+                animated_markers: Default::default(),
+                node_owner: Default::default(),
+                marker_scripts: Default::default(),
             });
         }
 
@@ -2077,6 +2136,11 @@ impl IgbModel {
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
                 sky_instances: Vec::new(),
+                non_colliding_nodes: Default::default(),
+                level_drawn_markers: Default::default(),
+                animated_markers: Default::default(),
+                node_owner: Default::default(),
+                marker_scripts: Default::default(),
             });
         }
 
@@ -2257,6 +2321,11 @@ impl IgbModel {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         })
     }
 
@@ -3522,18 +3591,18 @@ impl IgbModel {
         geo_transforms
     }
 
-    /// World matrices of model geometry placed by level actors. Geometry of a
-    /// `tfbPhysicsModel` is in model space; each `tfbActorInfo` whose `_physicsModel`
-    /// (+0xec) points at the model draws it at `_initMatrix` scaled by `_scaleVec` / 100,
-    /// if it starts active (inactive actors are templates scripts spawn later).
-    /// Keys are geometry offsets (`igWiiGeometryAttr` and its `igWiiGeometry`); every model
-    /// geometry is present, with no matrices when no actor places the model.
+    /// World matrices of model geometry placed by level actors, with whether the
+    /// placing actor is solid and its index in `placements`. Geometry of a `tfbPhysicsModel` (+0x68 entity info) is
+    /// in model space; each actor that `draws_level_model` places it at its
+    /// `model_transform`. Keys are geometry offsets (`igWiiGeometryAttr` and its
+    /// `igWiiGeometry`); every model geometry is present, unplaced ones with no matrices.
     pub fn decode_model_placements(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
         objects: &[IgzObject],
         endian: IgbEndian,
-    ) -> std::collections::HashMap<usize, Vec<[f32; 16]>> {
+        placements: &[ActorPlacement],
+    ) -> std::collections::HashMap<usize, Vec<([f32; 16], bool, usize)>> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
         };
@@ -3542,48 +3611,24 @@ impl IgbModel {
             let s = sections.get(((w >> 27) + 1) as usize)?;
             Some(s.offset + (w & 0x07FF_FFFF) as usize)
         };
-        let vec3 = |o: usize| -> Option<[f32; 3]> {
-            Some([rd(o)?, rd(o + 4)?, rd(o + 8)?].map(f32::from_bits))
-        };
-        let models: std::collections::HashSet<usize> = objects
+        let mut by_model: std::collections::HashMap<usize, Vec<([f32; 16], bool, usize)>> = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsModel"))
-            .map(|o| o.offset)
+            .map(|o| (o.offset, Vec::new()))
             .collect();
-
-        let mut by_model: std::collections::HashMap<usize, Vec<[f32; 16]>> =
-            models.iter().map(|&m| (m, Vec::new())).collect();
-        for actor in objects
+        for (ai, actor) in placements
             .iter()
-            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
-            .filter(|o| {
-                rd(o.offset + meta_fields::actor_info::ACTIVITY_STATE)
-                    == Some(meta_fields::actor_info::ACTIVITY_ACTIVE)
-            })
+            .enumerate()
+            .filter(|(_, a)| a.draws_level_model())
         {
-            let Some(model) = ptr(actor.offset + meta_fields::actor_info::PHYSICS_MODEL)
-                .filter(|m| models.contains(m))
-            else {
-                continue;
-            };
-            let (Some(pos), Some(rot), Some(scale)) = (
-                vec3(actor.offset + meta_fields::actor_info::INIT_MATRIX),
-                vec3(actor.offset + meta_fields::actor_info::INIT_ROTATION),
-                vec3(actor.offset + meta_fields::placement::SCALE_VEC),
-            ) else {
-                continue;
-            };
-            if !pos.iter().chain(&rot).chain(&scale).all(|v| v.is_finite()) {
+            let m = actor.model_transform();
+            if !m.iter().all(|v| v.is_finite()) {
                 continue;
             }
-            let mut m = mat4_from_euler_deg(rot);
-            for (col, s) in scale.iter().enumerate() {
-                for row in 0..3 {
-                    m[col * 4 + row] *= s / 100.0;
-                }
+            let solid = actor.collision.as_ref().is_some_and(|c| c.is_solid);
+            if let Some(model) = actor.model {
+                by_model.entry(model).or_default().push((m, solid, ai));
             }
-            m[12..15].copy_from_slice(&pos);
-            by_model.entry(model).or_default().push(m);
         }
 
         let mut out = std::collections::HashMap::new();
@@ -3828,6 +3873,11 @@ impl IgbModel {
             .filter(|o| o.type_name.as_deref() == Some("CollisionInfo"))
             .map(|o| o.offset)
             .collect();
+        let models: std::collections::HashSet<usize> = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsModel"))
+            .map(|o| o.offset)
+            .collect();
         objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
@@ -3839,6 +3889,20 @@ impl IgbModel {
                 let script = ptr(o.offset + meta_fields::placement::SCRIPT)
                     .filter(|p| script_infos.contains(p))
                     .and_then(|p| cstr(p + meta_fields::named_object::NAME));
+                let active = data
+                    .get(o.offset + meta_fields::actor_info::ACTIVITY_STATE..)
+                    .filter(|b| b.len() >= 4)
+                    .map(|_| {
+                        Self::read_u32(
+                            data,
+                            o.offset + meta_fields::actor_info::ACTIVITY_STATE,
+                            endian,
+                        )
+                    })
+                    == Some(meta_fields::actor_info::ACTIVITY_ACTIVE);
+                let model = ptr(o.offset + meta_fields::actor_info::PHYSICS_MODEL)
+                    .filter(|p| models.contains(p));
+                let scale = vec3(o.offset + meta_fields::placement::SCALE_VEC);
                 let collision = ptr(o.offset + meta_fields::placement::COLLISION)
                     .filter(|p| col_info_offsets.contains(p))
                     .and_then(|col_off| {
@@ -3890,6 +3954,11 @@ impl IgbModel {
                                 is_solid: (props & 0x08) != 0,
                                 interacts_with_world: (props & 0x10) != 0,
                                 is_actor_surface: (props & 0x20) != 0,
+                                is_actor_physics_object: (props & 0x40) != 0,
+                                blocks_movement: active
+                                    && model.is_none()
+                                    && (props & 0x60) != 0
+                                    && CollisionShapeType::from(props) != CollisionShapeType::Mesh,
                             })
                         } else {
                             None
@@ -3902,6 +3971,9 @@ impl IgbModel {
                         rotation_deg,
                         script,
                         collision,
+                        active,
+                        scale,
+                        model,
                     },
                 )
             })
@@ -4121,6 +4193,9 @@ impl IgbModel {
                 node_index: node_idx,
                 geometry_index,
                 mesh,
+                drawn_by_level: self.level_drawn_markers.contains(&node_idx),
+                script: self.marker_scripts.get(&node_idx).cloned(),
+                animated: self.animated_markers.contains(&node_idx),
             });
         }
 
@@ -4337,6 +4412,19 @@ impl IgbModel {
     }
 
     pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+        let file = Self::scan_igz(data)?;
+        // Level actors whose script animates them get their own meshes.
+        let animated_scripts = file
+            .objects
+            .as_ref()
+            .filter(|l| {
+                l.objects
+                    .iter()
+                    .any(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
+            })
+            .and_then(|_| crate::script::ScriptSet::from_file(data, &file))
+            .map(|set| crate::script_runtime::ScriptProgram::new(set, None).animated_scripts())
+            .unwrap_or_default();
         let IgzFile {
             endian,
             version,
@@ -4347,7 +4435,7 @@ impl IgbModel {
             external_types,
             objects: igz_objects,
             ..
-        } = Self::scan_igz(data)?;
+        } = file;
         let sections = &sections[..];
 
         let mut geo_transforms = std::collections::HashMap::new();
@@ -4362,7 +4450,13 @@ impl IgbModel {
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
-            model_placements = Self::decode_model_placements(data, sections, &list.objects, endian);
+            model_placements = Self::decode_model_placements(
+                data,
+                sections,
+                &list.objects,
+                endian,
+                &actor_placements,
+            );
             sky_geos = Self::decode_sky_geometries(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
             script_constants = Self::decode_script_constants(
@@ -4662,9 +4756,41 @@ impl IgbModel {
 
         // Level markers: real placements from `tfbActorInfo` when present.
         let mut nodes = Vec::new();
+        let mut level_drawn_markers = std::collections::HashSet::new();
+        let mut non_colliding_nodes = std::collections::HashSet::new();
+        let mut animated_markers = std::collections::HashSet::new();
+        let mut node_owner = std::collections::HashMap::new();
+        let mut marker_scripts = std::collections::HashMap::new();
+        let mut animated_actor_marker = std::collections::HashMap::new();
         if !actor_placements.is_empty() {
-            for actor in &actor_placements {
-                let Some(kind) = actor.kind() else { continue };
+            for (ai, actor) in actor_placements.iter().enumerate() {
+                // Level-drawn actors whose script animates them (birds, windmills,
+                // floating steps) become props even without a marker kind.
+                let animated = actor.draws_level_model()
+                    && actor
+                        .script
+                        .as_ref()
+                        .is_some_and(|s| animated_scripts.contains(s));
+                let Some(kind) = actor
+                    .kind()
+                    .or_else(|| animated.then_some(MarkerKind::Prop))
+                else {
+                    continue;
+                };
+                // Inactive props are templates a script spawns later (lids, hats).
+                if kind == MarkerKind::Prop && !actor.active {
+                    continue;
+                }
+                if actor.draws_level_model() {
+                    level_drawn_markers.insert(nodes.len());
+                }
+                if let Some(script) = &actor.script {
+                    marker_scripts.insert(nodes.len(), script.clone());
+                }
+                if animated && kind == MarkerKind::Prop {
+                    animated_markers.insert(nodes.len());
+                    animated_actor_marker.insert(ai, nodes.len());
+                }
                 nodes.push(IgbSceneNode {
                     name: actor.name.clone(),
                     type_id: IgbObjectType::IgNode,
@@ -4736,7 +4862,7 @@ impl IgbModel {
                 let placements = geo_off
                     .and_then(|off| model_placements.get(off))
                     .filter(|_| !actor_placements.is_empty());
-                let world: Vec<[f32; 16]> = match placements {
+                let world: Vec<([f32; 16], bool, Option<usize>)> = match placements {
                     _ if geo_off.is_some_and(|off| sky_geos.contains(off)) => {
                         sky_instances.push(SceneInstance {
                             node_index: 0,
@@ -4745,10 +4871,19 @@ impl IgbModel {
                         });
                         Vec::new()
                     }
-                    Some(xforms) => xforms.iter().map(|p| mat4_mul(p, &transform)).collect(),
-                    None => vec![transform],
+                    Some(xforms) => xforms
+                        .iter()
+                        .map(|(p, solid, ai)| (mat4_mul(p, &transform), *solid, Some(*ai)))
+                        .collect(),
+                    None => vec![(transform, true, None)],
                 };
-                for transform in world {
+                for (transform, solid, actor) in world {
+                    if !solid {
+                        non_colliding_nodes.insert(nodes.len());
+                    }
+                    if let Some(&m) = actor.and_then(|ai| animated_actor_marker.get(&ai)) {
+                        node_owner.insert(nodes.len(), m);
+                    }
                     nodes.push(IgbSceneNode {
                         name: format!("node_{}", geo.name),
                         type_id: IgbObjectType::IgNode,
@@ -5110,6 +5245,11 @@ impl IgbModel {
             script_constants,
             attachments,
             sky_instances,
+            non_colliding_nodes,
+            level_drawn_markers,
+            animated_markers,
+            node_owner,
+            marker_scripts,
         })
     }
 
@@ -5600,6 +5740,9 @@ mod tests {
             rotation_deg: [0.0, 90.0, 0.0],
             script: script.map(Into::into),
             collision: None,
+            active: true,
+            scale: [100.0; 3],
+            model: None,
         };
         let s = "C:/tfb/Content/Levels/Level_Hub_2014/Scripts/";
         let crystal = actor("Transit_01", Some(&format!("{s}TransitCrystal.ai")));
@@ -6062,6 +6205,11 @@ mod tests {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -6177,6 +6325,11 @@ mod tests {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         };
 
         let markers = model.extract_level_markers();
@@ -6447,6 +6600,11 @@ mod tests {
             script_constants: Vec::new(),
             attachments: Vec::new(),
             sky_instances: Vec::new(),
+            non_colliding_nodes: Default::default(),
+            level_drawn_markers: Default::default(),
+            animated_markers: Default::default(),
+            node_owner: Default::default(),
+            marker_scripts: Default::default(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -7402,6 +7560,62 @@ mod tests {
         let median = edges[edges.len() / 2];
         assert!(edges.len() > 500_000, "got {} triangles", edges.len());
         assert!(median < 3.0, "median edge {median}");
+    }
+
+    #[test]
+    fn test_level_model_drawn_only_for_active_static_actors() {
+        let actor = |script: Option<&str>, active: bool, model: Option<usize>| ActorPlacement {
+            name: "Statue".into(),
+            position: [0.0; 3],
+            rotation_deg: [0.0; 3],
+            script: script.map(Into::into),
+            collision: None,
+            active,
+            scale: [100.0; 3],
+            model,
+        };
+        assert!(actor(None, true, Some(1)).draws_level_model());
+        assert!(!actor(None, false, Some(1)).draws_level_model());
+        assert!(!actor(None, true, None).draws_level_model());
+        // Enemies and coins draw themselves as gameplay entities.
+        assert!(!actor(Some("x/Enemy_S4_Chompy.ai"), true, Some(1)).draws_level_model());
+        assert!(!actor(Some("x/2D_Coin.ai"), true, Some(1)).draws_level_model());
+    }
+
+    #[test]
+    fn test_hub_default_actor_volumes_do_not_block() {
+        use crate::archive::ArchiveMount;
+        let rel = "assets/files/level/Level_Hub_2014_01.bld";
+        let p = [rel.to_string(), format!("../../{rel}")]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists());
+        let Some(p) = p else { return };
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).expect("mount hub");
+        let data = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
+
+        // 830 solid-flagged volumes, almost all the default 3x6x3 box on cameras,
+        // sound emitters, coin layers and triggers; only named blockers remain.
+        let blocking: Vec<_> = model
+            .collision_primitives
+            .iter()
+            .filter(|p| p.blocks_movement)
+            .collect();
+        assert!(blocking.len() < 40, "{} blocking volumes", blocking.len());
+        assert!(blocking.iter().any(|p| p.name == "Blocker_MainDoor"));
+        assert!(blocking
+            .iter()
+            .all(|p| !p.name.starts_with("emt_") && !p.name.contains("CameraDummy")));
+        // No placeholder props from name guesses or inactive templates.
+        let props: Vec<_> = model
+            .extract_level_markers()
+            .into_iter()
+            .filter(|m| m.kind == MarkerKind::Prop)
+            .collect();
+        assert!(props.iter().all(|m| !m.name.contains("CameraDummy")));
+        assert!(props.iter().all(|m| m.position != [0.0; 3]));
     }
 
     #[test]

@@ -416,3 +416,7 @@ pub struct PortalAudioStreaming {
     pub queue: VecDeque<[u8; REPORT_SIZE]>,
     pub sink: PortalSpeakerSink,
 }
+
+/// The active level's scripts, shared by every `ActorScript`.
+#[derive(Resource, Clone)]
+pub struct LevelScripts(pub std::sync::Arc<skylands_formats::ScriptProgram>);

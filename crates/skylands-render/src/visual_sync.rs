@@ -10,7 +10,8 @@ use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
-    ActorAnimation, ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
+    ActorAnimation, ActorIdentity, ActorScript, Collectible, Element, Enemy, Hero, LevelDrawnModel,
+    Projectile, Prop, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -358,6 +359,15 @@ pub struct RenderMeshAssets {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelRenderMesh;
 
+/// Model of a script-animated level actor (`IgbModel::node_owner`), in the actor's
+/// space. Follows the core entity whose `ActorScript` has the same marker node.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptedActorMesh {
+    pub marker_node: usize,
+    /// The actor has been seen; its later absence means it was removed.
+    pub seen: bool,
+}
+
 /// Part of the level's sky layer, seen only by `SkyCamera`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelSkyMesh;
@@ -416,9 +426,10 @@ pub fn spawn_level_render_mesh(
     let instances = model.evaluate_scene_graph();
 
     // One draw per diffuse material (`Drawable._material`), so each part keeps its texture.
-    // Sky layer parts are drawn apart, around the camera (`SkyCamera`).
+    // Sky layer parts are drawn apart, around the camera (`SkyCamera`), and models of
+    // script-animated actors apart per actor (`ScriptedActorMesh`).
     let mut material_groups: HashMap<
-        (bool, LevelMaterialKey),
+        (bool, Option<usize>, LevelMaterialKey),
         Vec<&skylands_formats::igb::SceneInstance>,
     > = HashMap::new();
     if !instances.is_empty() && !model.geometries.is_empty() {
@@ -432,19 +443,24 @@ pub fn spawn_level_render_mesh(
                 .get(inst.geometry_index)
                 .and_then(|g| g.mesh.as_ref())
             {
+                let owner = (!sky)
+                    .then(|| model.node_owner.get(&inst.node_index).copied())
+                    .flatten();
                 material_groups
-                    .entry((sky, LevelMaterialKey::of(m)))
+                    .entry((sky, owner, LevelMaterialKey::of(m)))
                     .or_default()
                     .push(inst);
             }
         }
     }
-    let level_textures =
-        loader.load_images_rgba(&path, material_groups.keys().filter_map(|(_, k)| k.image));
+    let level_textures = loader.load_images_rgba(
+        &path,
+        material_groups.keys().filter_map(|(_, _, k)| k.image),
+    );
     // Parts sharing an image (sky and world, or several tints) share one `Image`.
     let mut texture_handles = HashMap::new();
     let mut groups: Vec<_> = material_groups.into_iter().collect();
-    groups.sort_by_key(|((sky, k), _)| (*sky, k.image));
+    groups.sort_by_key(|((sky, owner, k), _)| (*sky, *owner, k.image));
 
     let mut spawned_any = false;
 
@@ -490,7 +506,12 @@ pub fn spawn_level_render_mesh(
 
         spawned_any = true;
     } else {
-        for ((sky, key), group_instances) in groups {
+        for ((sky, owner, key), group_instances) in groups {
+            // Owned parts are built in their actor's space.
+            let owner_world = owner.and_then(|o| model.nodes.get(o)).map(|n| n.transform);
+            let to_local = owner_world
+                .map(|w| skylands_formats::igb::mat4_affine_inverse(&w))
+                .unwrap_or_else(skylands_formats::igb::mat4_identity);
             let mut total_verts = 0;
             let mut total_idxs = 0;
             for inst in &group_instances {
@@ -519,15 +540,10 @@ pub fn spawn_level_render_mesh(
                         if m.vertices.is_empty() || m.indices.is_empty() {
                             continue;
                         }
+                        let xf = skylands_formats::igb::mat4_mul(&to_local, &inst.world_transform);
                         for v in &m.vertices {
-                            positions.push(skylands_formats::igb::transform_point(
-                                &inst.world_transform,
-                                v.position,
-                            ));
-                            normals.push(skylands_formats::igb::transform_dir(
-                                &inst.world_transform,
-                                v.normal,
-                            ));
+                            positions.push(skylands_formats::igb::transform_point(&xf, v.position));
+                            normals.push(skylands_formats::igb::transform_dir(&xf, v.normal));
                             uvs.push(v.uv);
                             colors.push(v.color);
                         }
@@ -593,12 +609,21 @@ pub fn spawn_level_render_mesh(
             });
 
             let mesh_handle = meshes.add(bevy_mesh);
+            let transform = owner_world.map_or(Transform::IDENTITY, |w| {
+                Transform::from_matrix(Mat4::from_cols_array(&w))
+            });
             let mut part = commands.spawn((
                 LevelRenderMesh,
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(submesh_mat),
-                Transform::from_xyz(0.0, 0.0, 0.0),
+                transform,
             ));
+            if let Some(marker_node) = owner {
+                part.insert(ScriptedActorMesh {
+                    marker_node,
+                    seen: false,
+                });
+            }
             if sky {
                 part.insert((
                     LevelSkyMesh,
@@ -612,6 +637,26 @@ pub fn spawn_level_render_mesh(
     }
 
     spawned_any
+}
+
+/// Moves script-animated actor models with their core entity; hides them once the
+/// entity is gone (`OpRemove my`).
+pub fn scripted_actor_mesh_follow_system(
+    actors: Query<(&ActorScript, &Transform), Without<ScriptedActorMesh>>,
+    mut parts: Query<(&mut ScriptedActorMesh, &mut Transform, &mut Visibility)>,
+) {
+    let by_node: HashMap<usize, Transform> =
+        actors.iter().map(|(s, t)| (s.marker_node, *t)).collect();
+    for (mut part, mut transform, mut visibility) in &mut parts {
+        match by_node.get(&part.marker_node) {
+            Some(t) => {
+                part.seen = true;
+                *transform = *t;
+            }
+            None if part.seen => *visibility = Visibility::Hidden,
+            None => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -877,6 +922,7 @@ pub fn actor_visual_sync_system(
             Option<&Villain>,
             Option<&Prop>,
             Has<Enemy>,
+            Has<LevelDrawnModel>,
         ),
         Or<(Without<ActorVisual>, Changed<ActorIdentity>)>,
     >,
@@ -887,7 +933,9 @@ pub fn actor_visual_sync_system(
         return;
     };
 
-    for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy) in &actor_query {
+    for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy, level_drawn) in
+        &actor_query
+    {
         commands.entity(entity).insert(ActorVisual);
         let is_hero = maybe_hero.is_some();
         let is_villain = maybe_villain.is_some() || is_enemy;
@@ -1080,7 +1128,7 @@ pub fn actor_visual_sync_system(
                     MeshMaterial3d(assets.villain_material.clone()),
                 ));
             }
-        } else if maybe_prop.is_some() {
+        } else if maybe_prop.is_some() && !level_drawn {
             let prop_visual = model_registry.as_mut().and_then(|reg| {
                 let path = ident.model_path.as_deref()?;
                 reg.get_or_load_model(

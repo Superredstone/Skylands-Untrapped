@@ -73,6 +73,7 @@ impl Plugin for SkylandsCorePlugin {
                     systems::actor_physics_system,
                     systems::hero_combat_system,
                     systems::enemy_ai_system,
+                    systems::actor_script_system,
                 )
                     .chain(),
             )

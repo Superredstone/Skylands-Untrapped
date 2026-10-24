@@ -68,3 +68,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   "Portal - Define Levelup Table": `level hp mult` 0.111, XP 1000, 2200, ..., 197500 (19 levels).
   Global `PortalObject_Minion.ai` "Minion - Get HP Mult for Level" = `(level - 1) * 0.111 + 1`;
   "Portal - Minion - Stats - Get Max HP" = `stats.hp max * mult + added hp`.
+
+## Actor runtime (`script_runtime.rs`)
+- Script shape: `OpPreScript` (br = whole script) holds `OpStartUp` (block, run once), `OpShutDown`
+  (block, not run) and the per-tick body. `OpUserBehavior` blocks after it are event handlers (not run).
+- Engine fields are `EXID` name hashes (FNV-1a, lower case), cracked against `main.dol` strings:
+  `my` `4c2dfe93`, `Script Timer` `6fb9e9ff` (seconds), `my.<0xc545bc21>.facing|tilt|roll`
+  (degrees; parent name unknown), `relative facing|tilt|roll` (added every tick: windmill -2),
+  `my.vertical offset` `6c749d1e`, `my.scale.uniform` (percent), `visible` `54fa99a1`,
+  `tint.alpha`, `distance`, `location`, `movement.ground max speed`, `collision volume.*`.
+- `OpSlideValue`: `_LHS` +0x1c, `_RHS` +0x20, `_secondsRHS` +0x24, `_easeOutRHS` +0x28, `_easeInRHS` +0x2c.
+  Its `br` block configures the slider (`@slide.looping`, `@slide.playback mode` 1 = ping-pong).
+- `OpDisplace`: `_NP` +0x1c (target), `_combineMode` +0x20, `_lenNP` +0x24, `_headNP` +0x28, `_pitchNP` +0x2c.
+  `OpRemove`: `_NP` +0x1c.
+- Other ops with a `br` block (find variable, spawn, for each, ...) skip their block in the VM.
+- Engine state lives in `Vm::engine` keyed by name-hash path; script locals stay per actor.
