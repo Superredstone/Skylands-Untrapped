@@ -96,6 +96,12 @@ pub mod meta_fields {
         pub const PHYSICS_MODEL: usize = 0xec;
     }
 
+    /// One source scene layer of a level (`Level_302_ART_MASTER.ma`, `_SKY/...ma`).
+    pub mod physics_world {
+        /// `tfbWorldEntityInfo` with the layer's drawables.
+        pub const ENTITY_INFO: usize = 0x28;
+    }
+
     pub mod physics_model {
         /// `tfbBodyEntityInfo` holding the model's drawables, in model space.
         pub const ENTITY_INFO: usize = 0x68;
@@ -1816,6 +1822,9 @@ pub struct IgbModel {
     pub script_constants: Vec<(String, ScriptValue)>,
     /// Rigid models (weapons, backpacks) mounted on the primary rig's bones.
     pub attachments: Vec<CharacterAttachment>,
+    /// The level's sky layer. Drawn around the camera, so it is kept out of the
+    /// scene graph (and collision); transforms are in sky layer space.
+    pub sky_instances: Vec<SceneInstance>,
 }
 
 /// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
@@ -1881,6 +1890,7 @@ impl Default for IgbModel {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         }
     }
 }
@@ -2033,6 +2043,7 @@ impl IgbModel {
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
+                sky_instances: Vec::new(),
             });
         }
 
@@ -2065,6 +2076,7 @@ impl IgbModel {
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
+                sky_instances: Vec::new(),
             });
         }
 
@@ -2244,6 +2256,7 @@ impl IgbModel {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         })
     }
 
@@ -3597,6 +3610,52 @@ impl IgbModel {
         out
     }
 
+    /// Geometry offsets of sky layers: `tfbPhysicsWorld` objects named after a
+    /// `Levels/_SKY/...` scene, `+0x28` -> `tfbWorldEntityInfo` drawables.
+    pub fn decode_sky_geometries(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> std::collections::HashSet<usize> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let is_sky = |o: usize| -> bool {
+            ptr(o + meta_fields::named_object::NAME)
+                .and_then(|p| data.get(p..))
+                .map(|s| &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())])
+                .is_some_and(|name| name.to_ascii_lowercase().windows(6).any(|w| w == b"/_sky/"))
+        };
+        let mut out = std::collections::HashSet::new();
+        for world in objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsWorld"))
+            .filter(|o| is_sky(o.offset))
+        {
+            let Some(drawables) = ptr(world.offset + meta_fields::physics_world::ENTITY_INFO)
+                .and_then(|e| ptr(e + 0x14))
+            else {
+                continue;
+            };
+            let (Some(n), Some(arr)) = (rd(drawables + 0x08), ptr(drawables + 0x14)) else {
+                continue;
+            };
+            for i in 0..n as usize {
+                if let Some(geo) = ptr(arr + i * 4).and_then(|d| ptr(d + 0x0c)) {
+                    out.insert(geo);
+                    out.extend(ptr(geo + 0x10));
+                }
+            }
+        }
+        out
+    }
+
     /// Extracts material attributes for geometries: maps geometry offset -> material.
     pub fn decode_drawable_materials(
         data: &[u8],
@@ -4295,6 +4354,7 @@ impl IgbModel {
         let mut actor_placements = Vec::new();
         let mut geo_materials = std::collections::HashMap::new();
         let mut model_placements = std::collections::HashMap::new();
+        let mut sky_geos = std::collections::HashSet::new();
         let mut collision_primitives = Vec::new();
         let mut script_constants = Vec::new();
         if let Some(ref list) = igz_objects {
@@ -4303,6 +4363,7 @@ impl IgbModel {
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
             model_placements = Self::decode_model_placements(data, sections, &list.objects, endian);
+            sky_geos = Self::decode_sky_geometries(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
             script_constants = Self::decode_script_constants(
                 data,
@@ -4647,6 +4708,7 @@ impl IgbModel {
 
         // Collect meshes from extracted geometries
         let mut meshes = Vec::new();
+        let mut sky_instances = Vec::new();
         let mut mesh_by_geo = std::collections::HashMap::new();
         for (geo_idx, geo) in geometries.iter_mut().enumerate() {
             if let Some(ref mut m) = geo.mesh {
@@ -4675,6 +4737,14 @@ impl IgbModel {
                     .and_then(|off| model_placements.get(off))
                     .filter(|_| !actor_placements.is_empty());
                 let world: Vec<[f32; 16]> = match placements {
+                    _ if geo_off.is_some_and(|off| sky_geos.contains(off)) => {
+                        sky_instances.push(SceneInstance {
+                            node_index: 0,
+                            geometry_index: geo_idx,
+                            world_transform: transform,
+                        });
+                        Vec::new()
+                    }
                     Some(xforms) => xforms.iter().map(|p| mat4_mul(p, &transform)).collect(),
                     None => vec![transform],
                 };
@@ -5039,6 +5109,7 @@ impl IgbModel {
             collision_primitives,
             script_constants,
             attachments,
+            sky_instances,
         })
     }
 
@@ -5990,6 +6061,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -6104,6 +6176,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         };
 
         let markers = model.extract_level_markers();
@@ -6373,6 +6446,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -7328,6 +7402,41 @@ mod tests {
         let median = edges[edges.len() / 2];
         assert!(edges.len() > 500_000, "got {} triangles", edges.len());
         assert!(median < 3.0, "median edge {median}");
+    }
+
+    #[test]
+    fn test_sky_layer_kept_out_of_level_scene() {
+        use crate::archive::ArchiveMount;
+        let rel = "assets/files/level/Level_302_Chompywurm.bld";
+        let p = [rel.to_string(), format!("../../{rel}")]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists());
+        let Some(p) = p else { return };
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).expect("mount 302");
+        let data = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&data)).expect("parse 302");
+
+        // `_SKY/turquoise_sky_307.ma`: 25 drawables, domes ~1,000 units across.
+        assert!(!model.sky_instances.is_empty());
+        let sky: std::collections::HashSet<_> = model
+            .sky_instances
+            .iter()
+            .map(|i| i.geometry_index)
+            .collect();
+        assert!(model
+            .evaluate_scene_graph()
+            .iter()
+            .all(|i| !sky.contains(&i.geometry_index)));
+        let widest = model
+            .sky_instances
+            .iter()
+            .filter_map(|i| model.geometries[i.geometry_index].mesh.as_ref())
+            .flat_map(|m| &m.vertices)
+            .map(|v| v.position[0].abs())
+            .fold(0.0f32, f32::max);
+        assert!(widest > 400.0, "sky half-width {widest}");
     }
 
     #[test]

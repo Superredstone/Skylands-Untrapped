@@ -658,6 +658,7 @@ mod tests {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            sky_instances: Vec::new(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {

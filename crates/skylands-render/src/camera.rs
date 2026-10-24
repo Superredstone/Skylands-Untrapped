@@ -1,10 +1,20 @@
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::camera::ClearColorConfig;
+use bevy::render::view::RenderLayers;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use skylands_core::{GameState, Hero};
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct MainCamera;
+
+/// Render layer of the level sky (`LevelSkyMesh`).
+pub const SKY_LAYER: usize = 1;
+
+/// Draws the sky layer before the main camera, from the origin with the main
+/// camera's rotation, so the sky stays around the player like the game's skydome.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SkyCamera;
 
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct FreeCamState {
@@ -66,9 +76,41 @@ impl OrbitCameraState {
 pub fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        Camera {
+            // The sky camera has already cleared and drawn the background.
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
         Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
         MainCamera,
     ));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: -1,
+            ..default()
+        },
+        // Sky layers span tens of thousands of units.
+        Projection::Perspective(PerspectiveProjection {
+            near: 1.0,
+            far: 200_000.0,
+            ..default()
+        }),
+        RenderLayers::layer(SKY_LAYER),
+        SkyCamera,
+    ));
+}
+
+pub fn sky_camera_sync_system(
+    main: Query<&Transform, (With<MainCamera>, Without<SkyCamera>)>,
+    mut sky: Query<&mut Transform, With<SkyCamera>>,
+) {
+    let Ok(main) = main.get_single() else {
+        return;
+    };
+    for mut tf in &mut sky {
+        *tf = Transform::from_rotation(main.rotation);
+    }
 }
 
 pub fn setup_lighting(mut commands: Commands) {
@@ -248,6 +290,25 @@ pub fn orbit_cam_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sky_camera_takes_rotation_not_position() {
+        let mut app = App::new();
+        app.add_systems(Update, sky_camera_sync_system);
+        let rotation = Quat::from_rotation_y(0.7);
+        app.world_mut().spawn((
+            Transform::from_xyz(100.0, 20.0, -50.0).with_rotation(rotation),
+            MainCamera,
+        ));
+        let sky = app
+            .world_mut()
+            .spawn((Transform::default(), SkyCamera))
+            .id();
+        app.update();
+        let tf = app.world().get::<Transform>(sky).unwrap();
+        assert_eq!(tf.translation, Vec3::ZERO);
+        assert!(tf.rotation.angle_between(rotation) < 1e-5);
+    }
 
     #[test]
     fn test_orbit_camera_state() {

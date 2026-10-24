@@ -9,7 +9,7 @@ pub mod visual_sync;
 
 pub use camera::{
     camera_follow_system, free_cam_system, orbit_cam_system, setup_camera, setup_lighting,
-    FreeCamState, MainCamera, OrbitCameraState,
+    sky_camera_sync_system, FreeCamState, MainCamera, OrbitCameraState, SkyCamera, SKY_LAYER,
 };
 pub use debug_menu::{
     debug_menu_interaction_system, debug_menu_telemetry_system, debug_menu_toggle_system,
@@ -29,7 +29,7 @@ pub use viewer::{viewer_controls_system, ViewerSettings, SHOWCASE_CHARACTERS};
 pub use visual_sync::{
     actor_visual_sync_system, character_animation_system, level_render_mesh_sync_system,
     setup_environment_and_assets, spawn_level_render_mesh, CharacterAnimator, CharacterAssetServer,
-    CharacterVisualRegistry, LevelRenderMesh, ModelVisualRegistry, RenderMeshAssets,
+    CharacterVisualRegistry, LevelRenderMesh, LevelSkyMesh, ModelVisualRegistry, RenderMeshAssets,
 };
 
 use bevy::prelude::*;
@@ -74,6 +74,10 @@ impl Plugin for SkylandsRenderPlugin {
                     camera_follow_system,
                     free_cam_system,
                     orbit_cam_system,
+                    sky_camera_sync_system
+                        .after(camera_follow_system)
+                        .after(free_cam_system)
+                        .after(orbit_cam_system),
                     viewer_controls_system,
                     hud_update_system,
                     damage_popup_ui_system,

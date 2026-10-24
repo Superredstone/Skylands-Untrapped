@@ -2,8 +2,10 @@ use crate::mesh_conversion::{
     combine_or_normalize_model_meshes, igb_model_to_bevy_mesh, Mesh as ProceduralMesh,
 };
 use crate::texture_conversion::create_colored_material;
+use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
+use bevy::render::view::RenderLayers;
 use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
@@ -356,6 +358,10 @@ pub struct RenderMeshAssets {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelRenderMesh;
 
+/// Part of the level's sky layer, seen only by `SkyCamera`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LevelSkyMesh;
+
 /// Level geometry sharing one diffuse texture, wrap mode and tint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct LevelMaterialKey {
@@ -410,26 +416,35 @@ pub fn spawn_level_render_mesh(
     let instances = model.evaluate_scene_graph();
 
     // One draw per diffuse material (`Drawable._material`), so each part keeps its texture.
-    let mut material_groups: HashMap<LevelMaterialKey, Vec<&skylands_formats::igb::SceneInstance>> =
-        HashMap::new();
+    // Sky layer parts are drawn apart, around the camera (`SkyCamera`).
+    let mut material_groups: HashMap<
+        (bool, LevelMaterialKey),
+        Vec<&skylands_formats::igb::SceneInstance>,
+    > = HashMap::new();
     if !instances.is_empty() && !model.geometries.is_empty() {
-        for inst in &instances {
+        let tagged = instances
+            .iter()
+            .map(|i| (false, i))
+            .chain(model.sky_instances.iter().map(|i| (true, i)));
+        for (sky, inst) in tagged {
             if let Some(m) = model
                 .geometries
                 .get(inst.geometry_index)
                 .and_then(|g| g.mesh.as_ref())
             {
                 material_groups
-                    .entry(LevelMaterialKey::of(m))
+                    .entry((sky, LevelMaterialKey::of(m)))
                     .or_default()
                     .push(inst);
             }
         }
     }
-    let mut level_textures =
-        loader.load_images_rgba(&path, material_groups.keys().filter_map(|k| k.image));
+    let level_textures =
+        loader.load_images_rgba(&path, material_groups.keys().filter_map(|(_, k)| k.image));
+    // Parts sharing an image (sky and world, or several tints) share one `Image`.
+    let mut texture_handles = HashMap::new();
     let mut groups: Vec<_> = material_groups.into_iter().collect();
-    groups.sort_by_key(|(k, _)| k.image);
+    groups.sort_by_key(|((sky, k), _)| (*sky, k.image));
 
     let mut spawned_any = false;
 
@@ -475,7 +490,7 @@ pub fn spawn_level_render_mesh(
 
         spawned_any = true;
     } else {
-        for (key, group_instances) in groups {
+        for ((sky, key), group_instances) in groups {
             let mut total_verts = 0;
             let mut total_idxs = 0;
             for inst in &group_instances {
@@ -538,16 +553,22 @@ pub fn spawn_level_render_mesh(
             bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
             bevy_mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
 
-            let mut alpha_mode = AlphaMode::Opaque;
-            let base_color_texture =
-                key.image
-                    .and_then(|i| level_textures.remove(&i))
-                    .map(|(w, h, rgba)| {
-                        alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
-                        images.add(crate::texture_conversion::rgba8_to_model_texture(
-                            w, h, rgba, key.wrap,
-                        ))
-                    });
+            let texture = key.image.and_then(|i| {
+                let (w, h, rgba) = level_textures.get(&i)?;
+                let entry = texture_handles.entry((i, key.wrap)).or_insert_with(|| {
+                    let alpha = crate::texture_conversion::alpha_mode_for_rgba(rgba);
+                    let image = crate::texture_conversion::rgba8_to_model_texture(
+                        *w,
+                        *h,
+                        rgba.clone(),
+                        key.wrap,
+                    );
+                    (images.add(image), alpha)
+                });
+                Some(entry.clone())
+            });
+            let alpha_mode = texture.as_ref().map_or(AlphaMode::Opaque, |t| t.1);
+            let base_color_texture = texture.map(|t| t.0);
 
             let mat_color = match (&base_color_texture, key.color) {
                 (Some(_), _) => Color::WHITE,
@@ -567,16 +588,24 @@ pub fn spawn_level_render_mesh(
                 reflectance: 0.20,
                 cull_mode: None,
                 double_sided: true,
+                unlit: sky,
                 ..default()
             });
 
             let mesh_handle = meshes.add(bevy_mesh);
-            commands.spawn((
+            let mut part = commands.spawn((
                 LevelRenderMesh,
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(submesh_mat),
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ));
+            if sky {
+                part.insert((
+                    LevelSkyMesh,
+                    RenderLayers::layer(crate::camera::SKY_LAYER),
+                    NotShadowCaster,
+                ));
+            }
 
             spawned_any = true;
         }
