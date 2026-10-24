@@ -114,10 +114,25 @@ pub struct ActorVisual;
 
 pub type SubmeshVisual = (Handle<Mesh>, Handle<StandardMaterial>);
 
+/// Rigid model (weapon, backpack) parented to a skeleton joint.
+#[derive(Clone)]
+pub struct AttachmentVisual {
+    /// Bone index in the primary skeleton.
+    pub bone: usize,
+    /// Placement in bone space.
+    pub transform: Transform,
+    pub parts: Vec<SubmeshVisual>,
+}
+
+/// Spawned under a joint entity; despawned with the joints.
+#[derive(Component)]
+pub struct CharacterAttachmentEntity;
+
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
     pub cache: HashMap<String, SubmeshVisual>,
     pub submeshes: HashMap<String, Vec<SubmeshVisual>>,
+    pub attachments: HashMap<String, Vec<AttachmentVisual>>,
     pub models: HashMap<String, std::sync::Arc<skylands_formats::igb::IgbModel>>,
 }
 
@@ -144,6 +159,24 @@ impl CharacterVisualRegistry {
             .or_else(|| resolve_character_model_archive(character_id))?;
         let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
         self.submeshes.get(&cache_key).cloned()
+    }
+
+    pub fn get_attachments(
+        &self,
+        character_id: u16,
+        model_path: Option<&str>,
+    ) -> Vec<AttachmentVisual> {
+        let Some(bld_name) = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))
+        else {
+            return Vec::new();
+        };
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+        self.attachments
+            .get(&cache_key)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn get_or_load(
@@ -234,6 +267,58 @@ impl CharacterVisualRegistry {
             (fallback_mesh, fallback_mat)
         });
 
+        // Attachments are unskinned: they follow their joint entity rigidly.
+        let skeleton = model.primary_skeleton();
+        let base_name = |n: &str| n.rsplit(':').next().unwrap_or(n).to_ascii_lowercase();
+        let mut loaded_attachments = Vec::new();
+        for att in &model.attachments {
+            let Some(bone) = skeleton.and_then(|s| {
+                s.bones
+                    .iter()
+                    .position(|b| base_name(&b.name) == base_name(&att.bone))
+            }) else {
+                continue;
+            };
+            let parts = att
+                .meshes
+                .iter()
+                .filter_map(|&i| model.meshes.get(i))
+                .map(|m| {
+                    let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
+                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+                    let texture = m
+                        .image_index
+                        .and_then(|i| loader.load_image_rgba(&bld_name, i).ok())
+                        .map(|(w, h, rgba)| {
+                            images.add(crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba))
+                        });
+                    let color = match (&texture, m.base_color) {
+                        (Some(_), _) => Color::WHITE,
+                        (None, Some(c)) => Color::srgb(c[0], c[1], c[2]),
+                        (None, None) => Color::srgb(0.6, 0.6, 0.6),
+                    };
+                    let material = materials.add(StandardMaterial {
+                        base_color: color,
+                        base_color_texture: texture,
+                        perceptual_roughness: 0.8,
+                        reflectance: 0.2,
+                        cull_mode: None,
+                        double_sided: true,
+                        ..default()
+                    });
+                    (meshes.add(mesh), material)
+                })
+                .collect();
+            loaded_attachments.push(AttachmentVisual {
+                bone,
+                transform: Transform::from_matrix(Mat4::from_cols_array(&att.transform)),
+                parts,
+            });
+        }
+
+        self.attachments
+            .insert(cache_key.clone(), loaded_attachments);
         self.submeshes.insert(cache_key.clone(), loaded_submeshes);
         self.cache.insert(cache_key.clone(), first_pair.clone());
         self.models.insert(cache_key, model);
@@ -874,6 +959,32 @@ pub fn actor_visual_sync_system(
                                 ));
                             }
                             commands.entity(entity).add_children(&joints);
+                            let attachments = visual_registry
+                                .as_ref()
+                                .map(|reg| {
+                                    reg.get_attachments(
+                                        ident.character_id,
+                                        ident.model_path.as_deref(),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            for att in attachments {
+                                let Some(&joint) = joints.get(att.bone) else {
+                                    continue;
+                                };
+                                for (part_mesh, part_mat) in att.parts {
+                                    let child = commands
+                                        .spawn((
+                                            Mesh3d(part_mesh),
+                                            MeshMaterial3d(part_mat),
+                                            att.transform,
+                                            CharacterAttachmentEntity,
+                                            Visibility::default(),
+                                        ))
+                                        .id();
+                                    commands.entity(joint).add_child(child);
+                                }
+                            }
                             skinned_applied = true;
                         }
                     }
@@ -1253,8 +1364,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_multi_submesh_character_is_built_once() {
+    /// Spyro hero with a one-bone rig and two submeshes (body + wings, so the actor itself
+    /// has no `Mesh3d`), plus `attachments` on that bone.
+    fn skinned_character_app(attachments: Vec<AttachmentVisual>) -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_plugins(bevy::asset::AssetPlugin::default());
@@ -1306,11 +1418,11 @@ mod tests {
         {
             let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
             reg.cache.insert(key.clone(), (mesh.clone(), mat.clone()));
-            // Body + wings: meshes live on children, the actor itself has no `Mesh3d`.
             reg.submeshes.insert(
                 key.clone(),
                 vec![(mesh.clone(), mat.clone()), (mesh.clone(), mat.clone())],
             );
+            reg.attachments.insert(key.clone(), attachments);
             reg.models.insert(key, model);
         }
 
@@ -1330,6 +1442,12 @@ mod tests {
             .id();
         app.add_systems(Update, actor_visual_sync_system);
         app.update();
+        (app, entity)
+    }
+
+    #[test]
+    fn test_multi_submesh_character_is_built_once() {
+        let (mut app, entity) = skinned_character_app(Vec::new());
         let joints = app
             .world()
             .get::<CharacterAnimator>(entity)
@@ -1347,6 +1465,33 @@ mod tests {
             "visual must not be rebuilt every frame (animation restarts)"
         );
         assert_eq!(app.world().get::<Children>(entity).unwrap().len(), children);
+    }
+
+    #[test]
+    fn test_attachment_follows_its_joint() {
+        let mesh = Handle::<Mesh>::default();
+        let mat = Handle::<StandardMaterial>::default();
+        let (app, entity) = skinned_character_app(vec![AttachmentVisual {
+            bone: 0,
+            transform: Transform::from_xyz(0.0, 0.0, 0.9144),
+            parts: vec![(mesh, mat)],
+        }]);
+        let joint = app.world().get::<CharacterAnimator>(entity).unwrap().joints[0];
+        let children = app
+            .world()
+            .get::<Children>(joint)
+            .expect("joint has the weapon");
+        assert_eq!(children.len(), 1);
+        let weapon = children[0];
+        assert!(app
+            .world()
+            .get::<CharacterAttachmentEntity>(weapon)
+            .is_some());
+        assert!(app.world().get::<Mesh3d>(weapon).is_some());
+        assert_eq!(
+            app.world().get::<Transform>(weapon).unwrap().translation,
+            Vec3::new(0.0, 0.0, 0.9144)
+        );
     }
 
     #[test]

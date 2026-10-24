@@ -1702,6 +1702,35 @@ impl AnimationClip {
     }
 }
 
+fn primary_skeleton_of(skeletons: &[Skeleton], meshes: &[IgbMesh]) -> Option<usize> {
+    if skeletons.is_empty() {
+        return None;
+    }
+    let mut counts = vec![0usize; skeletons.len()];
+    for m in meshes {
+        if let Some(s) = m.skeleton {
+            if s < counts.len() {
+                counts[s] += m.vertices.len();
+            }
+        }
+    }
+    skeletons
+        .iter()
+        .enumerate()
+        .filter(|&(idx, _)| counts[idx] > 0)
+        .max_by_key(|&(idx, skel)| (skel.bones.len(), counts[idx]))
+        .map(|(idx, _)| idx)
+        .or_else(|| {
+            skeletons
+                .iter()
+                .enumerate()
+                .max_by_key(|&(_, skel)| skel.bones.len())
+                .map(|(idx, _)| idx)
+        })
+}
+
+/// Returns a reference to the primary character skeleton, if any.
+
 #[derive(Debug, Clone)]
 pub struct IgbModel {
     pub header: IgbHeader,
@@ -1720,6 +1749,21 @@ pub struct IgbModel {
     pub collision_primitives: Vec<CollisionPrimitive>,
     /// Literal script assignments (`var = number`), in file order.
     pub script_constants: Vec<(String, ScriptValue)>,
+    /// Rigid models (weapons, backpacks) mounted on the primary rig's bones.
+    pub attachments: Vec<CharacterAttachment>,
+}
+
+/// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterAttachment {
+    /// `BoneAttachInfo._boneName`, a bone of the primary `igSkeleton2`.
+    pub bone: String,
+    /// Model placement in bone space (column-major).
+    pub transform: [f32; 16],
+    /// Indices into `IgbModel.meshes`.
+    pub meshes: Vec<usize>,
+    /// `.mdl` path of the attached model.
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1771,6 +1815,7 @@ impl Default for IgbModel {
             animations: Vec::new(),
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -1782,33 +1827,9 @@ impl IgbModel {
     /// minigame/cinematic heads, accessories). The primary character rig is the
     /// one that skins character geometry with the highest bone count.
     pub fn primary_skeleton_index(&self) -> Option<usize> {
-        if self.skeletons.is_empty() {
-            return None;
-        }
-        let mut counts = vec![0usize; self.skeletons.len()];
-        for m in &self.meshes {
-            if let Some(s) = m.skeleton {
-                if s < counts.len() {
-                    counts[s] += m.vertices.len();
-                }
-            }
-        }
-        self.skeletons
-            .iter()
-            .enumerate()
-            .filter(|&(idx, _)| counts[idx] > 0)
-            .max_by_key(|&(idx, skel)| (skel.bones.len(), counts[idx]))
-            .map(|(idx, _)| idx)
-            .or_else(|| {
-                self.skeletons
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, skel)| skel.bones.len())
-                    .map(|(idx, _)| idx)
-            })
+        primary_skeleton_of(&self.skeletons, &self.meshes)
     }
 
-    /// Returns a reference to the primary character skeleton, if any.
     /// Clips that drive the primary rig. Character files also carry clips for
     /// secondary rigs (Kaos: `kaosHead_Idle` on the 20-bone head before `Kaos_Idle`).
     pub fn primary_animations(&self) -> Vec<AnimationClip> {
@@ -1876,6 +1897,7 @@ impl IgbModel {
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
+                attachments: Vec::new(),
             });
         }
 
@@ -1907,6 +1929,7 @@ impl IgbModel {
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
+                attachments: Vec::new(),
             });
         }
 
@@ -2084,6 +2107,7 @@ impl IgbModel {
             animations,
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         })
     }
 
@@ -3087,6 +3111,127 @@ impl IgbModel {
                 let hk = ptr(body.offset + 0x18)?;
                 let bones = crate::havok::parse_havok_skeleton(data.get(hk..hk + size)?)?;
                 Some(crate::havok::HavokRig { skeleton, bones })
+            })
+            .collect()
+    }
+
+    /// Rigid models on the primary rig's attach nodes.
+    /// `tfbPhysicsModel`: `+0x08` `.mdl` path, `+0x28` `BoneAttachInfoList`, `+0x60`
+    /// `tfbPhysicsCombinerLink` (`+0x0c` -> `igSkeleton2`; rigged models only), `+0x68`
+    /// `tfbBodyEntityInfo`. `BoneAttachInfo`: `+0x1c` `_boneName`, `+0x24` `_transform`
+    /// (xyz, Euler degrees). Templates are `tfbSpriteInfo` with `+0xd8` -> a rigid
+    /// `tfbPhysicsModel`; `AbstractPlacement._ID` (`+0x20`) is the attach node index (Gill
+    /// Grunt `014_Attach_Gun_00` -> 0 `gun`, `014_Attach_Backpack_00` -> 17 `back pack`,
+    /// Stealth Elf knives -> 0 and 1) and the `_initMatrix` rotation (`+0x30`) orients it.
+    // ponytail: the character script picks one template per node by upgrade state
+    // (`014 - Set Up Sprite Attachments` via `OpChangeMembership`), which the VM does not
+    // run. Take the base model: shortest `.mdl` name (`HarpoonGun` over `..._Upgrade01`).
+    fn decode_attachments(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        primary_skeleton: usize,
+        mesh_by_geo: &std::collections::HashMap<usize, usize>,
+    ) -> Vec<CharacterAttachment> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        let euler = |o: usize| [0, 1, 2].map(|k| Self::read_f32(data, o + k * 4, endian));
+        let types: std::collections::HashMap<usize, &str> = objects
+            .iter()
+            .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
+            .collect();
+        let types_ref = &types;
+        let of_type = |t: &'static str| {
+            objects
+                .iter()
+                .filter(move |o| types_ref.get(&o.offset) == Some(&t))
+        };
+        let list_items = |list: usize| -> Vec<usize> {
+            let (Some(n), Some(arr)) = (rd(list + 0x08), ptr(list + 0x14)) else {
+                return Vec::new();
+            };
+            (0..n as usize).filter_map(|i| ptr(arr + i * 4)).collect()
+        };
+
+        let Some(rig) = of_type("tfbPhysicsModel")
+            .find(|m| ptr(m.offset + 0x60).and_then(|l| ptr(l + 0x0c)) == Some(primary_skeleton))
+        else {
+            return Vec::new();
+        };
+        let nodes: Vec<(String, [f32; 16])> = ptr(rig.offset + 0x28)
+            .map(list_items)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| {
+                let mut m = mat4_from_euler_deg(euler(n + 0x30));
+                m[12..15].copy_from_slice(&euler(n + 0x24));
+                (cstr(n + 0x1c), m)
+            })
+            .collect();
+
+        // Node index -> (model name length, model, rotation) of the base template.
+        let mut chosen = std::collections::BTreeMap::<usize, (usize, usize, [f32; 3])>::new();
+        for sprite in of_type("tfbSpriteInfo") {
+            let Some(model) = ptr(sprite.offset + 0xd8)
+                .filter(|m| types.get(m) == Some(&"tfbPhysicsModel"))
+                .filter(|&m| ptr(m + 0x60).is_none())
+            else {
+                continue;
+            };
+            let Some(node) = rd(sprite.offset + 0x20).map(|n| n as usize) else {
+                continue;
+            };
+            if node >= nodes.len() {
+                continue;
+            }
+            let path = cstr(model + 0x08);
+            let len = path.rsplit('/').next().unwrap_or(&path).len();
+            if chosen.get(&node).is_none_or(|&(best, ..)| len < best) {
+                chosen.insert(node, (len, model, euler(sprite.offset + 0x30)));
+            }
+        }
+
+        chosen
+            .into_iter()
+            .filter_map(|(node, (_, model, rot))| {
+                let meshes: Vec<usize> = ptr(model + 0x68)
+                    .and_then(|info| ptr(info + 0x14))
+                    .map(list_items)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|d| ptr(d + 0x0c))
+                    .filter_map(|g| match types.get(&g) {
+                        Some(&"igWiiGeometryAttr") => ptr(g + 0x10),
+                        _ => Some(g),
+                    })
+                    .filter_map(|g| mesh_by_geo.get(&g).copied())
+                    .collect();
+                if meshes.is_empty() {
+                    return None;
+                }
+                let (bone, node_xf) = &nodes[node];
+                Some(CharacterAttachment {
+                    bone: bone.clone(),
+                    transform: mat4_mul(node_xf, &mat4_from_euler_deg(rot)),
+                    meshes,
+                    model: cstr(model + 0x08),
+                })
             })
             .collect()
     }
@@ -4264,9 +4409,11 @@ impl IgbModel {
 
         // Collect meshes from extracted geometries
         let mut meshes = Vec::new();
+        let mut mesh_by_geo = std::collections::HashMap::new();
         for (geo_idx, geo) in geometries.iter_mut().enumerate() {
             if let Some(ref mut m) = geo.mesh {
                 if let Some(&geo_off) = geo_offsets.get(geo_idx) {
+                    mesh_by_geo.insert(geo_off, meshes.len());
                     if let Some((img_off, base_col, mat_name)) = geo_materials.get(&geo_off) {
                         m.image_index =
                             img_off.and_then(|off| image_index_by_offset.get(&off).copied());
@@ -4292,6 +4439,24 @@ impl IgbModel {
                 });
             }
         }
+
+        let attachments = match (&igz_objects, primary_skeleton_of(&skeletons, &meshes)) {
+            (Some(list), Some(primary)) => skeleton_by_offset
+                .iter()
+                .find(|(_, (idx, _))| *idx == primary)
+                .map(|(&off, _)| {
+                    Self::decode_attachments(
+                        data,
+                        sections,
+                        &list.objects,
+                        endian,
+                        off,
+                        &mesh_by_geo,
+                    )
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
 
         if meshes.is_empty() {
             // Check for raw vertex streams with standard strides (0x10, 0x14, 0x18, 0x20, 0x24, 0x30)
@@ -4621,6 +4786,7 @@ impl IgbModel {
             animations,
             collision_primitives,
             script_constants,
+            attachments,
         })
     }
 
@@ -5569,6 +5735,7 @@ mod tests {
             animations: vec![],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -5681,6 +5848,7 @@ mod tests {
             animations: vec![],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let markers = model.extract_level_markers();
@@ -5949,6 +6117,7 @@ mod tests {
             animations: vec![clip.clone()],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -6143,6 +6312,53 @@ mod tests {
             n += 1;
         }
         Some((sum / n.max(1) as f32, idle.tracks.len(), n))
+    }
+
+    #[test]
+    fn test_character_attachments_from_attach_templates() {
+        // Gill Grunt: `014_Attach_Gun_00` (_ID 0 -> `gun` = `J_gun`), `..._Harpoon_00` (16 ->
+        // `harpoon tip`, 3 ft along the gun), `..._Backpack_00` (17 -> `back pack`).
+        // Upgrade variants (`HarpoonGun_Upgrade01`, `BackPack_upgrade`) are not chosen.
+        let Some(bytes) = read_character_bld("014_GillGrunt") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let found: Vec<(&str, &str)> = model
+            .attachments
+            .iter()
+            .map(|a| (a.model.rsplit('/').next().unwrap(), a.bone.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("GillGrunt_HarpoonGun.mdl", "J_gun"),
+                ("GillGrunt_HarpoonSpear_Prop.mdl", "J_gun"),
+                ("GillGruntBackPack.mdl", "J_jetpack"),
+            ]
+        );
+        assert!((model.attachments[1].transform[14] - 0.9144).abs() < 1e-4);
+        for a in &model.attachments {
+            assert!(!a.meshes.is_empty());
+            assert!(a.meshes.iter().all(|&i| model.meshes[i].skeleton.is_none()));
+        }
+
+        // Stealth Elf: one knife per `knife` node (`_ID` 0 and 1), not the 2013 variant.
+        let Some(bytes) = read_character_bld("026_StealthElf") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let found: Vec<(&str, &str)> = model
+            .attachments
+            .iter()
+            .map(|a| (a.model.rsplit('/').next().unwrap(), a.bone.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("StealthElfKnife.mdl", "J_attach_L"),
+                ("StealthElfKnife.mdl", "J_attach_R")
+            ]
+        );
     }
 
     #[test]
