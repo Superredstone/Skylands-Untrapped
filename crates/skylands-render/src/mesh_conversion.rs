@@ -1,6 +1,6 @@
 use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
-use skylands_formats::igb::{transform_point, IgbMesh, IgbModel};
+use skylands_formats::igb::{transform_point, IgbMesh, IgbModel, TextureWrap};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vertex {
@@ -1056,25 +1056,13 @@ pub struct CharacterSubmesh {
     pub image_index: Option<usize>,
     pub base_color: Option<[f32; 4]>,
     pub material_name: Option<String>,
+    pub texture_wrap: [TextureWrap; 2],
 }
 
 pub fn igb_character_submeshes(model: &IgbModel) -> Vec<CharacterSubmesh> {
-    let primary_skel = model.primary_skeleton_index();
-    let skinned_meshes: Vec<&IgbMesh> = if let Some(skel_idx) = primary_skel {
-        let matching: Vec<&IgbMesh> = model
-            .meshes
-            .iter()
-            .filter(|m| m.skeleton == Some(skel_idx) && !m.vertices.is_empty())
-            .collect();
-        if !matching.is_empty() {
-            matching
-        } else {
-            model
-                .meshes
-                .iter()
-                .filter(|m| !m.vertices.is_empty() && !is_auxiliary_character_submesh(&m.vertices))
-                .collect()
-        }
+    let rig_meshes = model.primary_rig_meshes();
+    let skinned_meshes: Vec<&IgbMesh> = if !rig_meshes.is_empty() {
+        rig_meshes.iter().collect()
     } else {
         model
             .meshes
@@ -1089,6 +1077,7 @@ pub fn igb_character_submeshes(model: &IgbModel) -> Vec<CharacterSubmesh> {
             image_index: None,
             base_color: None,
             material_name: None,
+            texture_wrap: Default::default(),
         }];
     }
 
@@ -1099,6 +1088,7 @@ pub fn igb_character_submeshes(model: &IgbModel) -> Vec<CharacterSubmesh> {
             image_index: m.image_index,
             base_color: m.base_color,
             material_name: m.material_name.clone(),
+            texture_wrap: m.texture_wrap,
         })
         .collect()
 }
@@ -1151,6 +1141,7 @@ mod tests {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         let bevy_mesh = igb_mesh_to_bevy(&igb);
@@ -1177,6 +1168,7 @@ mod tests {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         let normalized = normalize_model_mesh(&igb, 1.8);
@@ -1285,6 +1277,7 @@ mod tests {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
         let sub2 = IgbMesh {
             name: "hat".to_string(),
@@ -1309,6 +1302,7 @@ mod tests {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         let combined = combine_or_normalize_model_meshes(&[sub1, sub2], Some(2.0));

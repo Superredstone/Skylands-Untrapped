@@ -682,6 +682,7 @@ mod tests {
                 skeleton: None,
                 image_index: None,
                 base_color: None,
+                texture_wrap: Default::default(),
             }
         };
 

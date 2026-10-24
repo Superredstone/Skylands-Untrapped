@@ -462,6 +462,7 @@ mod tests {
             skeleton: Some(0),
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         // Accessory mesh on secondary rig (height 10.0, should be ignored)
@@ -482,6 +483,7 @@ mod tests {
             skeleton: Some(1),
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         model.meshes.push(body_mesh);

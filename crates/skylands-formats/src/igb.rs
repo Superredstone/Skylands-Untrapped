@@ -55,6 +55,12 @@ pub mod meta_fields {
         pub const OGL_DISCARD_ORIGINAL_IMAGE: usize = 0x58;
     }
 
+    pub mod ig_texture_attr2 {
+        pub const WRAP_S: usize = 0x20;
+        pub const WRAP_T: usize = 0x24;
+        pub const IMAGE: usize = 0x30;
+    }
+
     pub mod ig_geometry_attr {
         pub const VERTEX_BUFFER: usize = 0x10;
         pub const INDEX_BUFFER: usize = 0x14;
@@ -343,6 +349,36 @@ pub struct IgbMesh {
     pub image_index: Option<usize>,
     /// Base diffuse tint color `[r, g, b, a]` from `igColorAttr`.
     pub base_color: Option<[f32; 4]>,
+    /// `igTextureAttr2._wrapS` / `_wrapT` of the diffuse texture.
+    pub texture_wrap: [TextureWrap; 2],
+}
+
+/// `IG_GFX_TEXTURE_WRAP_*` (enum order from the `main.dol` string table:
+/// `CLAMP`, `REPEAT`, `REGION_CLAMP`, `REGION_REPEAT`, `BORDER`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureWrap {
+    Clamp,
+    #[default]
+    Repeat,
+}
+
+impl TextureWrap {
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 | 2 | 4 => Self::Clamp,
+            _ => Self::Repeat,
+        }
+    }
+}
+
+/// Diffuse material of one `Drawable` (`tfbRuntimeMaterial`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DrawableMaterial {
+    /// `igImage2` object offset.
+    pub image: Option<usize>,
+    pub color: Option<[f32; 4]>,
+    pub name: Option<String>,
+    pub wrap: [TextureWrap; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1862,6 +1898,76 @@ impl IgbModel {
             .and_then(|idx| self.skeletons.get(idx))
     }
 
+    /// Maps each bone of skeleton `skel` to the primary rig bone with the same
+    /// name (namespace stripped) and bind pose. `None` when any bone is missing,
+    /// e.g. Kaos' cinematic head rig.
+    pub fn bone_map_to_primary(&self, skel: usize) -> Option<Vec<u32>> {
+        let primary = self.primary_skeleton()?;
+        let base = |n: &str| n.rsplit(':').next().unwrap_or(n).to_ascii_lowercase();
+        self.skeletons
+            .get(skel)?
+            .bones
+            .iter()
+            .map(|b| {
+                let (idx, p) = primary
+                    .bones
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| base(&p.name) == base(&b.name))?;
+                let same_pose = p
+                    .inverse_bind_pose
+                    .iter()
+                    .zip(&b.inverse_bind_pose)
+                    .all(|(x, y)| (x - y).abs() < 1e-3);
+                same_pose.then_some(idx as u32)
+            })
+            .collect()
+    }
+
+    /// Meshes skinned by the primary rig, plus secondary-rig meshes remapped onto
+    /// it. Spyro's tail rigs (`J_root_B`, `J_tail_*`) are subsets of the body rig,
+    /// which the body clips animate. Rigs that map onto the same bones as an
+    /// earlier rig are alternate variants (Spyro `TailSerie3`) and are skipped.
+    pub fn primary_rig_meshes(&self) -> Vec<IgbMesh> {
+        let Some(primary) = self.primary_skeleton_index() else {
+            return Vec::new();
+        };
+        let mut maps: Vec<(usize, Vec<u32>)> = Vec::new();
+        for s in 0..self.skeletons.len() {
+            if s == primary {
+                continue;
+            }
+            if let Some(map) = self.bone_map_to_primary(s) {
+                if !maps.iter().any(|(_, m)| *m == map) {
+                    maps.push((s, map));
+                }
+            }
+        }
+        self.meshes
+            .iter()
+            .filter(|m| !m.vertices.is_empty())
+            .filter_map(|m| {
+                let s = m.skeleton?;
+                if s == primary {
+                    return Some(m.clone());
+                }
+                let (_, map) = maps.iter().find(|(ms, _)| *ms == s)?;
+                let mut out = m.clone();
+                for v in &mut out.vertices {
+                    for (bi, w) in v.bone_indices.iter_mut().zip(v.bone_weights) {
+                        let mapped = map.get(*bi as usize).copied();
+                        if w > 0.0 && mapped.is_none() {
+                            return None;
+                        }
+                        *bi = mapped.unwrap_or(0);
+                    }
+                }
+                out.skeleton = Some(primary);
+                Some(out)
+            })
+            .collect()
+    }
+
     pub fn parse<R: Read>(mut reader: R) -> Result<Self, IgbError> {
         let mut full_file = Vec::new();
         reader.read_to_end(&mut full_file)?;
@@ -2092,6 +2198,7 @@ impl IgbModel {
                     skeleton: None,
                     image_index: None,
                     base_color: None,
+                    texture_wrap: Default::default(),
                 };
                 geo.mesh = Some(mesh.clone());
                 meshes.push(mesh);
@@ -2852,6 +2959,7 @@ impl IgbModel {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         })
     }
 
@@ -3388,15 +3496,13 @@ impl IgbModel {
         geo_transforms
     }
 
-    /// Extracts material attributes for geometries:
-    /// Maps geometry offset -> (image_offset, base_color, material_name)
-    #[allow(clippy::type_complexity)]
+    /// Extracts material attributes for geometries: maps geometry offset -> material.
     pub fn decode_drawable_materials(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
         objects: &[IgzObject],
         endian: IgbEndian,
-    ) -> std::collections::HashMap<usize, (Option<usize>, Option<[f32; 4]>, Option<String>)> {
+    ) -> std::collections::HashMap<usize, DrawableMaterial> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
         };
@@ -3444,6 +3550,7 @@ impl IgbModel {
                 let mat_name = cstr(mat + 0x08);
                 let mut found_image = None;
                 let mut found_color = None;
+                let mut found_wrap = [TextureWrap::default(); 2];
 
                 let mat_lists = [ptr(mat + 0x18), ptr(mat + 0x24)];
                 for mlist in mat_lists.into_iter().flatten() {
@@ -3467,9 +3574,15 @@ impl IgbModel {
                             };
                             if found_image.is_none() {
                                 for tex_slot in [0x10, 0x14, 0x18] {
+                                    use meta_fields::ig_texture_attr2 as tex;
                                     if let Some(tex_attr) = ptr(attr + tex_slot) {
-                                        if let Some(img) = ptr(tex_attr + 0x30) {
+                                        if let Some(img) = ptr(tex_attr + tex::IMAGE) {
                                             found_image = Some(img);
+                                            found_wrap = [tex::WRAP_S, tex::WRAP_T].map(|f| {
+                                                rd(tex_attr + f)
+                                                    .map(TextureWrap::from_raw)
+                                                    .unwrap_or_default()
+                                            });
                                             break;
                                         }
                                     }
@@ -3496,10 +3609,16 @@ impl IgbModel {
                     }
                 }
 
-                out.insert(geo, (found_image, found_color, mat_name.clone()));
+                let material = DrawableMaterial {
+                    image: found_image,
+                    color: found_color,
+                    name: mat_name,
+                    wrap: found_wrap,
+                };
                 if let Some(inner_geo) = ptr(geo + 0x10) {
-                    out.insert(inner_geo, (found_image, found_color, mat_name));
+                    out.insert(inner_geo, material.clone());
                 }
+                out.insert(geo, material);
             }
         }
 
@@ -4430,11 +4549,13 @@ impl IgbModel {
             if let Some(ref mut m) = geo.mesh {
                 if let Some(&geo_off) = geo_offsets.get(geo_idx) {
                     mesh_by_geo.insert(geo_off, meshes.len());
-                    if let Some((img_off, base_col, mat_name)) = geo_materials.get(&geo_off) {
-                        m.image_index =
-                            img_off.and_then(|off| image_index_by_offset.get(&off).copied());
-                        m.base_color = *base_col;
-                        if let Some(name) = mat_name {
+                    if let Some(mat) = geo_materials.get(&geo_off) {
+                        m.image_index = mat
+                            .image
+                            .and_then(|off| image_index_by_offset.get(&off).copied());
+                        m.base_color = mat.color;
+                        m.texture_wrap = mat.wrap;
+                        if let Some(name) = &mat.name {
                             m.material_name = Some(name.clone());
                         }
                     }
@@ -4623,6 +4744,7 @@ impl IgbModel {
                         skeleton: None,
                         image_index: None,
                         base_color: None,
+                        texture_wrap: Default::default(),
                     };
                     let geo_node = IgbGeometryNode {
                         name: format!("geo_{}", mesh_name),
@@ -5010,6 +5132,7 @@ impl IgbModel {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         })
     }
 
@@ -5275,6 +5398,7 @@ impl IgbModel {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         })
     }
 }
@@ -5831,6 +5955,7 @@ mod tests {
             skeleton: None,
             image_index: None,
             base_color: None,
+            texture_wrap: Default::default(),
         };
 
         let geo = IgbGeometryNode {
@@ -7155,5 +7280,124 @@ mod tests {
             let height = max_pt[1] - min_pt[1];
             assert!((height - 4.28).abs() < 0.2, "snap shot height {height}");
         }
+    }
+
+    fn rig(bones: &[(&str, f32)]) -> Skeleton {
+        let bones = bones
+            .iter()
+            .enumerate()
+            .map(|(i, &(name, z))| {
+                let mut inverse_bind_pose = mat4_identity();
+                inverse_bind_pose[14] = -z;
+                Bone {
+                    name: name.to_string(),
+                    parent: i.checked_sub(1).map(|_| 0),
+                    inverse_bind_pose,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        Skeleton::new(bones, 0)
+    }
+
+    fn skinned_mesh(name: &str, skeleton: usize, bone: u32) -> IgbMesh {
+        IgbMesh {
+            name: name.to_string(),
+            vertices: vec![IgbVertex {
+                bone_indices: [bone, 0, 0, 0],
+                bone_weights: [1.0, 0.0, 0.0, 0.0],
+                ..Default::default()
+            }],
+            indices: vec![0],
+            material_name: None,
+            skeleton: Some(skeleton),
+            image_index: None,
+            base_color: None,
+            texture_wrap: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_secondary_rig_meshes_remap_onto_primary() {
+        let model = IgbModel {
+            skeletons: vec![
+                rig(&[("root", 0.0), ("J_head", 1.0), ("J_tail_1", -1.0)]),
+                rig(&[("root", 0.0), ("ns:J_tail_1", -1.0)]),
+                // Alternate tail on the same bones.
+                rig(&[("root", 0.0), ("J_tail_1", -1.0)]),
+                // Same names, different bind pose: a separate cinematic rig.
+                rig(&[("root", 0.0), ("J_head", 3.0)]),
+            ],
+            meshes: vec![
+                skinned_mesh("body", 0, 1),
+                skinned_mesh("tail", 1, 1),
+                skinned_mesh("tail_variant", 2, 1),
+                skinned_mesh("head", 3, 1),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(model.bone_map_to_primary(1), Some(vec![0, 2]));
+        assert_eq!(model.bone_map_to_primary(3), None);
+
+        let rig_meshes = model.primary_rig_meshes();
+        let names: Vec<_> = rig_meshes.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["body", "tail"]);
+        assert_eq!(rig_meshes[1].skeleton, Some(0));
+        assert_eq!(rig_meshes[1].vertices[0].bone_indices[0], 2);
+    }
+
+    #[test]
+    fn test_texture_wrap_from_raw() {
+        assert_eq!(TextureWrap::from_raw(0), TextureWrap::Clamp);
+        assert_eq!(TextureWrap::from_raw(1), TextureWrap::Repeat);
+        assert_eq!(TextureWrap::from_raw(2), TextureWrap::Clamp);
+        assert_eq!(TextureWrap::from_raw(3), TextureWrap::Repeat);
+        assert_eq!(TextureWrap::from_raw(4), TextureWrap::Clamp);
+    }
+
+    #[test]
+    fn test_spyro_tail_and_texture_wrap() {
+        let Some(bytes) = read_character_bld("016_Spyro") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        let rig_meshes = model.primary_rig_meshes();
+        let names: Vec<_> = rig_meshes.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            names.contains(&"igGeometryAttr_6199"),
+            "base tail: {names:?}"
+        );
+        assert!(
+            !names.contains(&"igGeometryAttr_6257"),
+            "TailSerie3: {names:?}"
+        );
+
+        let body = model.primary_skeleton().expect("body rig");
+        let tail = rig_meshes
+            .iter()
+            .find(|m| m.name == "igGeometryAttr_6199")
+            .unwrap();
+        for v in &tail.vertices {
+            for (&b, &w) in v.bone_indices.iter().zip(&v.bone_weights) {
+                if w > 0.0 {
+                    let name = &body.bones[b as usize].name;
+                    assert!(
+                        name.starts_with("J_tail") || name.starts_with("J_root"),
+                        "tail skinned to {name}"
+                    );
+                }
+            }
+        }
+
+        let wrap = |name: &str| {
+            model
+                .meshes
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.texture_wrap)
+        };
+        // Body UVs span -1..1 and tile; the ray blast card clamps.
+        assert_eq!(wrap("igGeometryAttr_5041"), Some([TextureWrap::Repeat; 2]));
+        assert_eq!(wrap("igWiiGeometry_6888"), Some([TextureWrap::Clamp; 2]));
     }
 }

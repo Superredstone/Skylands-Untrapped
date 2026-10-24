@@ -214,23 +214,21 @@ impl CharacterVisualRegistry {
         let mut loaded_submeshes = Vec::new();
 
         for sub in &submesh_defs {
-            let mut sub_texture = None;
-            if let Some(img_idx) = sub.image_index {
-                if let Ok((w, h, rgba)) = loader.load_image_rgba(&bld_name, img_idx) {
-                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                    sub_texture = Some(images.add(img));
-                }
-            }
-            if sub_texture.is_none() {
-                if let Ok((w, h, rgba)) = loader.load_first_image_rgba(&bld_name) {
-                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                    sub_texture = Some(images.add(img));
-                } else if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&bld_name, None)
-                {
-                    let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                    sub_texture = Some(images.add(img));
-                }
-            }
+            let rgba = sub
+                .image_index
+                .and_then(|i| loader.load_image_rgba(&bld_name, i).ok())
+                .or_else(|| loader.load_first_image_rgba(&bld_name).ok())
+                .or_else(|| loader.load_companion_texture_rgba(&bld_name, None).ok());
+            let mut alpha_mode = AlphaMode::Opaque;
+            let sub_texture = rgba.map(|(w, h, rgba)| {
+                alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
+                images.add(crate::texture_conversion::rgba8_to_model_texture(
+                    w,
+                    h,
+                    rgba,
+                    sub.texture_wrap,
+                ))
+            });
 
             let sub_color = if sub_texture.is_some() {
                 Color::WHITE
@@ -243,6 +241,7 @@ impl CharacterVisualRegistry {
             let sub_mat = materials.add(StandardMaterial {
                 base_color: sub_color,
                 base_color_texture: sub_texture,
+                alpha_mode,
                 perceptual_roughness: 0.8,
                 reflectance: 0.2,
                 cull_mode: None,
@@ -287,11 +286,18 @@ impl CharacterVisualRegistry {
                     let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
                     mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
                     mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+                    let mut alpha_mode = AlphaMode::Opaque;
                     let texture = m
                         .image_index
                         .and_then(|i| loader.load_image_rgba(&bld_name, i).ok())
                         .map(|(w, h, rgba)| {
-                            images.add(crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba))
+                            alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
+                            images.add(crate::texture_conversion::rgba8_to_model_texture(
+                                w,
+                                h,
+                                rgba,
+                                m.texture_wrap,
+                            ))
                         });
                     let color = match (&texture, m.base_color) {
                         (Some(_), _) => Color::WHITE,
@@ -301,6 +307,7 @@ impl CharacterVisualRegistry {
                     let material = materials.add(StandardMaterial {
                         base_color: color,
                         base_color_texture: texture,
+                        alpha_mode,
                         perceptual_roughness: 0.8,
                         reflectance: 0.2,
                         cull_mode: None,
@@ -1641,6 +1648,67 @@ mod tests {
     }
 
     #[test]
+    fn test_spyro_tail_wing_alpha_and_tiled_body() {
+        let dir = ["assets/files/character", "../../assets/files/character"]
+            .iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("016_Spyro.bld").exists());
+        let Some(dir) = dir else { return };
+        let server = CharacterAssetServer::default();
+        server
+            .loader
+            .lock()
+            .unwrap()
+            .mount_dir(dir)
+            .expect("mount character dir");
+
+        let mut registry = CharacterVisualRegistry::default();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut images = Assets::<Image>::default();
+        registry
+            .get_or_load(
+                16,
+                Some("016_Spyro.bld"),
+                Some(&server),
+                &mut meshes,
+                &mut materials,
+                &mut images,
+            )
+            .expect("load spyro");
+        let subs = registry
+            .get_submeshes(16, Some("016_Spyro.bld"))
+            .expect("spyro submeshes");
+        // Shiny, eyes, body, wings and the tail from the 9-bone tail rig.
+        assert_eq!(subs.len(), 5);
+
+        let mats: Vec<&StandardMaterial> = subs
+            .iter()
+            .map(|(_, m)| materials.get(m).expect("material"))
+            .collect();
+        let masked = mats
+            .iter()
+            .filter(|m| m.alpha_mode == AlphaMode::Mask(0.5))
+            .count();
+        assert_eq!(masked, 1, "only the wing texture has cut-outs");
+        for mat in &mats {
+            let tex = mat.base_color_texture.as_ref().expect("textured");
+            let image = images.get(tex).expect("image");
+            let bevy::image::ImageSampler::Descriptor(desc) = &image.sampler else {
+                panic!("character textures need an explicit sampler");
+            };
+            assert!(matches!(
+                desc.address_mode_u,
+                bevy::image::ImageAddressMode::Repeat
+            ));
+            assert!(matches!(
+                desc.address_mode_v,
+                bevy::image::ImageAddressMode::Repeat
+            ));
+        }
+    }
+
+    #[test]
     fn test_universal_model_registry_loads_hats_and_items() {
         let root1 = std::path::Path::new("assets/files");
         let root2 = std::path::Path::new("../../assets/files");
@@ -2125,8 +2193,8 @@ mod tests {
             .expect("submeshes loaded");
         assert_eq!(
             submeshes.len(),
-            4,
-            "Spyro has 4 submeshes (body, head, details, wings)"
+            5,
+            "Spyro has 5 submeshes (body, head, details, wings, tail)"
         );
 
         let model = registry.get_model(16, Some("016_Spyro.bld")).unwrap();
