@@ -44,11 +44,70 @@ pub enum EnemyState {
     Recover,
 }
 
+/// Enemy HP and per-hit damage for one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemyClassStats {
+    pub health: u32,
+    pub damage: u32,
+}
+
+/// Per-level enemy stats from `LevelSystems.ai` "Game - Define Enemy Stats" (script VM)
+/// at difficulty level 1, normal mode, single player. `Default` is the fallback for
+/// levels without that macro.
+// ponytail: one stat block per class; real levels pass a difficulty level and tuning
+// multipliers per `"enemy type"` reference, which needs object references in the VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnemyTuning {
+    pub near: EnemyClassStats,
+    pub far: EnemyClassStats,
+}
+
+impl Default for EnemyTuning {
+    fn default() -> Self {
+        Self {
+            near: EnemyClassStats {
+                health: 100,
+                damage: 25,
+            },
+            far: EnemyClassStats {
+                health: 100,
+                damage: 20,
+            },
+        }
+    }
+}
+
+impl EnemyTuning {
+    /// Archetype IDs: 3 Near, 4 Far.
+    pub fn from_scripts(
+        level: &skylands_formats::ScriptSet,
+        global: &skylands_formats::ScriptSet,
+    ) -> Result<Self, skylands_formats::VmError> {
+        let stats = |archetype| {
+            let s = skylands_formats::enemy_stats(level, global, archetype, 1)?;
+            Ok(EnemyClassStats {
+                health: s.hp.round().max(1.0) as u32,
+                damage: s.damage.round().max(1.0) as u32,
+            })
+        };
+        Ok(Self {
+            near: stats(3)?,
+            far: stats(4)?,
+        })
+    }
+
+    pub fn get(&self, class: EnemyClass) -> EnemyClassStats {
+        match class {
+            EnemyClass::Near => self.near,
+            EnemyClass::Far => self.far,
+        }
+    }
+}
+
 /// Level enemy placed by an `Enemy_S4_*.ai` script.
 /// Ranges are script literals in feet: `Enemy_S4_BirdHazard.ai` `aggroRange = 45`,
 /// `Enemy_S4_UndeadLobber.ai` `attackRange = 60`.
-// ponytail: health/damage/timings are fixed; real values come from `Minion_Tuning.ai`
-// formulas (HP multiplier, difficulty), which need the Phase 5 script VM.
+// ponytail: windup/recover timings are fixed; real ones live in per-enemy `.ai` scripts.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Enemy {
     pub class: EnemyClass,
@@ -60,16 +119,15 @@ pub struct Enemy {
 }
 
 impl Enemy {
-    pub const HEALTH: u32 = 100;
     pub const WINDUP: f32 = 0.5;
     pub const RECOVER: f32 = 1.0;
     /// `Enemy_S4_WilikinLobberGooSpitter.ai` `myProjectileSpeed = 50` (ft/s).
     pub const PROJECTILE_SPEED: f32 = 50.0 * FEET_TO_UNITS;
 
-    pub fn new(class: EnemyClass) -> Self {
-        let (attack_range, damage) = match class {
-            EnemyClass::Near => (1.5, 25),
-            EnemyClass::Far => (60.0 * FEET_TO_UNITS, 20),
+    pub fn new(class: EnemyClass, damage: u32) -> Self {
+        let attack_range = match class {
+            EnemyClass::Near => 1.5,
+            EnemyClass::Far => 60.0 * FEET_TO_UNITS,
         };
         Self {
             class,

@@ -59,6 +59,9 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Cameras: follow, free-fly, showcase orbit. Viewer `--viewer`. HUD.
 - [x] Viewer mode isolates hero showcase without triggering Kaos trap capture state.
 - [x] Dynamic HUD stats in viewer mode (vertex & triangle count from active character mesh).
+- [x] Original player HUD (`sky4_hud.rs`, notes `agent/HUD.md`): sprites and layout from `global.bld` (`SpriteLibrary`, GX `RGBA8`), element badge, name, health bar + hp, XP bar + level, coins. Replaces the placeholder hero card / coin pill.
+  - Tests: `hud_sprites_resolve_to_textures` (ROM), `test_decode_gx_rgba8_tile_order`, `sky4_hud::tests::*`.
+  - [ ] Portrait, original font, P2 / ally / boss HUD, pause menu (`UI_PauseMenu_Streamed.bld`), title menu (`Title.bld`).
 - [x] Skylanders-themed Debug Menu (`debug_menu.rs`):
   - F12 hotkey toggles debug menu (replaces direct free cam hotkey); Escape exits free cam.
   - Skylanders Trap Team visual styling: dark slate/obsidian dialog, antique gold runic borders, Traptanium cyan highlights, element-coded badge pills.
@@ -98,6 +101,12 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - Multi-material extraction (`decode_drawable_materials` / `load_image_rgba`): links `Drawable` -> `tfbRuntimeMaterial` -> `igCachedAttrList` -> `tfbTextureBindAttr` -> `igImage2` offset -> image index in `model.images`. Spawns child `SkinnedMesh` entities per submesh, binding distinct diffuse textures (e.g. Spyro body vs wings) and diffuse tint colors.
   - Submesh filtering: protected skinned submeshes from auxiliary billboard/ring heuristics so wings and details are preserved.
 - Done: Spyro idle animates in `--viewer`.
+- [x] Gameplay-driven animation: `animation_state_name` (core) picks `idle`/`walk`/`run`/`jump`/`fall`/`attack_*` for heroes, villains and enemies (`EnemyState::Windup` = `attack`). `character_animation_system` follows `ActorAnimation` (viewer clip only when `viewer_mode`; before, the always-present `ViewerSettings` pinned everyone to idle). `resolve_clip` maps states to file clip names with fallbacks (`combatidle`, `jumpstanding`, `falling`, `spinattack`...); attacks and jump play once.
+  - Clip names are the last `_` segment of the `.ma` path (`CrockWarrior_CombatIdle.ma` -> `combatidle`). `AnimationClip.skeleton` records the Havok target rig; `IgbModel::primary_animations` drops secondary-rig clips (Kaos `kaosHead_Idle` 8.53 s vs `Kaos_Idle` 1.07 s).
+  - [x] Tracks are bound by bone name through the Havok rig skeleton (`tfbPhysicsBody` `+0x18`, `hkaSkeleton`), not by index; poses compose as `hkQsTransform` (scaled rigs). See `agent/CHARACTER_RENDERING.md` item 6. Tests: `test_havok_tracks_follow_rig_bone_names`, `test_havok_scaled_rig_kaos`, `test_map_tracks_by_name`, `test_pose_parent_scale_does_not_scale_child_translation`.
+  - [x] Visual sync no longer rebuilds skinned multi-submesh characters every frame (`ActorVisual` marker; animation restarted each frame and `Children` leaked). Actor despawns are recursive so joints/submeshes don't outlive their actor.
+  - [x] Weapons/accessories (`IgbModel.attachments`): rigid models from attach templates (`tfbSpriteInfo` `_ID` = rig attach node index) parented to joints. Base variant only (shortest `.mdl` name); upgrade selection needs `OpChangeMembership` in the VM. See `agent/CHARACTER_RENDERING.md` item 7. Tests: `test_character_attachments_from_attach_templates`, `test_attachment_follows_its_joint`.
+  - [ ] Hurt (`damagefront`), landing, idle-to-walk transitions, blending between clips, walk playback rate from speed. Debug-menu animation preview is overridden by gameplay state outside viewer mode.
 
 ### Phase 2 - DOL tooling & Alchemy metadata
 - [x] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway` / `PowerPC:BE:32:default`) + auto-analysis.
@@ -136,7 +145,7 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [x] Movement from DOL `ModelParameters` (`ModelParameters::default()` / `from_model`):
     - Units reversed via DOL `0x80586ef4`: engine kinematics are imperial (`ft / sec`, `ft / sec / sec`, `deg / sec`). Converted via `FEET_TO_UNITS = 0.3048`: ground max speed 20 ft/s = 6.10 m/s (explaining our earlier 5.0 guess), jump initial speed 32 ft/s = 9.75 m/s (explaining earlier 9.0 impulse), ground accel 160 ft/s² = 48.77 m/s², ground decel 80 ft/s² = 24.38 m/s², turn rate 720 deg/s, air turn rate 1440 deg/s.
     - Wired into `hero_movement_system`: steering target velocity with rate-limited acceleration/deceleration, smooth yaw rotation using `turn_rate`, and jump impulse from `jump_initial_speed`.
-  - [ ] HP/XP curve: needs the script VM (`OpUseMacro` / `ValueRHSVariant` arithmetic) in `global.bld`, so it moves to Phase 5 `ScriptSet`.
+  - [x] HP/XP curve data: `LevelupTable` (Init_Setup "Portal - Define Levelup Table": +11.1% max HP per level, 19 XP thresholds). Not yet applied to heroes (no XP/levels in core), see `agent/SCRIPT_VM.md`.
   - `ModelParameters` defaults come from DOL ctor `0x805a89fc` (SDA2 `r2` = `0x806f5a40`, `.sdata2` `0x806f05d4..`) with string unit definitions in `0x80586ef4`. Script base speed (`global.bld` `Return Value - Base Speed` 10/22) parsed when present.
   - Ghidra: `tools/rea-bridge/FindStatTables.java` (stat-string xrefs plus the `ModelParameters` ctor; writes local-only `/tmp/skylands-re/stats_dump.txt`).
 - [x] Villain timer/energy, trap return rules, trapping sequence:
@@ -158,15 +167,20 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - `Enemy` component (`Idle -> Chase -> Windup -> Recover`), `enemy_ai_system` after `hero_combat_system`. It targets the nearest hero (ties go to entity order) and steers with `ModelParameters` accel. Near = melee `DamageEvent`, Far = `Projectile { hostile: true }` that only hits heroes. No RNG, so the game stays deterministic.
   - Enemy defeat: `Combat.ai` "Creature Death Generate Loot" -> `LootSystem.ai` `LootValue = 5`, one `Collectible { value: 5 }`. Fixed, no rarity/drop-rate roll.
   - Hero defeat: `Portal_Manager.ai` "Tag Defeated" / "Request Player Needs Tag Message". The hero despawns, its character ID goes to `PortalGameplayState.defeated_heroes`, the same tag is refused until the level changes, and a prompt asks for another Skylander.
-  - Placeholders (need VM: `Minion_Tuning.ai` HP multiplier / difficulty formulas): enemy HP 100, melee 25, ranged 20, windup 0.5 s, recover 1.0 s, melee reach 1.5.
+  - Enemy HP/damage come from the script VM (`EnemyTuning`, Phase 5); fallback 100 HP, melee 25, ranged 20. Still fixed: windup 0.5 s, recover 1.0 s, melee reach 1.5.
   - Tests: `test_enemy_script_classification`, `test_level_enemy_markers` (ROM), `test_melee_enemy_chases_and_hits_hero`, `test_enemy_ignores_hero_outside_aggro_range`, `test_ranged_enemy_projectile_hurts_hero_not_enemies`, `test_enemy_defeat_drops_loot`, `test_defeated_hero_is_out_until_level_change`, `test_enemy_ai_is_deterministic`.
 - [ ] Save profile layout.
 - Constants go into Rust with a `// DOL 0x80xxxxxx` source note; no pasted decompiler output.
 
 ### Phase 5 - Scripts, text, audio, misc
-- [ ] `ScriptSet` / script VM (see `tools/igArchiveExtractor/Types/ScriptSet.cs`).
+- [x] `ScriptSet` / script VM (`skylands-formats/src/script.rs`, notes `agent/SCRIPT_VM.md`).
+  - Decoder for `tfbScriptInfo` op lists (set/inc/dec/check/loop/jump/macro define/use/params), `global.bld` handle resolution via `EXID` namespace + `TOOR` roots.
+  - `Vm`: deterministic evaluator (step and depth budget, unbound engine reads = 0 and listed). Reference/spawn/move ops are not executed.
+  - Tests: `vm_*` (synthetic), `rom_global_handles_resolve`, `rom_enemy_stats`, `rom_levelup_table`, core `test_level_enemy_tuning_from_scripts`.
 - [ ] Encounter arenas / waves (`Arena_Challenge_*`, `_ArenaMaster2.ai`, `BattleMaster.ai`, `Enemy_Setup_00x_Controller.ai`), after the VM.
-- [ ] Enemy tuning from `Minion_Tuning.ai`, loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate", after the VM.
+- [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
+  - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
+- [ ] Loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate" (needs `kRHSfuncRandom` + a seeded RNG).
 - [ ] Localization strings (EU en).
 - [ ] Sound bank to event mapping.
 - [ ] Mock tag persistence (`.tag`). Real tag write-back + hotplug need human review (portal protocol).

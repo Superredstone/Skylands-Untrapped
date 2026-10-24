@@ -1142,6 +1142,24 @@ impl IgzObject {
     }
 }
 
+/// Raw IGZ file: section table, fixup-derived tables and the object registry.
+#[derive(Debug, Clone)]
+pub struct IgzFile {
+    pub endian: IgbEndian,
+    pub version: u32,
+    pub sections: Vec<IgzChunkDescriptor>,
+    pub string_table: Vec<String>,
+    pub exid_formats: Vec<u32>,
+    /// `EXID` second word: FNV-1a of the lower-case source file name (e.g. `global.bld`).
+    pub exid_namespaces: Vec<u32>,
+    pub tmhn_entries: Vec<(usize, usize)>,
+    /// `TOOR` root object list (file offsets), the targets of cross-file `EXID` indices.
+    pub roots: Vec<usize>,
+    /// `EXNM` handle index -> external object name.
+    pub external_types: Vec<String>,
+    pub objects: Option<IgzObjectList>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgzObjectList {
     pub list_object: IgzObject,
@@ -1267,6 +1285,8 @@ pub struct AnimationClip {
     pub name: String,
     pub duration: f32,
     pub tracks: Vec<BoneTrack>,
+    /// Index into `IgbModel.skeletons` of the rig the tracks drive (`None` = unknown).
+    pub skeleton: Option<usize>,
 }
 
 pub fn lerp_vec3(a: &[f32; 3], b: &[f32; 3], t: f32) -> [f32; 3] {
@@ -1310,6 +1330,154 @@ pub fn slerp_quat(q1: &[f32; 4], q2: &[f32; 4], t: f32) -> [f32; 4] {
             scale0 * q1[3] + scale1 * q2_adj[3],
         ]
     }
+}
+
+/// Translation, rotation (xyzw) and scale composed like Havok `hkQsTransform`: a parent's
+/// scale does not scale the child's translation (Kaos `J_root` has scale 1.4 and its
+/// children's animated translations are 1.4x the matrix-derived rest offsets).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QsTransform {
+    t: [f32; 3],
+    r: [f32; 4],
+    s: [f32; 3],
+}
+
+impl QsTransform {
+    /// Decomposes an affine T*R*S matrix (column-major, no shear).
+    fn from_mat(m: &[f32; 16]) -> Self {
+        let col = |c: usize| [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+        let s = [0, 1, 2].map(|c| {
+            let v = col(c);
+            (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+        });
+        let r = |row: usize, c: usize| {
+            if s[c] > 1e-8 {
+                m[c * 4 + row] / s[c]
+            } else {
+                f32::from(u8::from(row == c))
+            }
+        };
+        let trace = r(0, 0) + r(1, 1) + r(2, 2);
+        let q = if trace > 0.0 {
+            let k = (trace + 1.0).sqrt() * 2.0;
+            [
+                (r(2, 1) - r(1, 2)) / k,
+                (r(0, 2) - r(2, 0)) / k,
+                (r(1, 0) - r(0, 1)) / k,
+                0.25 * k,
+            ]
+        } else if r(0, 0) > r(1, 1) && r(0, 0) > r(2, 2) {
+            let k = (1.0 + r(0, 0) - r(1, 1) - r(2, 2)).sqrt() * 2.0;
+            [
+                0.25 * k,
+                (r(0, 1) + r(1, 0)) / k,
+                (r(0, 2) + r(2, 0)) / k,
+                (r(2, 1) - r(1, 2)) / k,
+            ]
+        } else if r(1, 1) > r(2, 2) {
+            let k = (1.0 + r(1, 1) - r(0, 0) - r(2, 2)).sqrt() * 2.0;
+            [
+                (r(0, 1) + r(1, 0)) / k,
+                0.25 * k,
+                (r(1, 2) + r(2, 1)) / k,
+                (r(0, 2) - r(2, 0)) / k,
+            ]
+        } else {
+            let k = (1.0 + r(2, 2) - r(0, 0) - r(1, 1)).sqrt() * 2.0;
+            [
+                (r(0, 2) + r(2, 0)) / k,
+                (r(1, 2) + r(2, 1)) / k,
+                0.25 * k,
+                (r(1, 0) - r(0, 1)) / k,
+            ]
+        };
+        Self {
+            t: [m[12], m[13], m[14]],
+            r: q,
+            s,
+        }
+    }
+
+    fn to_mat(self) -> [f32; 16] {
+        compose_transform(&self.t, &self.r, &self.s)
+    }
+
+    /// `self * child`: `t = t + R t_c`, `R = R R_c`, `s = s s_c`.
+    fn mul(&self, child: &Self) -> Self {
+        let rt = quat_rotate(&self.r, &child.t);
+        Self {
+            t: [0, 1, 2].map(|i| self.t[i] + rt[i]),
+            r: quat_mul(&self.r, &child.r),
+            s: [0, 1, 2].map(|i| self.s[i] * child.s[i]),
+        }
+    }
+
+    /// `x` such that `self.mul(&x) == world`.
+    fn local_of(&self, world: &Self) -> Self {
+        let inv = [-self.r[0], -self.r[1], -self.r[2], self.r[3]];
+        let d = [0, 1, 2].map(|i| world.t[i] - self.t[i]);
+        Self {
+            t: quat_rotate(&inv, &d),
+            r: quat_mul(&inv, &world.r),
+            s: [0, 1, 2].map(|i| {
+                if self.s[i].abs() > 1e-8 {
+                    world.s[i] / self.s[i]
+                } else {
+                    world.s[i]
+                }
+            }),
+        }
+    }
+}
+
+fn quat_mul(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+fn quat_rotate(q: &[f32; 4], v: &[f32; 3]) -> [f32; 3] {
+    let p = quat_mul(
+        &quat_mul(q, &[v[0], v[1], v[2], 0.0]),
+        &[-q[0], -q[1], -q[2], q[3]],
+    );
+    [p[0], p[1], p[2]]
+}
+
+/// Resolves each bone against its parent chain (`compose(parent_world, local)`).
+fn resolve_hierarchy<T: Copy>(
+    skeleton: &Skeleton,
+    local: &[T],
+    compose: impl Fn(&T, &T) -> T,
+) -> Vec<T> {
+    let n = skeleton.bones.len();
+    let mut global: Vec<Option<T>> = vec![None; n];
+    fn visit<T: Copy>(
+        idx: usize,
+        skeleton: &Skeleton,
+        local: &[T],
+        global: &mut [Option<T>],
+        compose: &impl Fn(&T, &T) -> T,
+    ) -> T {
+        if let Some(g) = global[idx] {
+            return g;
+        }
+        let g = match skeleton.bones[idx].parent {
+            Some(p) if p < skeleton.bones.len() && p != idx => {
+                let pg = visit(p, skeleton, local, global, compose);
+                compose(&pg, &local[idx])
+            }
+            _ => local[idx],
+        };
+        global[idx] = Some(g);
+        g
+    }
+    (0..n)
+        .map(|i| visit(i, skeleton, local, &mut global, &compose))
+        .collect()
 }
 
 pub fn quat_to_mat4(q: &[f32; 4]) -> [f32; 16] {
@@ -1410,6 +1578,7 @@ impl AnimationClip {
             name: name.into(),
             duration,
             tracks,
+            skeleton: None,
         }
     }
 
@@ -1429,54 +1598,41 @@ impl AnimationClip {
             0.0
         };
 
-        let mut local_transforms: Vec<[f32; 16]> =
-            skeleton.bones.iter().map(|b| b.local_transform).collect();
+        // Rest pose from the matrix hierarchy (bind pose for decoded rigs), re-expressed as
+        // `hkQsTransform` locals so Havok tracks replace them in the same convention.
+        let locals: Vec<[f32; 16]> = skeleton.bones.iter().map(|b| b.local_transform).collect();
+        let rest: Vec<QsTransform> = resolve_hierarchy(skeleton, &locals, mat4_mul)
+            .iter()
+            .map(QsTransform::from_mat)
+            .collect();
+        let mut local: Vec<QsTransform> = skeleton
+            .bones
+            .iter()
+            .enumerate()
+            .map(
+                |(i, b)| match b.parent.filter(|&p| p < rest.len() && p != i) {
+                    Some(p) => rest[p].local_of(&rest[i]),
+                    None => rest[i],
+                },
+            )
+            .collect();
 
         for track in &self.tracks {
-            if track.bone_index >= local_transforms.len() {
+            if track.bone_index >= local.len() {
                 continue;
             }
-            let pos = sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]);
-            let rot = sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let scale = sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]);
-            local_transforms[track.bone_index] = compose_transform(&pos, &rot, &scale);
+            local[track.bone_index] = QsTransform {
+                t: sample_vec3(&track.positions, t).unwrap_or([0.0, 0.0, 0.0]),
+                r: sample_quat(&track.rotations, t).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                s: sample_vec3(&track.scales, t).unwrap_or([1.0, 1.0, 1.0]),
+            };
         }
 
-        let mut computed = vec![false; skeleton.bones.len()];
-        let mut global_transforms = vec![mat4_identity(); skeleton.bones.len()];
-
-        fn compute_bone(
-            idx: usize,
-            skeleton: &Skeleton,
-            local: &[[f32; 16]],
-            global: &mut [[f32; 16]],
-            computed: &mut [bool],
-        ) {
-            if computed[idx] {
-                return;
-            }
-            if let Some(p) = skeleton.bones[idx].parent {
-                if p < skeleton.bones.len() && p != idx {
-                    compute_bone(p, skeleton, local, global, computed);
-                    global[idx] = mat4_mul(&global[p], &local[idx]);
-                    computed[idx] = true;
-                    return;
-                }
-            }
-            global[idx] = local[idx];
-            computed[idx] = true;
-        }
-
-        for i in 0..skeleton.bones.len() {
-            compute_bone(
-                i,
-                skeleton,
-                &local_transforms,
-                &mut global_transforms,
-                &mut computed,
-            );
-        }
-
+        let global_transforms: Vec<[f32; 16]> =
+            resolve_hierarchy(skeleton, &local, QsTransform::mul)
+                .into_iter()
+                .map(QsTransform::to_mat)
+                .collect();
         global_transforms
     }
 
@@ -1546,6 +1702,35 @@ impl AnimationClip {
     }
 }
 
+fn primary_skeleton_of(skeletons: &[Skeleton], meshes: &[IgbMesh]) -> Option<usize> {
+    if skeletons.is_empty() {
+        return None;
+    }
+    let mut counts = vec![0usize; skeletons.len()];
+    for m in meshes {
+        if let Some(s) = m.skeleton {
+            if s < counts.len() {
+                counts[s] += m.vertices.len();
+            }
+        }
+    }
+    skeletons
+        .iter()
+        .enumerate()
+        .filter(|&(idx, _)| counts[idx] > 0)
+        .max_by_key(|&(idx, skel)| (skel.bones.len(), counts[idx]))
+        .map(|(idx, _)| idx)
+        .or_else(|| {
+            skeletons
+                .iter()
+                .enumerate()
+                .max_by_key(|&(_, skel)| skel.bones.len())
+                .map(|(idx, _)| idx)
+        })
+}
+
+/// Returns a reference to the primary character skeleton, if any.
+
 #[derive(Debug, Clone)]
 pub struct IgbModel {
     pub header: IgbHeader,
@@ -1564,6 +1749,21 @@ pub struct IgbModel {
     pub collision_primitives: Vec<CollisionPrimitive>,
     /// Literal script assignments (`var = number`), in file order.
     pub script_constants: Vec<(String, ScriptValue)>,
+    /// Rigid models (weapons, backpacks) mounted on the primary rig's bones.
+    pub attachments: Vec<CharacterAttachment>,
+}
+
+/// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterAttachment {
+    /// `BoneAttachInfo._boneName`, a bone of the primary `igSkeleton2`.
+    pub bone: String,
+    /// Model placement in bone space (column-major).
+    pub transform: [f32; 16],
+    /// Indices into `IgbModel.meshes`.
+    pub meshes: Vec<usize>,
+    /// `.mdl` path of the attached model.
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1615,6 +1815,7 @@ impl Default for IgbModel {
             animations: Vec::new(),
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -1626,33 +1827,20 @@ impl IgbModel {
     /// minigame/cinematic heads, accessories). The primary character rig is the
     /// one that skins character geometry with the highest bone count.
     pub fn primary_skeleton_index(&self) -> Option<usize> {
-        if self.skeletons.is_empty() {
-            return None;
-        }
-        let mut counts = vec![0usize; self.skeletons.len()];
-        for m in &self.meshes {
-            if let Some(s) = m.skeleton {
-                if s < counts.len() {
-                    counts[s] += m.vertices.len();
-                }
-            }
-        }
-        self.skeletons
-            .iter()
-            .enumerate()
-            .filter(|&(idx, _)| counts[idx] > 0)
-            .max_by_key(|&(idx, skel)| (skel.bones.len(), counts[idx]))
-            .map(|(idx, _)| idx)
-            .or_else(|| {
-                self.skeletons
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, skel)| skel.bones.len())
-                    .map(|(idx, _)| idx)
-            })
+        primary_skeleton_of(&self.skeletons, &self.meshes)
     }
 
-    /// Returns a reference to the primary character skeleton, if any.
+    /// Clips that drive the primary rig. Character files also carry clips for
+    /// secondary rigs (Kaos: `kaosHead_Idle` on the 20-bone head before `Kaos_Idle`).
+    pub fn primary_animations(&self) -> Vec<AnimationClip> {
+        let primary = self.primary_skeleton_index();
+        self.animations
+            .iter()
+            .filter(|a| a.skeleton.is_none() || a.skeleton == primary)
+            .cloned()
+            .collect()
+    }
+
     pub fn primary_skeleton(&self) -> Option<&Skeleton> {
         self.primary_skeleton_index()
             .and_then(|idx| self.skeletons.get(idx))
@@ -1709,6 +1897,7 @@ impl IgbModel {
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
+                attachments: Vec::new(),
             });
         }
 
@@ -1740,6 +1929,7 @@ impl IgbModel {
                 animations: Vec::new(),
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
+                attachments: Vec::new(),
             });
         }
 
@@ -1917,6 +2107,7 @@ impl IgbModel {
             animations,
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         })
     }
 
@@ -2892,6 +3083,159 @@ impl IgbModel {
         Some((Skeleton::new(bones, 0), blend_to_bone))
     }
 
+    /// Havok rig skeletons: `tfbPhysicsBody` `+0x14` size (low 27 bits), `+0x18` -> Havok
+    /// packfile with an `hkaSkeleton`; `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` ->
+    /// `igSkeleton2` (index via `skeleton_by_offset`). Clip tracks index these rigs.
+    fn decode_havok_rigs(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        skeleton_by_offset: &std::collections::HashMap<usize, (usize, Vec<u32>)>,
+    ) -> Vec<crate::havok::HavokRig> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsBody"))
+            .filter_map(|body| {
+                let skel = ptr(body.offset + 0x28).and_then(|l| ptr(l + 0x0c))?;
+                let &(skeleton, _) = skeleton_by_offset.get(&skel)?;
+                let size = (rd(body.offset + 0x14)? & 0x07ff_ffff) as usize;
+                let hk = ptr(body.offset + 0x18)?;
+                let bones = crate::havok::parse_havok_skeleton(data.get(hk..hk + size)?)?;
+                Some(crate::havok::HavokRig { skeleton, bones })
+            })
+            .collect()
+    }
+
+    /// Rigid models on the primary rig's attach nodes.
+    /// `tfbPhysicsModel`: `+0x08` `.mdl` path, `+0x28` `BoneAttachInfoList`, `+0x60`
+    /// `tfbPhysicsCombinerLink` (`+0x0c` -> `igSkeleton2`; rigged models only), `+0x68`
+    /// `tfbBodyEntityInfo`. `BoneAttachInfo`: `+0x1c` `_boneName`, `+0x24` `_transform`
+    /// (xyz, Euler degrees). Templates are `tfbSpriteInfo` with `+0xd8` -> a rigid
+    /// `tfbPhysicsModel`; `AbstractPlacement._ID` (`+0x20`) is the attach node index (Gill
+    /// Grunt `014_Attach_Gun_00` -> 0 `gun`, `014_Attach_Backpack_00` -> 17 `back pack`,
+    /// Stealth Elf knives -> 0 and 1) and the `_initMatrix` rotation (`+0x30`) orients it.
+    // ponytail: the character script picks one template per node by upgrade state
+    // (`014 - Set Up Sprite Attachments` via `OpChangeMembership`), which the VM does not
+    // run. Take the base model: shortest `.mdl` name (`HarpoonGun` over `..._Upgrade01`).
+    fn decode_attachments(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        primary_skeleton: usize,
+        mesh_by_geo: &std::collections::HashMap<usize, usize>,
+    ) -> Vec<CharacterAttachment> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        let euler = |o: usize| [0, 1, 2].map(|k| Self::read_f32(data, o + k * 4, endian));
+        let types: std::collections::HashMap<usize, &str> = objects
+            .iter()
+            .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
+            .collect();
+        let types_ref = &types;
+        let of_type = |t: &'static str| {
+            objects
+                .iter()
+                .filter(move |o| types_ref.get(&o.offset) == Some(&t))
+        };
+        let list_items = |list: usize| -> Vec<usize> {
+            let (Some(n), Some(arr)) = (rd(list + 0x08), ptr(list + 0x14)) else {
+                return Vec::new();
+            };
+            (0..n as usize).filter_map(|i| ptr(arr + i * 4)).collect()
+        };
+
+        let Some(rig) = of_type("tfbPhysicsModel")
+            .find(|m| ptr(m.offset + 0x60).and_then(|l| ptr(l + 0x0c)) == Some(primary_skeleton))
+        else {
+            return Vec::new();
+        };
+        let nodes: Vec<(String, [f32; 16])> = ptr(rig.offset + 0x28)
+            .map(list_items)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| {
+                let mut m = mat4_from_euler_deg(euler(n + 0x30));
+                m[12..15].copy_from_slice(&euler(n + 0x24));
+                (cstr(n + 0x1c), m)
+            })
+            .collect();
+
+        // Node index -> (model name length, model, rotation) of the base template.
+        let mut chosen = std::collections::BTreeMap::<usize, (usize, usize, [f32; 3])>::new();
+        for sprite in of_type("tfbSpriteInfo") {
+            let Some(model) = ptr(sprite.offset + 0xd8)
+                .filter(|m| types.get(m) == Some(&"tfbPhysicsModel"))
+                .filter(|&m| ptr(m + 0x60).is_none())
+            else {
+                continue;
+            };
+            let Some(node) = rd(sprite.offset + 0x20).map(|n| n as usize) else {
+                continue;
+            };
+            if node >= nodes.len() {
+                continue;
+            }
+            let path = cstr(model + 0x08);
+            let len = path.rsplit('/').next().unwrap_or(&path).len();
+            if chosen.get(&node).is_none_or(|&(best, ..)| len < best) {
+                chosen.insert(node, (len, model, euler(sprite.offset + 0x30)));
+            }
+        }
+
+        chosen
+            .into_iter()
+            .filter_map(|(node, (_, model, rot))| {
+                let meshes: Vec<usize> = ptr(model + 0x68)
+                    .and_then(|info| ptr(info + 0x14))
+                    .map(list_items)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|d| ptr(d + 0x0c))
+                    .filter_map(|g| match types.get(&g) {
+                        Some(&"igWiiGeometryAttr") => ptr(g + 0x10),
+                        _ => Some(g),
+                    })
+                    .filter_map(|g| mesh_by_geo.get(&g).copied())
+                    .collect();
+                if meshes.is_empty() {
+                    return None;
+                }
+                let (bone, node_xf) = &nodes[node];
+                Some(CharacterAttachment {
+                    bone: bone.clone(),
+                    transform: mat4_mul(node_xf, &mat4_from_euler_deg(rot)),
+                    meshes,
+                    model: cstr(model + 0x08),
+                })
+            })
+            .collect()
+    }
+
     /// Maps each `igGeometryAttr` offset to the `igSkeleton2` offset that skins it:
     /// `tfbPhysicsBody` `+0x28` -> `tfbPhysicsCombinerLink` `+0x0c` -> skeleton;
     /// `+0x30` -> `tfbBodyEntityInfo` `+0x14` -> `DrawableList` -> `Drawable` `+0x0c` -> attr.
@@ -3492,30 +3836,19 @@ impl IgbModel {
         visited[node_idx] = false;
     }
 
-    pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+    /// Raw IGZ scan: section-0 fixup tables plus the object registry.
+    pub fn scan_igz(data: &[u8]) -> Result<IgzFile, IgbError> {
         let igz_header = IgzHeader::parse(data)?;
         let endian = igz_header.endian;
         let version = igz_header.version;
         let sections = &igz_header.descriptors;
 
-        #[derive(Debug, Clone)]
-        pub struct IgzFixupTable {
-            pub tag: [u8; 4],
-            pub count: u32,
-            pub size: u32,
-            pub offset: usize,
-        }
-
-        #[allow(unused_variables)]
-        let _ = |t: &IgzFixupTable| {
-            let _ = (t.tag, t.count, t.size, t.offset);
-        };
-
-        let mut _fixup_tables = Vec::new();
         let mut string_table = Vec::new();
         let mut type_table = Vec::new();
         let mut rvtb_offsets = Vec::new();
         let mut exid_formats = Vec::new();
+        let mut exid_namespaces = Vec::new();
+        let mut root_word = None;
         let mut tmhn_entries = Vec::new();
         let mut exnm_names = Vec::new();
 
@@ -3547,6 +3880,7 @@ impl IgbModel {
                             | b"NHMT"
                             | b"EXNM"
                             | b"MNXE"
+                            | b"TOOR"
                     );
 
                     if is_match {
@@ -3565,13 +3899,6 @@ impl IgbModel {
                         };
                         let header_len = if version <= 6 { 24 } else { 16 };
                         if (size as usize) <= sec0_data.len().saturating_sub(pos) {
-                            _fixup_tables.push(IgzFixupTable {
-                                tag,
-                                count,
-                                size,
-                                offset: sec0.offset + pos + header_len,
-                            });
-
                             let payload_start = pos + (start_of_data as usize).max(header_len);
                             let payload_end = (pos + size as usize).min(sec0_data.len());
                             let payload = if payload_start <= payload_end {
@@ -3611,8 +3938,15 @@ impl IgbModel {
                                     if k * 8 + 4 <= payload.len() {
                                         let hash = Self::read_u32(payload, k * 8, endian);
                                         exid_formats.push(hash);
+                                        exid_namespaces.push(Self::read_u32(
+                                            payload,
+                                            k * 8 + 4,
+                                            endian,
+                                        ));
                                     }
                                 }
+                            } else if tag == *b"TOOR" && payload.len() >= 4 {
+                                root_word = Some(Self::read_u32(payload, 0, endian));
                             } else if tag == *b"TMHN" || tag == *b"NHMT" {
                                 for k in 0..(count as usize) {
                                     if k * 8 + 8 <= payload.len() {
@@ -3675,6 +4009,51 @@ impl IgbModel {
         } else {
             None
         };
+        let external_types = exnm_names
+            .iter()
+            .map(|&i: &usize| string_table.get(i).cloned().unwrap_or_default())
+            .collect();
+        // `TOOR` -> root `igObjectList` (`_count` +0x08, `_data` +0x14).
+        let ptr = |w: u32| -> Option<usize> {
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let word = |o: usize| data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian));
+        let roots = root_word
+            .and_then(ptr)
+            .and_then(|list| {
+                let n = word(list + 0x08)? as usize;
+                let arr = ptr(word(list + 0x14)?)?;
+                Some((0..n).filter_map(|k| ptr(word(arr + k * 4)?)).collect())
+            })
+            .unwrap_or_default();
+        Ok(IgzFile {
+            endian,
+            version,
+            sections: igz_header.descriptors.clone(),
+            string_table,
+            exid_formats,
+            exid_namespaces,
+            tmhn_entries,
+            roots,
+            external_types,
+            objects: igz_objects,
+        })
+    }
+
+    pub fn parse_igz(data: &[u8]) -> Result<Self, IgbError> {
+        let IgzFile {
+            endian,
+            version,
+            sections,
+            string_table,
+            exid_formats,
+            tmhn_entries,
+            external_types,
+            objects: igz_objects,
+            ..
+        } = Self::scan_igz(data)?;
+        let sections = &sections[..];
 
         let mut geo_transforms = std::collections::HashMap::new();
         let mut actor_placements = Vec::new();
@@ -3687,10 +4066,6 @@ impl IgbModel {
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
-            let external_types: Vec<String> = exnm_names
-                .iter()
-                .map(|&i| string_table.get(i).cloned().unwrap_or_default())
-                .collect();
             script_constants = Self::decode_script_constants(
                 data,
                 sections,
@@ -3710,6 +4085,7 @@ impl IgbModel {
         let mut skeletons = Vec::new();
         let mut skeleton_by_offset = std::collections::HashMap::new();
         let mut attr_skeleton = std::collections::HashMap::new();
+        let mut havok_rigs = Vec::new();
         if let Some(ref obj_list) = igz_objects {
             for obj in &obj_list.objects {
                 if obj.type_name.as_deref() != Some("igSkeleton2") {
@@ -3723,6 +4099,13 @@ impl IgbModel {
                 }
             }
             attr_skeleton = Self::skinned_attr_links(data, sections, &obj_list.objects, endian);
+            havok_rigs = Self::decode_havok_rigs(
+                data,
+                sections,
+                &obj_list.objects,
+                endian,
+                &skeleton_by_offset,
+            );
         }
 
         if let Some(ref obj_list) = igz_objects {
@@ -4026,9 +4409,11 @@ impl IgbModel {
 
         // Collect meshes from extracted geometries
         let mut meshes = Vec::new();
+        let mut mesh_by_geo = std::collections::HashMap::new();
         for (geo_idx, geo) in geometries.iter_mut().enumerate() {
             if let Some(ref mut m) = geo.mesh {
                 if let Some(&geo_off) = geo_offsets.get(geo_idx) {
+                    mesh_by_geo.insert(geo_off, meshes.len());
                     if let Some((img_off, base_col, mat_name)) = geo_materials.get(&geo_off) {
                         m.image_index =
                             img_off.and_then(|off| image_index_by_offset.get(&off).copied());
@@ -4054,6 +4439,24 @@ impl IgbModel {
                 });
             }
         }
+
+        let attachments = match (&igz_objects, primary_skeleton_of(&skeletons, &meshes)) {
+            (Some(list), Some(primary)) => skeleton_by_offset
+                .iter()
+                .find(|(_, (idx, _))| *idx == primary)
+                .map(|(&off, _)| {
+                    Self::decode_attachments(
+                        data,
+                        sections,
+                        &list.objects,
+                        endian,
+                        off,
+                        &mesh_by_geo,
+                    )
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
 
         if meshes.is_empty() {
             // Check for raw vertex streams with standard strides (0x10, 0x14, 0x18, 0x20, 0x24, 0x30)
@@ -4275,9 +4678,12 @@ impl IgbModel {
                 };
                 let norm_name = name.to_ascii_lowercase();
 
-                if let Some(clip) =
-                    crate::havok::parse_havok_animation(hk_data, &norm_name, &skeletons)
-                {
+                if let Some(clip) = crate::havok::parse_havok_animation(
+                    hk_data,
+                    &norm_name,
+                    &skeletons,
+                    &havok_rigs,
+                ) {
                     animations.push(clip);
                 }
             }
@@ -4380,6 +4786,7 @@ impl IgbModel {
             animations,
             collision_primitives,
             script_constants,
+            attachments,
         })
     }
 
@@ -5328,6 +5735,7 @@ mod tests {
             animations: vec![],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -5440,6 +5848,7 @@ mod tests {
             animations: vec![],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let markers = model.extract_level_markers();
@@ -5708,6 +6117,7 @@ mod tests {
             animations: vec![clip.clone()],
             collision_primitives: vec![],
             script_constants: Vec::new(),
+            attachments: Vec::new(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -5858,6 +6268,159 @@ mod tests {
                 ("BaseDamage_JumpSlam", 25.0)
             ]
         );
+    }
+
+    #[test]
+    fn test_primary_animations_skip_secondary_rig() {
+        let Some(bytes) = read_character_bld("1010_Kaos") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
+        let primary = model.primary_skeleton_index();
+        // `kaosHead_Idle` (8.53 s, head rig) comes before `Kaos_Idle` (1.07 s, body rig).
+        let first_idle = model.animations.iter().find(|a| a.name == "idle").unwrap();
+        assert_ne!(first_idle.skeleton, primary);
+        let clips = model.primary_animations();
+        assert!(clips.iter().all(|a| a.skeleton == primary));
+        let idle = clips.iter().find(|a| a.name == "idle").expect("body idle");
+        assert!((idle.duration - 1.07).abs() < 1e-2, "{}", idle.duration);
+        assert!(clips.iter().any(|a| a.name == "walk"));
+    }
+
+    /// Mean |frame-0 track translation - rest translation| over non-root tracks, both as
+    /// `hkQsTransform` locals. Roots and `J_attach*` prop bones move in idle; skip them.
+    fn idle_rest_mismatch(name: &str) -> Option<(f32, usize, usize)> {
+        let bytes = read_character_bld(name)?;
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let sk = model.primary_skeleton().expect("primary rig");
+        let clips = model.primary_animations();
+        let idle = clips.iter().find(|a| a.name == "idle").expect("idle");
+        let world =
+            |j: usize| QsTransform::from_mat(&mat4_affine_inverse(&sk.bones[j].inverse_bind_pose));
+        let len = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let (mut sum, mut n) = (0.0, 0);
+        for t in &idle.tracks {
+            let bone = &sk.bones[t.bone_index];
+            let lower = bone.name.to_ascii_lowercase();
+            if lower.contains("root") || lower.contains("attach") {
+                continue;
+            }
+            let Some(p) = bone.parent else { continue };
+            let rest = world(p).local_of(&world(t.bone_index));
+            let anim = sample_vec3(&t.positions, 0.0).unwrap();
+            sum += (len(anim) - len(rest.t)).abs();
+            n += 1;
+        }
+        Some((sum / n.max(1) as f32, idle.tracks.len(), n))
+    }
+
+    #[test]
+    fn test_character_attachments_from_attach_templates() {
+        // Gill Grunt: `014_Attach_Gun_00` (_ID 0 -> `gun` = `J_gun`), `..._Harpoon_00` (16 ->
+        // `harpoon tip`, 3 ft along the gun), `..._Backpack_00` (17 -> `back pack`).
+        // Upgrade variants (`HarpoonGun_Upgrade01`, `BackPack_upgrade`) are not chosen.
+        let Some(bytes) = read_character_bld("014_GillGrunt") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let found: Vec<(&str, &str)> = model
+            .attachments
+            .iter()
+            .map(|a| (a.model.rsplit('/').next().unwrap(), a.bone.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("GillGrunt_HarpoonGun.mdl", "J_gun"),
+                ("GillGrunt_HarpoonSpear_Prop.mdl", "J_gun"),
+                ("GillGruntBackPack.mdl", "J_jetpack"),
+            ]
+        );
+        assert!((model.attachments[1].transform[14] - 0.9144).abs() < 1e-4);
+        for a in &model.attachments {
+            assert!(!a.meshes.is_empty());
+            assert!(a.meshes.iter().all(|&i| model.meshes[i].skeleton.is_none()));
+        }
+
+        // Stealth Elf: one knife per `knife` node (`_ID` 0 and 1), not the 2013 variant.
+        let Some(bytes) = read_character_bld("026_StealthElf") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+        let found: Vec<(&str, &str)> = model
+            .attachments
+            .iter()
+            .map(|a| (a.model.rsplit('/').next().unwrap(), a.bone.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("StealthElfKnife.mdl", "J_attach_L"),
+                ("StealthElfKnife.mdl", "J_attach_R")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_havok_tracks_follow_rig_bone_names() {
+        // Spyro's Havok rig lists `J_root_B`, legs and tail before `J_neck`; index-order
+        // binding put leg motion on the head (`J_neck` got 0.312 instead of 0.266).
+        let Some((mismatch, tracks, checked)) = idle_rest_mismatch("016_Spyro") else {
+            return;
+        };
+        assert_eq!(tracks, 49);
+        assert!(checked > 40, "{checked}");
+        assert!(mismatch < 0.03, "Spyro idle vs rest: {mismatch}");
+    }
+
+    #[test]
+    fn test_havok_scaled_rig_kaos() {
+        // `J_root` scale 1.4: child translations are not scaled by it (hkQsTransform).
+        let Some((mismatch, _, _)) = idle_rest_mismatch("1010_Kaos") else {
+            return;
+        };
+        assert!(mismatch < 0.03, "Kaos idle vs rest: {mismatch}");
+    }
+
+    #[test]
+    fn test_pose_parent_scale_does_not_scale_child_translation() {
+        let mut root_local = mat4_identity();
+        for i in [0, 5, 10] {
+            root_local[i] = 2.0;
+        }
+        let skeleton = Skeleton::new(
+            vec![
+                Bone {
+                    name: "root".into(),
+                    parent: None,
+                    inverse_bind_pose: mat4_affine_inverse(&root_local),
+                    local_transform: root_local,
+                },
+                Bone {
+                    name: "child".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            0,
+        );
+        let track = BoneTrack {
+            bone_index: 1,
+            positions: vec![Keyframe::new(0.0, [1.0, 0.0, 0.0])],
+            rotations: vec![Keyframe::new(0.0, [0.0, 0.0, 0.0, 1.0])],
+            scales: vec![Keyframe::new(0.0, [1.0, 1.0, 1.0])],
+        };
+        let world =
+            AnimationClip::new("t", 1.0, vec![track]).sample_global_transforms(0.0, &skeleton);
+        assert!(
+            (world[1][12] - 1.0).abs() < 1e-5,
+            "child x = {}",
+            world[1][12]
+        );
+        assert!((world[1][0] - 2.0).abs() < 1e-5, "scale is inherited");
+        // Rest pose (no tracks) still reproduces the matrix hierarchy.
+        let rest = AnimationClip::new("bind", 0.0, vec![]).sample_global_transforms(0.0, &skeleton);
+        assert!((rest[0][0] - 2.0).abs() < 1e-5);
     }
 
     #[test]

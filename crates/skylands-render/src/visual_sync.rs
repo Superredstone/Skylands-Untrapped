@@ -8,7 +8,7 @@ use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
-    ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
+    ActorAnimation, ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -107,12 +107,32 @@ impl ModelVisualRegistry {
 #[derive(Component)]
 pub struct CharacterSubmeshEntity;
 
+/// Actor whose visual has been built. Skinned characters keep their meshes on
+/// `CharacterSubmeshEntity` children, so `Mesh3d` on the actor can't mark this.
+#[derive(Component)]
+pub struct ActorVisual;
+
 pub type SubmeshVisual = (Handle<Mesh>, Handle<StandardMaterial>);
+
+/// Rigid model (weapon, backpack) parented to a skeleton joint.
+#[derive(Clone)]
+pub struct AttachmentVisual {
+    /// Bone index in the primary skeleton.
+    pub bone: usize,
+    /// Placement in bone space.
+    pub transform: Transform,
+    pub parts: Vec<SubmeshVisual>,
+}
+
+/// Spawned under a joint entity; despawned with the joints.
+#[derive(Component)]
+pub struct CharacterAttachmentEntity;
 
 #[derive(Resource, Clone, Default)]
 pub struct CharacterVisualRegistry {
     pub cache: HashMap<String, SubmeshVisual>,
     pub submeshes: HashMap<String, Vec<SubmeshVisual>>,
+    pub attachments: HashMap<String, Vec<AttachmentVisual>>,
     pub models: HashMap<String, std::sync::Arc<skylands_formats::igb::IgbModel>>,
 }
 
@@ -139,6 +159,24 @@ impl CharacterVisualRegistry {
             .or_else(|| resolve_character_model_archive(character_id))?;
         let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
         self.submeshes.get(&cache_key).cloned()
+    }
+
+    pub fn get_attachments(
+        &self,
+        character_id: u16,
+        model_path: Option<&str>,
+    ) -> Vec<AttachmentVisual> {
+        let Some(bld_name) = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))
+        else {
+            return Vec::new();
+        };
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+        self.attachments
+            .get(&cache_key)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn get_or_load(
@@ -229,6 +267,58 @@ impl CharacterVisualRegistry {
             (fallback_mesh, fallback_mat)
         });
 
+        // Attachments are unskinned: they follow their joint entity rigidly.
+        let skeleton = model.primary_skeleton();
+        let base_name = |n: &str| n.rsplit(':').next().unwrap_or(n).to_ascii_lowercase();
+        let mut loaded_attachments = Vec::new();
+        for att in &model.attachments {
+            let Some(bone) = skeleton.and_then(|s| {
+                s.bones
+                    .iter()
+                    .position(|b| base_name(&b.name) == base_name(&att.bone))
+            }) else {
+                continue;
+            };
+            let parts = att
+                .meshes
+                .iter()
+                .filter_map(|&i| model.meshes.get(i))
+                .map(|m| {
+                    let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
+                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+                    let texture = m
+                        .image_index
+                        .and_then(|i| loader.load_image_rgba(&bld_name, i).ok())
+                        .map(|(w, h, rgba)| {
+                            images.add(crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba))
+                        });
+                    let color = match (&texture, m.base_color) {
+                        (Some(_), _) => Color::WHITE,
+                        (None, Some(c)) => Color::srgb(c[0], c[1], c[2]),
+                        (None, None) => Color::srgb(0.6, 0.6, 0.6),
+                    };
+                    let material = materials.add(StandardMaterial {
+                        base_color: color,
+                        base_color_texture: texture,
+                        perceptual_roughness: 0.8,
+                        reflectance: 0.2,
+                        cull_mode: None,
+                        double_sided: true,
+                        ..default()
+                    });
+                    (meshes.add(mesh), material)
+                })
+                .collect();
+            loaded_attachments.push(AttachmentVisual {
+                bone,
+                transform: Transform::from_matrix(Mat4::from_cols_array(&att.transform)),
+                parts,
+            });
+        }
+
+        self.attachments
+            .insert(cache_key.clone(), loaded_attachments);
         self.submeshes.insert(cache_key.clone(), loaded_submeshes);
         self.cache.insert(cache_key.clone(), first_pair.clone());
         self.models.insert(cache_key, model);
@@ -614,30 +704,73 @@ pub struct CharacterAnimator {
     pub joints: Vec<Entity>,
 }
 
+/// Real clip for a logical state from `skylands_core::animation_state_name`, falling back
+/// through the names character files use (`CrockWarrior_CombatIdle`, `Kaos_JumpStanding`).
+pub fn resolve_clip<'a>(
+    clips: &'a [skylands_formats::AnimationClip],
+    state: &str,
+) -> Option<&'a skylands_formats::AnimationClip> {
+    let fallbacks: &[&str] = match state {
+        "idle" => &["combatidle"],
+        "walk" => &["run"],
+        "run" => &["walk"],
+        "jump" => &["jumpstanding", "flyup", "falling"],
+        "fall" => &["falling", "flightfalling"],
+        "attack_sweep" => &["spinattack", "smashattack", "attack"],
+        s if s.starts_with("attack") => &["attack"],
+        _ => &[],
+    };
+    let named = |n: &str| clips.iter().find(|a| a.name.eq_ignore_ascii_case(n));
+    named(state)
+        .or_else(|| fallbacks.iter().find_map(|n| named(n)))
+        .or_else(|| {
+            state
+                .starts_with("attack")
+                .then(|| clips.iter().find(|a| a.name.contains("attack")))
+                .flatten()
+        })
+        .or_else(|| named("idle"))
+        .or_else(|| clips.first())
+}
+
+/// Attacks and jump take-offs play once and hold their last frame; everything else loops.
+fn is_one_shot(state: &str) -> bool {
+    state.starts_with("attack") || state == "jump"
+}
+
 pub fn character_animation_system(
     time: Res<Time>,
     viewer_settings: Option<Res<crate::ViewerSettings>>,
-    mut anim_query: Query<&mut CharacterAnimator>,
+    mut anim_query: Query<(&mut CharacterAnimator, Option<&ActorAnimation>)>,
     mut transform_query: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs();
-    let clip_requested = viewer_settings.as_ref().map(|v| v.clip_name.as_str());
+    let viewer_clip = viewer_settings
+        .as_ref()
+        .filter(|v| v.viewer_mode)
+        .map(|v| v.clip_name.clone());
 
-    for mut anim in &mut anim_query {
-        anim.elapsed += dt;
+    for (mut anim, actor_anim) in &mut anim_query {
+        let requested = viewer_clip
+            .as_deref()
+            .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
+            .unwrap_or("idle");
+        if anim.current_clip != requested {
+            anim.current_clip = requested.to_string();
+            anim.elapsed = 0.0;
+        } else {
+            anim.elapsed += dt;
+        }
 
-        let target_clip_name = clip_requested.unwrap_or(&anim.current_clip);
-        let clip = anim
-            .animations
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(target_clip_name))
-            .or_else(|| anim.animations.iter().find(|a| a.name == "idle"))
-            .or_else(|| anim.animations.first());
-
-        let Some(clip) = clip else {
+        let Some(clip) = resolve_clip(&anim.animations, requested) else {
             continue;
         };
-        let global_transforms = clip.sample_global_transforms(anim.elapsed, &anim.skeleton);
+        let t = if is_one_shot(requested) {
+            anim.elapsed.min(clip.duration * 0.999)
+        } else {
+            anim.elapsed
+        };
+        let global_transforms = clip.sample_global_transforms(t, &anim.skeleton);
 
         for (i, &joint_entity) in anim.joints.iter().enumerate() {
             if i < global_transforms.len() {
@@ -672,7 +805,7 @@ pub fn actor_visual_sync_system(
             Option<&Prop>,
             Has<Enemy>,
         ),
-        Or<(Without<Mesh3d>, Changed<ActorIdentity>)>,
+        Or<(Without<ActorVisual>, Changed<ActorIdentity>)>,
     >,
     collectible_query: Query<(Entity, &Collectible), Without<Mesh3d>>,
     projectile_query: Query<Entity, (With<Projectile>, Without<Mesh3d>)>,
@@ -682,6 +815,7 @@ pub fn actor_visual_sync_system(
     };
 
     for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy) in &actor_query {
+        commands.entity(entity).insert(ActorVisual);
         let is_hero = maybe_hero.is_some();
         let is_villain = maybe_villain.is_some() || is_enemy;
 
@@ -703,14 +837,14 @@ pub fn actor_visual_sync_system(
             if let Some((mesh, mat)) = custom_visual {
                 if let Ok(old_anim) = anim_query.get(entity) {
                     for &j in &old_anim.joints {
-                        commands.entity(j).despawn();
+                        commands.entity(j).despawn_recursive();
                     }
                     commands.entity(entity).remove::<SkinnedMesh>();
                     commands.entity(entity).remove::<CharacterAnimator>();
                 }
                 for (child, parent) in &submesh_query {
                     if parent.get() == entity {
-                        commands.entity(child).despawn();
+                        commands.entity(child).despawn_recursive();
                     }
                 }
 
@@ -800,7 +934,7 @@ pub fn actor_visual_sync_system(
                                 commands.entity(entity).insert((
                                     CharacterAnimator {
                                         skeleton: skeleton.clone(),
-                                        animations: md.animations.clone(),
+                                        animations: md.primary_animations(),
                                         current_clip: "idle".to_string(),
                                         elapsed: 0.0,
                                         joints: joints.clone(),
@@ -817,7 +951,7 @@ pub fn actor_visual_sync_system(
                                     },
                                     CharacterAnimator {
                                         skeleton: skeleton.clone(),
-                                        animations: md.animations.clone(),
+                                        animations: md.primary_animations(),
                                         current_clip: "idle".to_string(),
                                         elapsed: 0.0,
                                         joints: joints.clone(),
@@ -825,6 +959,32 @@ pub fn actor_visual_sync_system(
                                 ));
                             }
                             commands.entity(entity).add_children(&joints);
+                            let attachments = visual_registry
+                                .as_ref()
+                                .map(|reg| {
+                                    reg.get_attachments(
+                                        ident.character_id,
+                                        ident.model_path.as_deref(),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            for att in attachments {
+                                let Some(&joint) = joints.get(att.bone) else {
+                                    continue;
+                                };
+                                for (part_mesh, part_mat) in att.parts {
+                                    let child = commands
+                                        .spawn((
+                                            Mesh3d(part_mesh),
+                                            MeshMaterial3d(part_mat),
+                                            att.transform,
+                                            CharacterAttachmentEntity,
+                                            Visibility::default(),
+                                        ))
+                                        .id();
+                                    commands.entity(joint).add_child(child);
+                                }
+                            }
                             skinned_applied = true;
                         }
                     }
@@ -1201,6 +1361,201 @@ mod tests {
             (root_tf.translation.y - 0.5).abs() < 1e-2,
             "Root joint animated to Y=0.5, got {}",
             root_tf.translation.y
+        );
+    }
+
+    /// Spyro hero with a one-bone rig and two submeshes (body + wings, so the actor itself
+    /// has no `Mesh3d`), plus `attachments` on that bone.
+    fn skinned_character_app(attachments: Vec<AttachmentVisual>) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        app.init_resource::<CharacterVisualRegistry>();
+
+        let mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(ProceduralMesh::prop_cube(0.5).to_bevy());
+        let mat = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.insert_resource(RenderMeshAssets {
+            courtyard_mesh: mesh.clone(),
+            courtyard_material: mat.clone(),
+            pedestal_mesh: mesh.clone(),
+            pedestal_material: mat.clone(),
+            hero_mesh: mesh.clone(),
+            hero_material: mat.clone(),
+            villain_mesh: mesh.clone(),
+            villain_material: mat.clone(),
+            prop_mesh: mesh.clone(),
+            prop_material: mat.clone(),
+            coin_mesh: mesh.clone(),
+            coin_material: mat.clone(),
+            gem_mesh: mesh.clone(),
+            gem_material: mat.clone(),
+            projectile_mesh: mesh.clone(),
+            projectile_material: mat.clone(),
+        });
+
+        let bone = skylands_formats::Bone {
+            name: "root".to_string(),
+            parent: None,
+            inverse_bind_pose: skylands_formats::mat4_identity(),
+            local_transform: skylands_formats::mat4_identity(),
+        };
+        let model = std::sync::Arc::new(skylands_formats::IgbModel {
+            skeletons: vec![skylands_formats::Skeleton::new(vec![bone], 0)],
+            animations: vec![skylands_formats::AnimationClip::new("idle", 1.0, vec![])],
+            ..default()
+        });
+        let key = "16:016_spyro.bld".to_string();
+        {
+            let mut reg = app.world_mut().resource_mut::<CharacterVisualRegistry>();
+            reg.cache.insert(key.clone(), (mesh.clone(), mat.clone()));
+            reg.submeshes.insert(
+                key.clone(),
+                vec![(mesh.clone(), mat.clone()), (mesh.clone(), mat.clone())],
+            );
+            reg.attachments.insert(key.clone(), attachments);
+            reg.models.insert(key, model);
+        }
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                ActorIdentity {
+                    id: 16,
+                    character_id: 16,
+                    name: "Spyro".to_string(),
+                    is_villain: false,
+                    model_path: Some("016_Spyro.bld".to_string()),
+                    texture_path: None,
+                },
+                Hero,
+            ))
+            .id();
+        app.add_systems(Update, actor_visual_sync_system);
+        app.update();
+        (app, entity)
+    }
+
+    #[test]
+    fn test_multi_submesh_character_is_built_once() {
+        let (mut app, entity) = skinned_character_app(Vec::new());
+        let joints = app
+            .world()
+            .get::<CharacterAnimator>(entity)
+            .unwrap()
+            .joints
+            .clone();
+        let children = app.world().get::<Children>(entity).unwrap().len();
+
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<CharacterAnimator>(entity).unwrap().joints,
+            joints,
+            "visual must not be rebuilt every frame (animation restarts)"
+        );
+        assert_eq!(app.world().get::<Children>(entity).unwrap().len(), children);
+    }
+
+    #[test]
+    fn test_attachment_follows_its_joint() {
+        let mesh = Handle::<Mesh>::default();
+        let mat = Handle::<StandardMaterial>::default();
+        let (app, entity) = skinned_character_app(vec![AttachmentVisual {
+            bone: 0,
+            transform: Transform::from_xyz(0.0, 0.0, 0.9144),
+            parts: vec![(mesh, mat)],
+        }]);
+        let joint = app.world().get::<CharacterAnimator>(entity).unwrap().joints[0];
+        let children = app
+            .world()
+            .get::<Children>(joint)
+            .expect("joint has the weapon");
+        assert_eq!(children.len(), 1);
+        let weapon = children[0];
+        assert!(app
+            .world()
+            .get::<CharacterAttachmentEntity>(weapon)
+            .is_some());
+        assert!(app.world().get::<Mesh3d>(weapon).is_some());
+        assert_eq!(
+            app.world().get::<Transform>(weapon).unwrap().translation,
+            Vec3::new(0.0, 0.0, 0.9144)
+        );
+    }
+
+    #[test]
+    fn test_resolve_clip_fallbacks() {
+        let clip = |n: &str| skylands_formats::AnimationClip::new(n, 1.0, vec![]);
+        let clips = vec![
+            clip("combatidle"),
+            clip("run"),
+            clip("jumpstanding"),
+            clip("falling"),
+            clip("smashattack"),
+        ];
+        let name = |s: &str| resolve_clip(&clips, s).map(|c| c.name.as_str());
+        assert_eq!(name("idle"), Some("combatidle"));
+        assert_eq!(name("walk"), Some("run"));
+        assert_eq!(name("jump"), Some("jumpstanding"));
+        assert_eq!(name("fall"), Some("falling"));
+        assert_eq!(name("attack_sweep"), Some("smashattack"));
+        assert_eq!(name("attack_combo_2"), Some("smashattack"));
+        assert_eq!(name("unknown"), Some("combatidle"));
+        assert!(resolve_clip(&[], "idle").is_none());
+    }
+
+    #[test]
+    fn test_animator_follows_gameplay_state_outside_viewer() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // Always inserted by the render plugin; its clip must not override gameplay.
+        app.insert_resource(crate::ViewerSettings::default());
+        app.add_systems(Update, character_animation_system);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                CharacterAnimator {
+                    skeleton: skylands_formats::Skeleton::new(vec![], 0),
+                    animations: vec![
+                        skylands_formats::AnimationClip::new("idle", 1.0, vec![]),
+                        skylands_formats::AnimationClip::new("walk", 1.0, vec![]),
+                    ],
+                    current_clip: "idle".to_string(),
+                    elapsed: 0.7,
+                    joints: vec![],
+                },
+                ActorAnimation {
+                    current_clip: Some("walk".to_string()),
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+
+        let animator = app.world().get::<CharacterAnimator>(entity).unwrap();
+        assert_eq!(animator.current_clip, "walk");
+        assert_eq!(animator.elapsed, 0.0, "clip change restarts playback");
+
+        app.world_mut()
+            .resource_mut::<crate::ViewerSettings>()
+            .viewer_mode = true;
+        app.update();
+        let animator = app.world().get::<CharacterAnimator>(entity).unwrap();
+        assert_eq!(
+            animator.current_clip, "idle",
+            "viewer clip wins in viewer mode"
         );
     }
 

@@ -1,18 +1,7 @@
 use crate::camera::MainCamera;
 use crate::viewer::ViewerSettings;
 use bevy::prelude::*;
-use skylands_core::{
-    CaptureProgress, DamagePopup, GameStats, Health, Hero, ZoneTransitionProgress,
-};
-
-#[derive(Component)]
-pub struct HudHeroNameText;
-
-#[derive(Component)]
-pub struct HudHealthBarFill;
-
-#[derive(Component)]
-pub struct HudCoinText;
+use skylands_core::{CaptureProgress, DamagePopup, GameStats, ZoneTransitionProgress};
 
 #[derive(Component)]
 pub struct HudCaptureBanner;
@@ -50,90 +39,6 @@ pub fn setup_hud_ui(mut commands: Commands) {
             ..default()
         })
         .with_children(|parent| {
-            // Top Row: Hero Info & Coins
-            parent
-                .spawn(Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(80.0),
-                    padding: UiRect::all(Val::Px(16.0)),
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|top| {
-                    // Hero card
-                    top.spawn((
-                        Node {
-                            padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
-                            flex_direction: FlexDirection::Column,
-                            border: UiRect::all(Val::Px(1.5)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.08, 0.08, 0.12, 0.88)),
-                        BorderColor(Color::srgba(0.2, 0.6, 1.0, 0.9)),
-                        BorderRadius::all(Val::Px(6.0)),
-                    ))
-                    .with_children(|card| {
-                        card.spawn((
-                            Text::new("SNAP SHOT (WATER)"),
-                            TextFont {
-                                font_size: 14.0,
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                            HudHeroNameText,
-                        ));
-
-                        // Health bar container
-                        card.spawn((
-                            Node {
-                                width: Val::Px(180.0),
-                                height: Val::Px(10.0),
-                                margin: UiRect::top(Val::Px(6.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgba(0.2, 0.2, 0.2, 0.8)),
-                            BorderRadius::all(Val::Px(3.0)),
-                        ))
-                        .with_children(|bar| {
-                            bar.spawn((
-                                Node {
-                                    width: Val::Percent(100.0),
-                                    height: Val::Percent(100.0),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgb(0.2, 0.9, 0.3)),
-                                BorderRadius::all(Val::Px(3.0)),
-                                HudHealthBarFill,
-                            ));
-                        });
-                    });
-
-                    // Coin counter pill
-                    top.spawn((
-                        Node {
-                            padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
-                            border: UiRect::all(Val::Px(1.5)),
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.08, 0.08, 0.12, 0.88)),
-                        BorderColor(Color::srgb(1.0, 0.84, 0.0)),
-                        BorderRadius::all(Val::Px(16.0)),
-                    ))
-                    .with_children(|pill| {
-                        pill.spawn((
-                            Text::new("COINS: 0"),
-                            TextFont {
-                                font_size: 14.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(1.0, 0.88, 0.2)),
-                            HudCoinText,
-                        ));
-                    });
-                });
-
             // Center area: Villain capture banner & Prompt banner
             parent
                 .spawn(Node {
@@ -277,23 +182,12 @@ pub fn hud_update_system(
     capture_progress: Res<CaptureProgress>,
     transition_progress: Res<ZoneTransitionProgress>,
     viewer_settings: Res<ViewerSettings>,
-    hero_query: Query<(&Health, &skylands_core::ActorIdentity), With<Hero>>,
     mut text_query: Query<(
         &mut Text,
-        Option<&HudHeroNameText>,
-        Option<&HudCoinText>,
         Option<&HudCaptureText>,
         Option<&HudPromptText>,
         Option<&HudViewerText>,
     )>,
-    mut health_fill: Query<
-        (&mut Node, &mut BackgroundColor),
-        (
-            With<HudHealthBarFill>,
-            Without<HudCaptureFill>,
-            Without<HudFadeOverlay>,
-        ),
-    >,
     mut capture_banner: Query<
         &mut Visibility,
         (
@@ -302,14 +196,7 @@ pub fn hud_update_system(
             Without<HudViewerCard>,
         ),
     >,
-    mut capture_fill: Query<
-        &mut Node,
-        (
-            With<HudCaptureFill>,
-            Without<HudHealthBarFill>,
-            Without<HudViewerCard>,
-        ),
-    >,
+    mut capture_fill: Query<&mut Node, (With<HudCaptureFill>, Without<HudViewerCard>)>,
     mut prompt_banner: Query<
         &mut Visibility,
         (
@@ -318,10 +205,7 @@ pub fn hud_update_system(
             Without<HudViewerCard>,
         ),
     >,
-    mut fade_overlay: Query<
-        &mut BackgroundColor,
-        (With<HudFadeOverlay>, Without<HudHealthBarFill>),
-    >,
+    mut fade_overlay: Query<&mut BackgroundColor, With<HudFadeOverlay>>,
     mut viewer_card: Query<
         &mut Visibility,
         (
@@ -331,36 +215,8 @@ pub fn hud_update_system(
         ),
     >,
 ) {
-    let hero_info = hero_query.get_single().ok();
-
-    if let Some((health, _)) = hero_info {
-        if let Ok((mut bar_node, mut bar_color)) = health_fill.get_single_mut() {
-            let pct = (health.current as f32 / health.max.max(1) as f32).clamp(0.0, 1.0);
-            bar_node.width = Val::Percent(pct * 100.0);
-
-            *bar_color = if pct > 0.5 {
-                BackgroundColor(Color::srgb(0.2, 0.85, 0.3))
-            } else if pct > 0.25 {
-                BackgroundColor(Color::srgb(0.9, 0.8, 0.1))
-            } else {
-                BackgroundColor(Color::srgb(0.9, 0.2, 0.2))
-            };
-        }
-    }
-
-    for (mut text, is_hero, is_coin, is_capture, is_prompt, is_viewer) in &mut text_query {
-        if is_hero.is_some() {
-            if let Some((_, ident)) = hero_info {
-                let (_, elem) = skylands_core::get_character_info(ident.character_id);
-                text.0 = format!(
-                    "{} ({})",
-                    ident.name.to_uppercase(),
-                    elem.name().to_uppercase()
-                );
-            }
-        } else if is_coin.is_some() {
-            text.0 = format!("COINS: {}", stats.coins);
-        } else if is_capture.is_some() {
+    for (mut text, is_capture, is_prompt, is_viewer) in &mut text_query {
+        if is_capture.is_some() {
             let pct = (capture_progress.progress * 100.0) as u32;
             text.0 = format!("TRAPPING VILLAIN ({}%)", pct);
         } else if is_prompt.is_some() {
@@ -447,26 +303,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hud_update_coins() {
+    fn test_hud_update_prompt() {
         let mut app = App::new();
         app.insert_resource(GameStats {
             coins: 42,
             active_zone: "Courtyard".into(),
-            active_prompt: None,
+            active_prompt: Some("Press A to talk".into()),
         })
         .insert_resource(CaptureProgress::default())
         .insert_resource(ZoneTransitionProgress::default())
         .insert_resource(ViewerSettings::default());
 
-        let coin_entity = app
-            .world_mut()
-            .spawn((Text::new("COINS: 0"), HudCoinText))
-            .id();
+        let prompt_entity = app.world_mut().spawn((Text::new(""), HudPromptText)).id();
 
         app.add_systems(Update, hud_update_system);
         app.update();
 
-        let updated_text = app.world().get::<Text>(coin_entity).unwrap();
-        assert_eq!(updated_text.0, "COINS: 42");
+        let updated_text = app.world().get::<Text>(prompt_entity).unwrap();
+        assert_eq!(updated_text.0, "Press A to talk");
     }
 }

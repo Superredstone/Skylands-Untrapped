@@ -252,7 +252,7 @@ pub fn portal_gameplay_system(
                     // Despawn existing heroes first
                     for (entity, ident, is_hero) in &actors {
                         if is_hero && !ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
 
@@ -286,7 +286,7 @@ pub fn portal_gameplay_system(
                 if trapped_state.control_mode == ActiveControlMode::Villain {
                     for (entity, ident, _) in &actors {
                         if ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                     trapped_state.control_mode = ActiveControlMode::Hero;
@@ -302,7 +302,7 @@ pub fn portal_gameplay_system(
                 } else {
                     for (entity, ident, _) in &actors {
                         if ident.is_villain {
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                 }
@@ -410,7 +410,7 @@ pub fn villain_tag_team_swap_system(
                             let pos = hero_tf.translation;
                             let rot = hero_tf.rotation;
                             let vel = hero_vel.0;
-                            commands.entity(hero_ent).despawn();
+                            commands.entity(hero_ent).despawn_recursive();
 
                             spawn_controlled_villain_actor(
                                 &mut commands,
@@ -442,7 +442,7 @@ pub fn villain_tag_team_swap_system(
                     let pos = villain_tf.translation;
                     let rot = villain_tf.rotation;
                     let vel = villain_vel.0;
-                    commands.entity(villain_ent).despawn();
+                    commands.entity(villain_ent).despawn_recursive();
 
                     let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
                     spawn_hero_actor(
@@ -515,7 +515,7 @@ pub fn villain_energy_system(
                     let pos = villain_tf.translation;
                     let rot = villain_tf.rotation;
                     let vel = villain_vel.0;
-                    commands.entity(villain_ent).despawn();
+                    commands.entity(villain_ent).despawn_recursive();
 
                     let hero_id = gameplay_state.active_hero_character_id.unwrap_or(16);
                     spawn_hero_actor(
@@ -939,7 +939,7 @@ pub fn projectile_flight_system(
     for (proj_entity, mut proj_tf, velocity, mut proj) in &mut proj_query {
         proj.lifetime += dt;
         if proj.lifetime >= proj.max_lifetime {
-            commands.entity(proj_entity).despawn();
+            commands.entity(proj_entity).despawn_recursive();
             continue;
         }
 
@@ -975,7 +975,7 @@ pub fn projectile_flight_system(
         }
 
         if hit {
-            commands.entity(proj_entity).despawn();
+            commands.entity(proj_entity).despawn_recursive();
         }
     }
 }
@@ -1050,7 +1050,7 @@ pub fn damage_system(
                                 "{name} has been defeated! Place a different Skylander on the Portal."
                             ));
                         }
-                        commands.entity(entity).despawn();
+                        commands.entity(entity).despawn_recursive();
                     } else if is_enemy {
                         // `LootSystem.ai` "Creature Death Generate Loot": `LootValue = 5`.
                         // ponytail: fixed drop; real one rolls rarity/drop-rate in the script VM.
@@ -1068,7 +1068,7 @@ pub fn damage_system(
                                 grounded: true,
                             },
                         ));
-                        commands.entity(entity).despawn();
+                        commands.entity(entity).despawn_recursive();
                     } else if let Some(prop) = maybe_prop {
                         if prop.destructible {
                             audio_events.send(WorldAudioCueEvent(WorldAudioCue::PropDestroyed));
@@ -1098,7 +1098,7 @@ pub fn damage_system(
                                     grounded: true,
                                 },
                             ));
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     } else if maybe_villain.is_some() {
                         let has_trap = gameplay_state
@@ -1126,7 +1126,7 @@ pub fn damage_system(
                                     stream.queue.push_back(pkt);
                                 }
                             }
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         } else {
                             commands.spawn((
                                 Collectible {
@@ -1145,7 +1145,7 @@ pub fn damage_system(
                                 s.active_prompt =
                                     Some("Insert a Trap to capture Villain!".to_string());
                             }
-                            commands.entity(entity).despawn();
+                            commands.entity(entity).despawn_recursive();
                         }
                     }
                 }
@@ -1172,7 +1172,7 @@ pub fn collectible_pickup_system(
                 collectible.collected = true;
                 stats.coins += collectible.value;
                 audio_events.send(WorldAudioCueEvent(WorldAudioCue::PickupCollected));
-                commands.entity(entity).despawn();
+                commands.entity(entity).despawn_recursive();
             }
         }
     }
@@ -1222,9 +1222,48 @@ pub fn zone_trigger_system(
     stats.active_prompt = found_prompt;
 }
 
+/// Logical animation state per actor. Clip names are resolved to real clips by the renderer.
+pub fn animation_state_name(
+    combo: Option<&AttackCombo>,
+    enemy: Option<&Enemy>,
+    velocity: Option<&Velocity>,
+    collider: Option<&CharacterCollider>,
+) -> String {
+    if let Some(attack) = combo.and_then(|c| c.active.as_ref().map(|a| (c.step, a))) {
+        return match attack.1.kind {
+            AttackKind::PrimaryMelee => format!("attack_combo_{}", attack.0.max(1)),
+            AttackKind::SecondarySweep => "attack_sweep".to_string(),
+            AttackKind::SpecialProjectile => "attack_projectile".to_string(),
+        };
+    }
+    if enemy.is_some_and(|e| e.state == EnemyState::Windup) {
+        return "attack".to_string();
+    }
+    let vel = velocity.map(|v| v.0).unwrap_or(Vec3::ZERO);
+    if collider.is_some_and(|c| !c.grounded) {
+        return if vel.y > 0.0 { "jump" } else { "fall" }.to_string();
+    }
+    let h_speed = Vec2::new(vel.x, vel.z).length();
+    if h_speed > 3.0 {
+        "run"
+    } else if h_speed > 0.1 {
+        "walk"
+    } else {
+        "idle"
+    }
+    .to_string()
+}
+
+#[allow(clippy::type_complexity)]
 pub fn animation_state_system(
     time: Res<Time<Fixed>>,
-    mut query: Query<(&mut ActorAnimation, Option<&AttackCombo>, Option<&Velocity>)>,
+    mut query: Query<(
+        &mut ActorAnimation,
+        Option<&AttackCombo>,
+        Option<&Enemy>,
+        Option<&Velocity>,
+        Option<&CharacterCollider>,
+    )>,
 ) {
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
@@ -1232,33 +1271,13 @@ pub fn animation_state_system(
         time.timestep().as_secs_f32()
     };
 
-    for (mut anim, maybe_combo, maybe_vel) in &mut query {
+    for (mut anim, combo, enemy, vel, collider) in &mut query {
         anim.time += dt * anim.speed;
 
-        if let Some(combo) = maybe_combo {
-            let next_clip = if let Some(ref attack) = combo.active {
-                match attack.kind {
-                    AttackKind::PrimaryMelee => format!("attack_combo_{}", combo.step.max(1)),
-                    AttackKind::SecondarySweep => "attack_sweep".to_string(),
-                    AttackKind::SpecialProjectile => "attack_projectile".to_string(),
-                }
-            } else if let Some(vel) = maybe_vel {
-                let h_speed = Vec2::new(vel.0.x, vel.0.z).length();
-                if h_speed > 3.0 {
-                    "run".to_string()
-                } else if h_speed > 0.1 {
-                    "walk".to_string()
-                } else {
-                    "idle".to_string()
-                }
-            } else {
-                "idle".to_string()
-            };
-
-            if anim.current_clip.as_deref() != Some(&next_clip) {
-                anim.current_clip = Some(next_clip);
-                anim.time = 0.0;
-            }
+        let next_clip = animation_state_name(combo, enemy, vel, collider);
+        if anim.current_clip.as_deref() != Some(&next_clip) {
+            anim.current_clip = Some(next_clip);
+            anim.time = 0.0;
         }
     }
 }
@@ -1327,7 +1346,7 @@ pub fn villain_capture_system(
         portal.set_trap_light(r, g, b);
 
         for (ent, _) in &villain_actors {
-            commands.entity(ent).despawn();
+            commands.entity(ent).despawn_recursive();
         }
         audio_events.send(WorldAudioCueEvent(WorldAudioCue::VillainTrapped));
         let (name, _) = get_character_info(capture_progress.villain_id);
@@ -1477,6 +1496,7 @@ pub fn spawn_level_content(
     let markers = model.extract_level_markers();
     let mut marker_id_counter = 5000u32;
     let mut has_spawn = false;
+    let mut tuning: Option<EnemyTuning> = None;
 
     for marker in &markers {
         match marker.kind {
@@ -1562,11 +1582,15 @@ pub fn spawn_level_content(
                 marker_id_counter += 1;
             }
             skylands_formats::igb::MarkerKind::Enemy(class) => {
+                let stats = tuning
+                    .get_or_insert_with(|| level_enemy_tuning(loader, &path))
+                    .get(class);
                 spawn_enemy(
                     commands,
                     marker_id_counter,
                     &marker.name,
                     class,
+                    stats,
                     Vec3::from(marker.position),
                 );
                 marker_id_counter += 1;
@@ -1586,11 +1610,25 @@ pub fn spawn_level_content(
     true
 }
 
+/// Enemy stats from the level's scripts and `global.bld`; defaults when either is
+/// missing or the evaluation fails (hub levels have no "Game - Define Enemy Stats").
+fn level_enemy_tuning(loader: &skylands_formats::AssetLoader, level_path: &str) -> EnemyTuning {
+    let parse = |p: &str| {
+        let bytes = loader.load_raw(p).ok()?;
+        skylands_formats::ScriptSet::parse(&bytes)
+    };
+    parse(level_path)
+        .zip(parse("global.bld"))
+        .and_then(|(level, global)| EnemyTuning::from_scripts(&level, &global).ok())
+        .unwrap_or_default()
+}
+
 pub fn spawn_enemy(
     commands: &mut Commands,
     id: u32,
     name: &str,
     class: EnemyClass,
+    stats: EnemyClassStats,
     pos: Vec3,
 ) -> Entity {
     commands
@@ -1604,10 +1642,10 @@ pub fn spawn_enemy(
                 model_path: None,
                 texture_path: None,
             },
-            Enemy::new(class),
+            Enemy::new(class, stats.damage),
             Health {
-                current: Enemy::HEALTH,
-                max: Enemy::HEALTH,
+                current: stats.health,
+                max: stats.health,
             },
             Transform::from_translation(pos),
             CharacterCollider::default(),
@@ -2357,6 +2395,9 @@ mod tests {
                 ActorAnimation::default(),
             ))
             .id();
+        // Render-side children (skeleton joints, skinned submeshes) go with the actor.
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut().entity_mut(hero_ent).add_child(joint);
 
         // Press Minus to swap into Kaos
         app.world_mut()
@@ -2366,6 +2407,7 @@ mod tests {
 
         // Previous hero entity is despawned
         assert!(app.world().get_entity(hero_ent).is_err());
+        assert!(app.world().get_entity(joint).is_err(), "orphaned child");
 
         // Control mode is Villain
         let state = app.world().resource::<TrappedVillainState>();
@@ -2690,7 +2732,8 @@ mod tests {
 
     fn spawn_test_enemy(app: &mut App, class: EnemyClass, pos: Vec3) -> Entity {
         let mut commands = app.world_mut().commands();
-        let e = spawn_enemy(&mut commands, 9000, "Enemy_S4_Test", class, pos);
+        let stats = EnemyTuning::default().get(class);
+        let e = spawn_enemy(&mut commands, 9000, "Enemy_S4_Test", class, stats, pos);
         app.world_mut().flush();
         e
     }
@@ -2754,8 +2797,43 @@ mod tests {
         assert!(hero_health(&app, hero) < 100, "projectile hit the hero");
         assert_eq!(
             app.world().get::<Health>(ally).unwrap().current,
-            Enemy::HEALTH,
+            EnemyTuning::default().near.health,
             "hostile projectile passes through enemies"
+        );
+    }
+
+    #[test]
+    fn test_level_enemy_tuning_from_scripts() {
+        let empty = skylands_formats::AssetLoader::new(Default::default());
+        assert_eq!(
+            level_enemy_tuning(&empty, "Level_302_Chompywurm.bld"),
+            EnemyTuning::default()
+        );
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("permanent/global.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("permanent/global.bld")).unwrap();
+        loader
+            .mount(dir.join("level/Level_302_Chompywurm.bld"))
+            .unwrap();
+        let t = level_enemy_tuning(&loader, "Level_302_Chompywurm.bld");
+        // Near: 10 * 5.5 HP, 100 / 9 dmg. Far: 10 * 4 HP, 100 / 15 dmg.
+        assert_eq!(
+            t.near,
+            EnemyClassStats {
+                health: 55,
+                damage: 11
+            }
+        );
+        assert_eq!(
+            t.far,
+            EnemyClassStats {
+                health: 40,
+                damage: 7
+            }
         );
     }
 
@@ -2767,7 +2845,7 @@ mod tests {
             .resource_mut::<Events<DamageEvent>>()
             .send(DamageEvent {
                 target: enemy,
-                damage: Enemy::HEALTH,
+                damage: EnemyTuning::default().near.health,
                 position: Vec3::new(3.0, 0.0, 0.0),
             });
         step_fixed(&mut app);
@@ -2839,5 +2917,60 @@ mod tests {
             (hero_health(&app, hero), enemies)
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn test_animation_state_airborne_and_enemy() {
+        let airborne = CharacterCollider {
+            grounded: false,
+            ..Default::default()
+        };
+        let grounded = CharacterCollider::default();
+        let up = Velocity(Vec3::new(0.0, 5.0, 0.0));
+        let down = Velocity(Vec3::new(4.0, -5.0, 0.0));
+        let fast = Velocity(Vec3::new(4.0, 0.0, 0.0));
+        assert_eq!(
+            animation_state_name(None, None, Some(&up), Some(&airborne)),
+            "jump"
+        );
+        assert_eq!(
+            animation_state_name(None, None, Some(&down), Some(&airborne)),
+            "fall"
+        );
+        assert_eq!(
+            animation_state_name(None, None, Some(&fast), Some(&grounded)),
+            "run"
+        );
+
+        let mut enemy = Enemy::new(EnemyClass::Near, 10);
+        assert_eq!(
+            animation_state_name(None, Some(&enemy), None, Some(&grounded)),
+            "idle"
+        );
+        enemy.state = EnemyState::Windup;
+        assert_eq!(
+            animation_state_name(None, Some(&enemy), Some(&fast), Some(&grounded)),
+            "attack"
+        );
+    }
+
+    #[test]
+    fn test_animation_state_system_drives_enemies() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = build_test_app();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy::new(EnemyClass::Near, 10),
+                Velocity(Vec3::new(1.0, 0.0, 0.0)),
+                CharacterCollider::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+        app.world_mut()
+            .run_system_once(animation_state_system)
+            .unwrap();
+        let anim = app.world().get::<ActorAnimation>(enemy).unwrap();
+        assert_eq!(anim.current_clip.as_deref(), Some("walk"));
     }
 }

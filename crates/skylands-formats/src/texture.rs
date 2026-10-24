@@ -183,6 +183,43 @@ pub fn decode_cmpr(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Text
     Ok(rgba)
 }
 
+/// GX `RGBA8`: 4x4 tiles of 64 bytes, 16 `AR` pairs then 16 `GB` pairs.
+pub fn decode_gx_rgba8(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, TextureError> {
+    if width == 0 || height == 0 {
+        return Err(TextureError::InvalidDimensions { width, height });
+    }
+
+    let tiles_x = width.div_ceil(4);
+    let tiles_y = height.div_ceil(4);
+    let expected = (tiles_x * tiles_y * 64) as usize;
+    if data.len() < expected {
+        return Err(TextureError::BufferTooSmall {
+            expected,
+            actual: data.len(),
+        });
+    }
+
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let tile = &data[((ty * tiles_x + tx) * 64) as usize..][..64];
+            for i in 0..16u32 {
+                let x = tx * 4 + i % 4;
+                let y = ty * 4 + i / 4;
+                if x >= width || y >= height {
+                    continue;
+                }
+                let ar = &tile[(i * 2) as usize..];
+                let gb = &tile[(32 + i * 2) as usize..];
+                let dst = ((y * width + x) * 4) as usize;
+                rgba[dst..dst + 4].copy_from_slice(&[ar[1], gb[0], gb[1], ar[0]]);
+            }
+        }
+    }
+
+    Ok(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +289,28 @@ mod tests {
         assert_eq!(rgba.len(), 8 * 8 * 4);
         assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
         assert_eq!(&rgba[(63 * 4)..(64 * 4)], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_decode_gx_rgba8_tile_order() {
+        let mut data = vec![0u8; 64];
+        // Pixel 0: A=0x80 R=0x11, G=0x22 B=0x33. Pixel 5 (x=1, y=1): opaque white.
+        data[0..2].copy_from_slice(&[0x80, 0x11]);
+        data[32..34].copy_from_slice(&[0x22, 0x33]);
+        data[10..12].copy_from_slice(&[0xff, 0xff]);
+        data[42..44].copy_from_slice(&[0xff, 0xff]);
+
+        let rgba = decode_gx_rgba8(&data, 3, 3).expect("Decode RGBA8");
+        assert_eq!(rgba.len(), 3 * 3 * 4);
+        assert_eq!(&rgba[0..4], &[0x11, 0x22, 0x33, 0x80]);
+        assert_eq!(&rgba[(3 + 1) * 4..(3 + 1) * 4 + 4], &[0xff; 4]);
+        assert_eq!(
+            decode_gx_rgba8(&data[..63], 4, 4),
+            Err(TextureError::BufferTooSmall {
+                expected: 64,
+                actual: 63
+            })
+        );
     }
 
     #[test]
