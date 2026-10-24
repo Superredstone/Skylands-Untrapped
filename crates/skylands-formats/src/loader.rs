@@ -278,34 +278,58 @@ impl AssetLoader {
         model_path: &str,
         image_index: usize,
     ) -> Result<(u32, u32, Vec<u8>), AssetError> {
-        let model = self.load_igb(model_path)?;
-        let target_img = model.images.get(image_index).ok_or_else(|| {
-            AssetError::NotFound(format!(
-                "Image index {} not found in {}",
-                image_index, model_path
-            ))
-        })?;
-        let width = target_img.width as u32;
-        let height = target_img.height as u32;
-        if width == 0 || height == 0 || target_img.texture_size == 0 {
-            return Err(AssetError::NotFound("Empty image".into()));
-        }
+        self.load_images_rgba(model_path, [image_index])
+            .remove(&image_index)
+            .ok_or_else(|| {
+                AssetError::NotFound(format!(
+                    "Image index {} not decodable in {}",
+                    image_index, model_path
+                ))
+            })
+    }
+
+    /// Decodes several `IgbModel::images` of one model, reading the file once.
+    /// Indices that are missing or fail to decode are left out.
+    pub fn load_images_rgba(
+        &self,
+        model_path: &str,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> HashMap<usize, (u32, u32, Vec<u8>)> {
+        let mut out = HashMap::new();
+        let Ok(model) = self.load_igb(model_path) else {
+            return out;
+        };
         let raw = if model_path.ends_with(".bld") || model_path.ends_with(".arc") {
-            if let Ok(inner) = self.vfs.read_from_archive(model_path, "level.bld") {
-                Arc::new(inner)
-            } else {
-                self.load_raw(model_path)?
+            match self.vfs.read_from_archive(model_path, "level.bld") {
+                Ok(inner) => Arc::new(inner),
+                Err(_) => match self.load_raw(model_path) {
+                    Ok(r) => r,
+                    Err(_) => return out,
+                },
             }
         } else {
-            self.load_raw(model_path)?
+            match self.load_raw(model_path) {
+                Ok(r) => r,
+                Err(_) => return out,
+            }
         };
-        let end = (target_img.texture_offset + target_img.texture_size).min(raw.len());
-        if target_img.texture_offset >= end {
-            return Err(AssetError::NotFound("Texture offset out of bounds".into()));
+        for index in indices {
+            let Some(img) = model.images.get(index) else {
+                continue;
+            };
+            let (width, height) = (img.width as u32, img.height as u32);
+            if width == 0 || height == 0 || img.texture_size == 0 {
+                continue;
+            }
+            let end = (img.texture_offset + img.texture_size).min(raw.len());
+            if img.texture_offset >= end {
+                continue;
+            }
+            if let Ok(rgba) = decode_cmpr(&raw[img.texture_offset..end], width, height) {
+                out.insert(index, (width, height, rgba));
+            }
         }
-        let slice = &raw[target_img.texture_offset..end];
-        let rgba = decode_cmpr(slice, width, height)?;
-        Ok((width, height, rgba))
+        out
     }
 
     pub fn load_first_image_rgba(

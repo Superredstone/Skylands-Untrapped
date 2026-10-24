@@ -88,12 +88,25 @@ pub mod meta_fields {
         pub const INIT_MATRIX: usize = 0x24;
         /// `tfbEulerTransform` rotation, Euler degrees x,y,z.
         pub const INIT_ROTATION: usize = 0x30;
+        /// `AbstractPlacement._activityState`. Hub: 4 on live props, 5 on templates
+        /// that scripts spawn later (debris, IGC copies, digits, pickups).
+        pub const ACTIVITY_STATE: usize = 0x54;
+        pub const ACTIVITY_ACTIVE: u32 = 4;
+        /// `tfbPhysicsModel` drawn at the placement (statues, NPCs, doors).
+        pub const PHYSICS_MODEL: usize = 0xec;
+    }
+
+    pub mod physics_model {
+        /// `tfbBodyEntityInfo` holding the model's drawables, in model space.
+        pub const ENTITY_INFO: usize = 0x68;
     }
 
     /// `tfbActorInfo` (0xf8) derives from `Placement` (0xd8).
     pub mod placement {
         pub const SCRIPT: usize = 0xa8;
         pub const COLLISION: usize = 0xc4;
+        /// `_scaleVec`, percent per axis.
+        pub const SCALE_VEC: usize = 0xb8;
     }
 
     pub mod collision_info {
@@ -337,7 +350,7 @@ impl Default for IgbVertex {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct IgbMesh {
     pub name: String,
     pub vertices: Vec<IgbVertex>,
@@ -355,7 +368,7 @@ pub struct IgbMesh {
 
 /// `IG_GFX_TEXTURE_WRAP_*` (enum order from the `main.dol` string table:
 /// `CLAMP`, `REPEAT`, `REGION_CLAMP`, `REGION_REPEAT`, `BORDER`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextureWrap {
     Clamp,
     #[default]
@@ -3496,6 +3509,94 @@ impl IgbModel {
         geo_transforms
     }
 
+    /// World matrices of model geometry placed by level actors. Geometry of a
+    /// `tfbPhysicsModel` is in model space; each `tfbActorInfo` whose `_physicsModel`
+    /// (+0xec) points at the model draws it at `_initMatrix` scaled by `_scaleVec` / 100,
+    /// if it starts active (inactive actors are templates scripts spawn later).
+    /// Keys are geometry offsets (`igWiiGeometryAttr` and its `igWiiGeometry`); every model
+    /// geometry is present, with no matrices when no actor places the model.
+    pub fn decode_model_placements(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> std::collections::HashMap<usize, Vec<[f32; 16]>> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let vec3 = |o: usize| -> Option<[f32; 3]> {
+            Some([rd(o)?, rd(o + 4)?, rd(o + 8)?].map(f32::from_bits))
+        };
+        let models: std::collections::HashSet<usize> = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsModel"))
+            .map(|o| o.offset)
+            .collect();
+
+        let mut by_model: std::collections::HashMap<usize, Vec<[f32; 16]>> =
+            models.iter().map(|&m| (m, Vec::new())).collect();
+        for actor in objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
+            .filter(|o| {
+                rd(o.offset + meta_fields::actor_info::ACTIVITY_STATE)
+                    == Some(meta_fields::actor_info::ACTIVITY_ACTIVE)
+            })
+        {
+            let Some(model) = ptr(actor.offset + meta_fields::actor_info::PHYSICS_MODEL)
+                .filter(|m| models.contains(m))
+            else {
+                continue;
+            };
+            let (Some(pos), Some(rot), Some(scale)) = (
+                vec3(actor.offset + meta_fields::actor_info::INIT_MATRIX),
+                vec3(actor.offset + meta_fields::actor_info::INIT_ROTATION),
+                vec3(actor.offset + meta_fields::placement::SCALE_VEC),
+            ) else {
+                continue;
+            };
+            if !pos.iter().chain(&rot).chain(&scale).all(|v| v.is_finite()) {
+                continue;
+            }
+            let mut m = mat4_from_euler_deg(rot);
+            for (col, s) in scale.iter().enumerate() {
+                for row in 0..3 {
+                    m[col * 4 + row] *= s / 100.0;
+                }
+            }
+            m[12..15].copy_from_slice(&pos);
+            by_model.entry(model).or_default().push(m);
+        }
+
+        let mut out = std::collections::HashMap::new();
+        for (model, xforms) in by_model {
+            let Some(drawables) =
+                ptr(model + meta_fields::physics_model::ENTITY_INFO).and_then(|e| ptr(e + 0x14))
+            else {
+                continue;
+            };
+            let (Some(n), Some(arr)) = (rd(drawables + 0x08), ptr(drawables + 0x14)) else {
+                continue;
+            };
+            for i in 0..n as usize {
+                let Some(geo) = ptr(arr + i * 4).and_then(|d| ptr(d + 0x0c)) else {
+                    continue;
+                };
+                for g in std::iter::once(geo).chain(ptr(geo + 0x10)) {
+                    out.entry(g)
+                        .or_insert_with(Vec::new)
+                        .extend_from_slice(&xforms);
+                }
+            }
+        }
+        out
+    }
+
     /// Extracts material attributes for geometries: maps geometry offset -> material.
     pub fn decode_drawable_materials(
         data: &[u8],
@@ -4193,6 +4294,7 @@ impl IgbModel {
         let mut geo_transforms = std::collections::HashMap::new();
         let mut actor_placements = Vec::new();
         let mut geo_materials = std::collections::HashMap::new();
+        let mut model_placements = std::collections::HashMap::new();
         let mut collision_primitives = Vec::new();
         let mut script_constants = Vec::new();
         if let Some(ref list) = igz_objects {
@@ -4200,6 +4302,7 @@ impl IgbModel {
                 Self::decode_entity_geometry_links(data, sections, &list.objects, endian);
             actor_placements = Self::decode_actor_placements(data, sections, &list.objects, endian);
             geo_materials = Self::decode_drawable_materials(data, sections, &list.objects, endian);
+            model_placements = Self::decode_model_placements(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
             script_constants = Self::decode_script_constants(
                 data,
@@ -4561,19 +4664,30 @@ impl IgbModel {
                     }
                 }
                 meshes.push(m.clone());
-                let transform = geo_offsets
-                    .get(geo_idx)
+                let geo_off = geo_offsets.get(geo_idx);
+                let transform = geo_off
                     .and_then(|off| geo_transforms.get(off))
                     .copied()
                     .unwrap_or_else(mat4_identity);
-                nodes.push(IgbSceneNode {
-                    name: format!("node_{}", geo.name),
-                    type_id: IgbObjectType::IgNode,
-                    children: Vec::new(),
-                    geometry_index: Some(geo_idx),
-                    transform,
-                    marker: None,
-                });
+                // Model geometry is drawn once per placing actor (none when unplaced);
+                // only in files with actors, character files place their model directly.
+                let placements = geo_off
+                    .and_then(|off| model_placements.get(off))
+                    .filter(|_| !actor_placements.is_empty());
+                let world: Vec<[f32; 16]> = match placements {
+                    Some(xforms) => xforms.iter().map(|p| mat4_mul(p, &transform)).collect(),
+                    None => vec![transform],
+                };
+                for transform in world {
+                    nodes.push(IgbSceneNode {
+                        name: format!("node_{}", geo.name),
+                        type_id: IgbObjectType::IgNode,
+                        children: Vec::new(),
+                        geometry_index: Some(geo_idx),
+                        transform,
+                        marker: None,
+                    });
+                }
             }
         }
 
@@ -7214,6 +7328,43 @@ mod tests {
         let median = edges[edges.len() / 2];
         assert!(edges.len() > 500_000, "got {} triangles", edges.len());
         assert!(median < 3.0, "median edge {median}");
+    }
+
+    #[test]
+    fn test_hub_models_drawn_at_active_actor_placements() {
+        use crate::archive::ArchiveMount;
+        let rel = "assets/files/level/Level_Hub_2014_01.bld";
+        let p = [rel.to_string(), format!("../../{rel}")]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists());
+        let Some(p) = p else { return };
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).expect("mount hub");
+        let data = mount.read_file("level.bld").expect("read level.bld");
+        let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
+        let instances = model.evaluate_scene_graph();
+
+        // Model-space prop geometry used to sit at the origin (13 placed instances).
+        let placed = instances
+            .iter()
+            .filter(|i| i.world_transform != mat4_identity())
+            .count();
+        assert!(placed > 700, "got {placed} placed instances");
+        // Inactive templates (debris, IGC copies, digits) are not drawn.
+        let used: std::collections::HashSet<_> =
+            instances.iter().map(|i| i.geometry_index).collect();
+        assert!(used.len() < model.geometries.len());
+        // Level geometry carries its own diffuse texture.
+        let textured = model
+            .meshes
+            .iter()
+            .filter(|m| m.image_index.is_some())
+            .count();
+        assert!(
+            textured * 10 > model.meshes.len() * 9,
+            "{textured} textured"
+        );
     }
 
     #[test]

@@ -353,9 +353,32 @@ pub struct RenderMeshAssets {
     pub projectile_material: Handle<StandardMaterial>,
 }
 
-#[allow(clippy::too_many_arguments)]
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelRenderMesh;
+
+/// Level geometry sharing one diffuse texture, wrap mode and tint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LevelMaterialKey {
+    image: Option<usize>,
+    wrap: [skylands_formats::igb::TextureWrap; 2],
+    /// Tint bits, only used when there is no texture.
+    color: Option<[u32; 4]>,
+}
+
+impl LevelMaterialKey {
+    fn of(mesh: &skylands_formats::igb::IgbMesh) -> Self {
+        Self {
+            image: mesh.image_index,
+            wrap: mesh.texture_wrap,
+            color: mesh
+                .image_index
+                .is_none()
+                .then_some(mesh.base_color)
+                .flatten()
+                .map(|c| c.map(f32::to_bits)),
+        }
+    }
+}
 
 pub fn spawn_level_render_mesh(
     commands: &mut Commands,
@@ -386,27 +409,31 @@ pub fn spawn_level_render_mesh(
     let is_level = path.to_ascii_lowercase().contains("level");
     let instances = model.evaluate_scene_graph();
 
-    let mut material_groups: HashMap<String, Vec<&skylands_formats::igb::SceneInstance>> =
+    // One draw per diffuse material (`Drawable._material`), so each part keeps its texture.
+    let mut material_groups: HashMap<LevelMaterialKey, Vec<&skylands_formats::igb::SceneInstance>> =
         HashMap::new();
     if !instances.is_empty() && !model.geometries.is_empty() {
         for inst in &instances {
-            if let Some(geo) = model.geometries.get(inst.geometry_index) {
-                let mat_name = if is_level {
-                    "level".to_string()
-                } else {
-                    geo.mesh
-                        .as_ref()
-                        .and_then(|m| m.material_name.clone())
-                        .unwrap_or_else(|| format!("mat_{}", geo.name))
-                };
-                material_groups.entry(mat_name).or_default().push(inst);
+            if let Some(m) = model
+                .geometries
+                .get(inst.geometry_index)
+                .and_then(|g| g.mesh.as_ref())
+            {
+                material_groups
+                    .entry(LevelMaterialKey::of(m))
+                    .or_default()
+                    .push(inst);
             }
         }
     }
+    let mut level_textures =
+        loader.load_images_rgba(&path, material_groups.keys().filter_map(|k| k.image));
+    let mut groups: Vec<_> = material_groups.into_iter().collect();
+    groups.sort_by_key(|(k, _)| k.image);
 
     let mut spawned_any = false;
 
-    if material_groups.is_empty() {
+    if groups.is_empty() {
         let mut base_color_texture = None;
         if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&path, None) {
             let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
@@ -448,7 +475,7 @@ pub fn spawn_level_render_mesh(
 
         spawned_any = true;
     } else {
-        for (mat_name, group_instances) in material_groups {
+        for (key, group_instances) in groups {
             let mut total_verts = 0;
             let mut total_idxs = 0;
             for inst in &group_instances {
@@ -511,21 +538,31 @@ pub fn spawn_level_render_mesh(
             bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
             bevy_mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
 
-            let mut base_color_texture = None;
-            if let Ok((w, h, rgba)) = loader.load_companion_texture_rgba(&path, Some(&mat_name)) {
-                let img = crate::texture_conversion::rgba8_to_bevy_image(w, h, rgba);
-                base_color_texture = Some(images.add(img));
-            }
+            let mut alpha_mode = AlphaMode::Opaque;
+            let base_color_texture =
+                key.image
+                    .and_then(|i| level_textures.remove(&i))
+                    .map(|(w, h, rgba)| {
+                        alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
+                        images.add(crate::texture_conversion::rgba8_to_model_texture(
+                            w, h, rgba, key.wrap,
+                        ))
+                    });
 
-            let mat_color = if base_color_texture.is_some() {
-                Color::WHITE
-            } else {
-                Color::srgb(0.72, 0.70, 0.65)
+            let mat_color = match (&base_color_texture, key.color) {
+                (Some(_), _) => Color::WHITE,
+                (None, Some(c)) => Color::srgb(
+                    f32::from_bits(c[0]),
+                    f32::from_bits(c[1]),
+                    f32::from_bits(c[2]),
+                ),
+                (None, None) => Color::srgb(0.72, 0.70, 0.65),
             };
 
             let submesh_mat = materials.add(StandardMaterial {
                 base_color: mat_color,
                 base_color_texture,
+                alpha_mode,
                 perceptual_roughness: 0.85,
                 reflectance: 0.20,
                 cull_mode: None,
@@ -1063,6 +1100,29 @@ pub fn actor_visual_sync_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_level_material_key_splits_by_texture() {
+        use skylands_formats::igb::{IgbMesh, TextureWrap};
+        let mesh = |image: Option<usize>, color: Option<[f32; 4]>| IgbMesh {
+            image_index: image,
+            base_color: color,
+            ..Default::default()
+        };
+        let grass = LevelMaterialKey::of(&mesh(Some(3), Some([0.5; 4])));
+        assert_eq!(grass, LevelMaterialKey::of(&mesh(Some(3), None)));
+        assert_ne!(grass, LevelMaterialKey::of(&mesh(Some(4), None)));
+        let clamped = IgbMesh {
+            texture_wrap: [TextureWrap::Clamp; 2],
+            ..mesh(Some(3), None)
+        };
+        assert_ne!(grass, LevelMaterialKey::of(&clamped));
+        // Untextured parts keep their tint apart.
+        assert_ne!(
+            LevelMaterialKey::of(&mesh(None, Some([1.0, 0.0, 0.0, 1.0]))),
+            LevelMaterialKey::of(&mesh(None, Some([0.0, 1.0, 0.0, 1.0]))),
+        );
+    }
 
     #[test]
     fn test_character_asset_server_resource() {
