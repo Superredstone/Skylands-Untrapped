@@ -59,6 +59,9 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Cameras: follow, free-fly, showcase orbit. Viewer `--viewer`. HUD.
 - [x] Viewer mode isolates hero showcase without triggering Kaos trap capture state.
 - [x] Dynamic HUD stats in viewer mode (vertex & triangle count from active character mesh).
+- [x] Original player HUD (`sky4_hud.rs`, notes `agent/HUD.md`): sprites and layout from `global.bld` (`SpriteLibrary`, GX `RGBA8`), element badge, name, health bar + hp, XP bar + level, coins. Replaces the placeholder hero card / coin pill.
+  - Tests: `hud_sprites_resolve_to_textures` (ROM), `test_decode_gx_rgba8_tile_order`, `sky4_hud::tests::*`.
+  - [ ] Portrait, original font, P2 / ally / boss HUD, pause menu (`UI_PauseMenu_Streamed.bld`), title menu (`Title.bld`).
 - [x] Skylanders-themed Debug Menu (`debug_menu.rs`):
   - F12 hotkey toggles debug menu (replaces direct free cam hotkey); Escape exits free cam.
   - Skylanders Trap Team visual styling: dark slate/obsidian dialog, antique gold runic borders, Traptanium cyan highlights, element-coded badge pills.

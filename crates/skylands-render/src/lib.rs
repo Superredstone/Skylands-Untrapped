@@ -2,6 +2,7 @@ pub mod camera;
 pub mod debug_menu;
 pub mod hud;
 pub mod mesh_conversion;
+pub mod sky4_hud;
 pub mod texture_conversion;
 pub mod viewer;
 pub mod visual_sync;
@@ -20,6 +21,7 @@ pub use mesh_conversion::{
     igb_mesh_to_bevy, igb_model_to_bevy_mesh, igb_model_to_bevy_meshes, normalize_model_mesh,
     CharacterSubmesh, Mesh, Vertex,
 };
+pub use sky4_hud::{setup_sky4_hud, sky4_hud_layout_system, sky4_hud_update_system, Sky4HudAssets};
 pub use texture_conversion::{
     create_colored_material, create_textured_material, rgba8_to_bevy_image,
 };
@@ -59,6 +61,7 @@ impl Plugin for SkylandsRenderPlugin {
                     setup_lighting,
                     setup_environment_and_assets,
                     setup_hud_ui,
+                    setup_sky4_hud,
                     setup_debug_menu_ui,
                 ),
             )
@@ -74,6 +77,7 @@ impl Plugin for SkylandsRenderPlugin {
                     viewer_controls_system,
                     hud_update_system,
                     damage_popup_ui_system,
+                    (sky4_hud_update_system, sky4_hud_layout_system).chain(),
                     debug_menu_toggle_system,
                     debug_menu_interaction_system,
                     debug_menu_telemetry_system,
