@@ -24,7 +24,10 @@ pub use mesh_conversion::{
     igb_mesh_to_bevy, igb_model_to_bevy_mesh, igb_model_to_bevy_meshes, normalize_model_mesh,
     CharacterSubmesh, Mesh, Vertex,
 };
-pub use sky4_hud::{setup_sky4_hud, sky4_hud_layout_system, sky4_hud_update_system, Sky4HudAssets};
+pub use sky4_hud::{
+    setup_sky4_hud, sky4_hud_layout_system, sky4_hud_portrait_system, sky4_hud_text_system,
+    sky4_hud_update_system, Sky4HudAssets,
+};
 pub use texture_conversion::{
     create_colored_material, create_textured_material, rgba8_to_bevy_image,
 };
@@ -88,7 +91,13 @@ impl Plugin for SkylandsRenderPlugin {
                     hud_update_system,
                     dialogue_box_system,
                     damage_popup_ui_system,
-                    (sky4_hud_update_system, sky4_hud_layout_system).chain(),
+                    (
+                        sky4_hud_portrait_system,
+                        sky4_hud_update_system,
+                        sky4_hud_text_system,
+                        sky4_hud_layout_system,
+                    )
+                        .chain(),
                     debug_menu_toggle_system,
                     debug_menu_interaction_system,
                     debug_menu_telemetry_system,

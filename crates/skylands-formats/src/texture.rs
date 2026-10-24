@@ -183,6 +183,42 @@ pub fn decode_cmpr(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Text
     Ok(rgba)
 }
 
+/// GX `RGB565`: 4x4 tiles of 32 bytes, big-endian texels.
+pub fn decode_gx_rgb565(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, TextureError> {
+    if width == 0 || height == 0 {
+        return Err(TextureError::InvalidDimensions { width, height });
+    }
+
+    let tiles_x = width.div_ceil(4);
+    let tiles_y = height.div_ceil(4);
+    let expected = (tiles_x * tiles_y * 32) as usize;
+    if data.len() < expected {
+        return Err(TextureError::BufferTooSmall {
+            expected,
+            actual: data.len(),
+        });
+    }
+
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for ty in 0..tiles_y {
+        for tx in 0..tiles_x {
+            let tile = &data[((ty * tiles_x + tx) * 32) as usize..][..32];
+            for i in 0..16u32 {
+                let x = tx * 4 + i % 4;
+                let y = ty * 4 + i / 4;
+                if x >= width || y >= height {
+                    continue;
+                }
+                let c = u16::from_be_bytes([tile[(i * 2) as usize], tile[(i * 2 + 1) as usize]]);
+                let dst = ((y * width + x) * 4) as usize;
+                rgba[dst..dst + 4].copy_from_slice(&decode_rgb565(c));
+            }
+        }
+    }
+
+    Ok(rgba)
+}
+
 /// GX `RGBA8`: 4x4 tiles of 64 bytes, 16 `AR` pairs then 16 `GB` pairs.
 pub fn decode_gx_rgba8(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, TextureError> {
     if width == 0 || height == 0 {
@@ -223,6 +259,17 @@ pub fn decode_gx_rgba8(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gx_rgb565_reads_tiles_big_endian() {
+        // 8x4: two 4x4 tiles, red then green.
+        let mut data = [0xf8u8, 0x00].repeat(16);
+        data.extend([0x07u8, 0xe0].repeat(16));
+        let px = decode_gx_rgb565(&data, 8, 4).unwrap();
+        assert_eq!(&px[..4], &[255, 0, 0, 255]);
+        assert_eq!(&px[4 * 4..4 * 5], &[0, 255, 0, 255]);
+        assert!(decode_gx_rgb565(&data[..10], 8, 4).is_err());
+    }
 
     #[test]
     fn test_decode_rgb565() {

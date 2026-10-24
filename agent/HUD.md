@@ -15,11 +15,25 @@ Code: `crates/skylands-formats/src/sprite.rs` (`SpriteLibrary`), `decode_gx_rgba
 ## Sprites
 - `tfbSpriteInfo`: name +0x08, `SpriteInfoList` +0x74. List entry +0x20 = texture path or another
   sprite's name (`Generic_Container` -> `Generic_GraySquare` -> `gray.png`).
-- `AnimatableTextureDataInfo`: path +0x08, natural size +0x24/+0x28 (screen units, about Wii
-  pixels), `igTextureAttr2` +0x44 -> `igImage2` +0x30.
+- `AnimatableTextureDataInfo` (0x34 bytes): path +0x08, natural size +0x24/+0x28 (screen units,
+  about Wii pixels), `tfbTextureBindAttr` +0x30 -> colour `igTextureAttr2` +0x10, alpha mask
+  `igTextureAttr2` +0x18 (portraits only; mask red = alpha) -> `igImage2` +0x30.
 - `format_8888` art is GX `RGBA8` (format handle hash `0x0342d599`): 4x4 tiles, AR then GB.
-- Portraits (`UI_SKY4/HUD/Portraits/2014/256x128/*`) are streamed from `.arc` files and have no
-  image in `global.bld`.
+  Other sprites are `CMPR`. All sprite images are stored bottom row first (flip on decode).
+- Hero portraits (`UI_SKY4/HUD/Portraits/2014/256x128/*`, 142x71) are embedded in the hero's own
+  `character/NNN_Name.bld` `level.bld` as sprites `NNN_MinionHead` (default) and
+  `NNN_MinionHead_Series2/_Series3/_EonsElite`. Only NPC portraits and the placeholder sit in
+  `.arc` files; `global.bld` has none.
+
+## Font
+- `permanent/global.bld`: one `igBitmapFont` (`hdd:/tfb/content/fonts/wii/font_002`, 56 pt,
+  158 glyphs), `FontDataInfo` `fonts/Font_002.png`. Code: `crates/skylands-formats/src/font.rs`.
+- `igBitmapFont`: point size +0x0c, char spacing +0x30 (-2, unused), `igCharMetricsList` +0x3c
+  (count +0x08, data +0x14), second (empty) list +0x40, `tfbTextureBindAttr` +0x48.
+- `igCharMetrics`: code u16 +0x08, advance +0x0c, x / y offset +0x10 / +0x14, width / height
+  +0x18 / +0x1c, UV u0 v0 u1 v1 +0x20 (v top-down; this sheet is stored top row first).
+- Sheet 512x328 GX `RGB565` (format hash `0xe9a1f964`), one mask per channel: red fill, green
+  outline, blue outer edge. Decoded as white fill on black outline so a tint colours the fill.
 
 ## Script sprite fields
 Field names are FNV-1a hashes (`name_hash`) of these engine names: `location` `$0bf5a9a6`, `x`
@@ -38,7 +52,8 @@ Field names are FNV-1a hashes (`name_hash`) of these engine names: `location` `$
 - Priority: lower draws in front; treated as relative to the parent sprite.
 
 ## Player 1 layout (script units)
-"Player HUD - Create": main 237x96, bottom-left, priority -25. "Minion HUD - Create" (justify 3;
+"Player HUD - Create": main 237x96, bottom-left, priority -25. Portrait (142x71, spawned in
+"Minion HUD - Create" [506]): bottom-left on the portrait base line's top-left, priority 50. "Minion HUD - Create" (justify 3;
 player 2 mirrors x with justify 5):
 - Container A (+0, +30): backdrop container (-128, 2) prio 200 -> `box_left` (mid-left to
   mid-right, `0xc8713720`) -> `dialog_back_edge` width 200 (`0xff713720`); `sky4 hud portrait base`
@@ -58,7 +73,6 @@ player 2 mirrors x with justify 5):
 - Fill cutout masks approximated by a 2-unit inset.
 
 ## Not done
-- Portrait sprite (streamed `.arc` textures), the original bitmap font (`igCharMetrics`), text
-  gradient, shine sweep, damage pulse / shake, XP and level data (core has none), player 2,
+- Portrait variants (series / Eon's Elite), text gradient, shine sweep, damage pulse / shake, XP and level data (core has none), player 2,
   ally / boss HUDs.
 - Pause menu and title menu (3D `.mdl` buttons; need IGZ model loading of those files).

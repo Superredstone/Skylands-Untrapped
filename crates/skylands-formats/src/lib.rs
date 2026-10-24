@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod dsp;
+pub mod font;
 pub mod fsb;
 pub mod havok;
 pub mod igb;
@@ -12,6 +13,7 @@ pub mod texture;
 
 pub use archive::{hash_path, ArchiveMount, ArchiveReader, FileEntry};
 pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
+pub use font::{BitmapFont, Glyph};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use havok::{parse_havok_animation, parse_havok_skeleton, HavokRig, HAVOK_TAG};
 pub use igb::{
@@ -33,7 +35,8 @@ pub use text::{
     LevelText,
 };
 pub use texture::{
-    decode_cmpr, decode_dxt1, decode_dxt1_block, decode_gx_rgba8, decode_rgb565, TextureError,
+    decode_cmpr, decode_dxt1, decode_dxt1_block, decode_gx_rgb565, decode_gx_rgba8, decode_rgb565,
+    TextureError,
 };
 
 #[cfg(test)]

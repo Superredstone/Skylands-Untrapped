@@ -2,12 +2,13 @@
 //!
 //! Sprites, sizes and colours come from the disc (`SpriteLibrary`); the layout is the one built by
 //! `Macros_PlayerHUD.ai` "UI - HUD - Player HUD - Create" / "UI - HUD - Minion HUD - Create" and
-//! `Macros_UI_Main.ai` "UI - Health Bar - Create" for player 1. Notes: `agent/HUD.md`.
+//! `Macros_UI_Main.ai` "UI - Health Bar - Create" for player 1. Text uses the disc's bitmap font
+//! (`igBitmapFont`), the portrait comes from the hero's own `level.bld`. Notes: `agent/HUD.md`.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use skylands_core::{Element, GameStats, Health, Hero};
-use skylands_formats::SpriteLibrary;
+use skylands_core::{ActorIdentity, Element, GameStats, Health, Hero};
+use skylands_formats::{BitmapFont, SpriteDef, SpriteLibrary};
 
 use crate::texture_conversion::rgba8_to_bevy_image;
 use crate::visual_sync::CharacterAssetServer;
@@ -120,11 +121,24 @@ impl HudSprite {
     }
 }
 
-/// Text drawn by a sprite (`point size` in script units).
+/// Text drawn by a sprite (`point size` in script units) with the bitmap font.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HudText {
     pub point_size: f32,
+    pub justify: JustifyText,
+    pub color: Color,
 }
+
+/// The string a `HudText` shows.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct HudString(pub String);
+
+/// Glyph sprites currently spawned for a `HudText`.
+#[derive(Component, Debug, Default)]
+pub struct HudGlyphs(pub Vec<Entity>);
+
+#[derive(Component)]
+pub struct HudGlyph;
 
 #[derive(Component)]
 pub struct Sky4HudRoot;
@@ -140,14 +154,64 @@ pub struct HudCoinText;
 pub struct HudLevelText;
 #[derive(Component)]
 pub struct HudElementIcon;
+/// Hero portrait (`<id>_MinionHead` sprite of the hero's `level.bld`).
+#[derive(Component)]
+pub struct HudPortrait;
 /// Black outline copy of a text sprite ("UI - Create Stroke").
 #[derive(Component)]
 pub struct HudStroke;
 
-/// Element badge textures, `sky4 hud element NN`.
+/// Element badge textures (`sky4 hud element NN`) and the HUD font.
 #[derive(Resource, Default)]
 pub struct Sky4HudAssets {
     pub element_icons: Vec<Handle<Image>>,
+    pub font: Option<HudFont>,
+}
+
+pub struct HudFont {
+    pub font: BitmapFont,
+    pub image: Handle<Image>,
+    pub sheet_size: Vec2,
+}
+
+impl HudFont {
+    /// Glyph rectangles (script units, relative to the text sprite's top-left) and their sheet
+    /// rectangles (pixels) for `text` laid out in `box_size`.
+    pub fn layout(
+        &self,
+        text: &str,
+        point_size: f32,
+        justify: JustifyText,
+        box_size: Vec2,
+    ) -> Vec<(Vec2, Vec2, Rect)> {
+        let k = point_size / self.font.point_size.max(1.0);
+        let width = self.font.measure(text) * k;
+        let mut x = match justify {
+            JustifyText::Center => (box_size.x - width) * 0.5,
+            JustifyText::Right => box_size.x - width,
+            _ => 0.0,
+        };
+        // The font's em box is centred in the sprite.
+        let top = (box_size.y - point_size) * 0.5;
+        let mut out = Vec::new();
+        for c in text.chars() {
+            let Some(g) = self.font.glyphs.get(&c) else {
+                continue;
+            };
+            if g.size[0] > 0.0 && g.size[1] > 0.0 {
+                out.push((
+                    Vec2::new(x + g.offset[0] * k, top + g.offset[1] * k),
+                    Vec2::from(g.size) * k,
+                    Rect::from_corners(
+                        Vec2::from(g.uv_min) * self.sheet_size,
+                        Vec2::from(g.uv_max) * self.sheet_size,
+                    ),
+                ));
+            }
+            x += g.advance * k;
+        }
+        out
+    }
 }
 
 const ELEMENT_SPRITES: [&str; 11] = [
@@ -223,6 +287,17 @@ pub fn setup_sky4_hud(
         .iter()
         .filter_map(|n| sprites.image(n, &mut images).map(|(h, _)| h))
         .collect::<Vec<_>>();
+    let font = BitmapFont::parse(&data).and_then(|font| {
+        let (w, h, px) = font.decode_rgba(&data)?;
+        Some(HudFont {
+            font,
+            image: images.add(rgba8_to_bevy_image(w, h, px)),
+            sheet_size: Vec2::new(w as f32, h as f32),
+        })
+    });
+    if font.is_none() {
+        warn!("No bitmap font in global.bld; HUD text disabled");
+    }
 
     let root = commands
         .spawn((
@@ -272,13 +347,29 @@ pub fn setup_sky4_hud(
             );
         }
     }
-    if let Some((img, size)) = sprites.image("sky4 hud portrait base", &mut images) {
-        hud.image(
-            HudSprite::new(Some(a), size).at(0.0, -18.0).prio(-1),
-            img,
-            0xff98_987a,
-        );
-    }
+    let base_line = sprites
+        .image("sky4 hud portrait base", &mut images)
+        .map(|(img, size)| {
+            hud.image(
+                HudSprite::new(Some(a), size).at(0.0, -18.0).prio(-1),
+                img,
+                0xff98_987a,
+            )
+        });
+    // Portrait: bottom-left on the base line's top-left, priority 50. Image set per hero.
+    let portrait_size = lib
+        .get("ui_hud_portrait_default")
+        .map_or(Vec2::new(142.22, 71.11), |d| Vec2::from(d.natural_size));
+    let portrait = hud.image(
+        HudSprite::new(Some(base_line.unwrap_or(a)), portrait_size)
+            .align(Align::BottomLeft, Align::TopLeft)
+            .prio(50),
+        Handle::default(),
+        COLOR_WHITE,
+    );
+    hud.commands
+        .entity(portrait)
+        .insert((HudPortrait, Visibility::Hidden));
 
     // Element badge ("sky4 hud element base" + "Elemental Icon - Create").
     if let Some((img, size)) = sprites.image("sky4 hud element base", &mut images) {
@@ -440,7 +531,10 @@ pub fn setup_sky4_hud(
         );
     }
 
-    commands.insert_resource(Sky4HudAssets { element_icons });
+    commands.insert_resource(Sky4HudAssets {
+        element_icons,
+        font,
+    });
 }
 
 struct HudBuilder<'a, 'w, 's> {
@@ -486,11 +580,13 @@ impl HudBuilder<'_, '_, '_> {
             s.priority += 1;
             self.spawn((
                 absolute_node(),
-                Text::new(""),
-                TextLayout::new_with_justify(justify),
-                TextFont::default(),
-                TextColor(Color::BLACK),
-                HudText { point_size },
+                HudText {
+                    point_size,
+                    justify,
+                    color: Color::BLACK,
+                },
+                HudString::default(),
+                HudGlyphs::default(),
                 s,
                 marker,
                 HudStroke,
@@ -498,11 +594,13 @@ impl HudBuilder<'_, '_, '_> {
         }
         self.spawn((
             absolute_node(),
-            Text::new(""),
-            TextLayout::new_with_justify(justify),
-            TextFont::default(),
-            TextColor(script_color(color)),
-            HudText { point_size },
+            HudText {
+                point_size,
+                justify,
+                color: script_color(color),
+            },
+            HudString::default(),
+            HudGlyphs::default(),
             sprite,
             marker,
         ));
@@ -551,11 +649,11 @@ fn absolute_node() -> Node {
 pub fn sky4_hud_update_system(
     stats: Res<GameStats>,
     assets: Option<Res<Sky4HudAssets>>,
-    hero_query: Query<(&Health, &skylands_core::ActorIdentity), With<Hero>>,
+    hero_query: Query<(&Health, &ActorIdentity), With<Hero>>,
     mut fill: Query<(&mut HudSprite, &mut ImageNode), With<HudHealthFill>>,
     mut icons: Query<&mut ImageNode, (With<HudElementIcon>, Without<HudHealthFill>)>,
     mut texts: Query<(
-        &mut Text,
+        &mut HudString,
         Option<&HudHpText>,
         Option<&HudNameText>,
         Option<&HudCoinText>,
@@ -608,12 +706,7 @@ pub fn sky4_hud_update_system(
 pub fn sky4_hud_layout_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     sprites: Query<(Entity, &HudSprite)>,
-    mut nodes: Query<(
-        &mut Node,
-        &mut ZIndex,
-        Option<&HudText>,
-        Option<&mut TextFont>,
-    )>,
+    mut nodes: Query<(&mut Node, &mut ZIndex)>,
 ) {
     let (w, h) = windows
         .get_single()
@@ -625,7 +718,7 @@ pub fn sky4_hud_layout_system(
         let Some((min, prio)) = resolve(entity, &sprites, screen, 0) else {
             continue;
         };
-        let Ok((mut node, mut z, text, font)) = nodes.get_mut(entity) else {
+        let Ok((mut node, mut z)) = nodes.get_mut(entity) else {
             continue;
         };
         let px = |v: f32| Val::Px((v * scale).round());
@@ -634,10 +727,104 @@ pub fn sky4_hud_layout_system(
         node.width = px(sprite.size.x);
         node.height = px(sprite.size.y);
         *z = ZIndex(-prio);
-        if let (Some(text), Some(mut font)) = (text, font) {
-            font.font_size = text.point_size * scale;
+    }
+}
+
+/// Rebuilds the glyph sprites of texts whose string changed.
+pub fn sky4_hud_text_system(
+    mut commands: Commands,
+    assets: Option<Res<Sky4HudAssets>>,
+    root: Query<Entity, With<Sky4HudRoot>>,
+    mut texts: Query<
+        (Entity, &HudText, &HudSprite, &HudString, &mut HudGlyphs),
+        Changed<HudString>,
+    >,
+) {
+    let (Some(font), Ok(root)) = (
+        assets.as_ref().and_then(|a| a.font.as_ref()),
+        root.get_single(),
+    ) else {
+        return;
+    };
+    for (entity, text, sprite, string, mut glyphs) in &mut texts {
+        for old in glyphs.0.drain(..) {
+            commands.entity(old).despawn_recursive();
+        }
+        for (pos, size, rect) in font.layout(&string.0, text.point_size, text.justify, sprite.size)
+        {
+            let glyph = commands
+                .spawn((
+                    absolute_node(),
+                    ImageNode {
+                        image: font.image.clone(),
+                        color: text.color,
+                        rect: Some(rect),
+                        ..default()
+                    },
+                    HudSprite::new(Some(entity), size)
+                        .align(Align::TopLeft, Align::TopLeft)
+                        .at(pos.x, pos.y),
+                    HudGlyph,
+                ))
+                .id();
+            commands.entity(root).add_child(glyph);
+            glyphs.0.push(glyph);
         }
     }
+}
+
+/// Loads the hero's portrait (`<id>_MinionHead` in its `level.bld`) when the hero changes.
+pub fn sky4_hud_portrait_system(
+    asset_server: Option<Res<CharacterAssetServer>>,
+    mut images: ResMut<Assets<Image>>,
+    hero: Query<&ActorIdentity, With<Hero>>,
+    mut portrait: Query<(&mut ImageNode, &mut Visibility), With<HudPortrait>>,
+    mut loaded: Local<Option<String>>,
+) {
+    let model = hero.get_single().ok().and_then(|id| id.model_path.clone());
+    if *loaded == model {
+        return;
+    }
+    let handle = model
+        .as_deref()
+        .zip(asset_server.as_ref())
+        .and_then(|(path, server)| {
+            let data = server
+                .loader
+                .lock()
+                .ok()?
+                .vfs()
+                .read_from_archive(path, "level.bld")
+                .ok()?;
+            let lib = SpriteLibrary::parse(&data)?;
+            let (w, h, px) = portrait_sprite(&lib.sprites)?.decode_rgba(&data)?;
+            Some(images.add(rgba8_to_bevy_image(w, h, px)))
+        });
+    for (mut image, mut vis) in &mut portrait {
+        *vis = if handle.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        image.image = handle.clone().unwrap_or_default();
+    }
+    *loaded = model;
+}
+
+/// The default portrait of a character file: `NNN_MinionHead`, else any portrait sprite.
+pub fn portrait_sprite(sprites: &[SpriteDef]) -> Option<&SpriteDef> {
+    let has_image = |s: &&SpriteDef| s.image.is_some();
+    sprites
+        .iter()
+        .filter(has_image)
+        .find(|s| s.name.to_ascii_lowercase().ends_with("_minionhead"))
+        .or_else(|| {
+            sprites.iter().filter(has_image).find(|s| {
+                s.texture_path
+                    .as_deref()
+                    .is_some_and(|p| p.to_ascii_lowercase().contains("/portraits/"))
+            })
+        })
 }
 
 /// Top-left and accumulated priority of a sprite, following its parent chain.
@@ -745,9 +932,18 @@ mod tests {
                 HudHealthFill,
             ))
             .id();
-        let coin = app.world_mut().spawn((Text::new(""), HudCoinText)).id();
-        let name = app.world_mut().spawn((Text::new(""), HudNameText)).id();
-        let hp = app.world_mut().spawn((Text::new(""), HudHpText)).id();
+        let coin = app
+            .world_mut()
+            .spawn((HudString::default(), HudCoinText))
+            .id();
+        let name = app
+            .world_mut()
+            .spawn((HudString::default(), HudNameText))
+            .id();
+        let hp = app
+            .world_mut()
+            .spawn((HudString::default(), HudHpText))
+            .id();
 
         app.update();
 
@@ -763,9 +959,9 @@ mod tests {
             w.get::<Node>(fill).unwrap().width,
             Val::Px(((HEALTH_BAR_WIDTH - 4.0) * 0.2).round())
         );
-        assert_eq!(w.get::<Text>(coin).unwrap().0, "42");
-        assert_eq!(w.get::<Text>(name).unwrap().0, "Snap Shot");
-        assert_eq!(w.get::<Text>(hp).unwrap().0, "20");
+        assert_eq!(w.get::<HudString>(coin).unwrap().0, "42");
+        assert_eq!(w.get::<HudString>(name).unwrap().0, "Snap Shot");
+        assert_eq!(w.get::<HudString>(hp).unwrap().0, "20");
     }
 
     #[test]
@@ -793,9 +989,6 @@ mod tests {
             .spawn((
                 absolute_node(),
                 ZIndex::default(),
-                Text::new(""),
-                TextFont::default(),
-                HudText { point_size: 10.0 },
                 HudSprite::new(Some(parent), Vec2::new(10.0, 10.0)).prio(-2),
             ))
             .id();
@@ -808,6 +1001,132 @@ mod tests {
         assert_eq!(node.left, Val::Px((16.0 + 45.0) * 2.0));
         assert_eq!(node.top, Val::Px((480.0 - 16.0 - 50.0 + 20.0) * 2.0));
         assert_eq!(*w.get::<ZIndex>(child).unwrap(), ZIndex(27));
-        assert_eq!(w.get::<TextFont>(child).unwrap().font_size, 20.0);
+    }
+
+    fn test_font() -> HudFont {
+        let glyph = |advance: f32, w: f32, u: f32| skylands_formats::Glyph {
+            advance,
+            offset: [0.0, 9.0],
+            size: [w, 36.0],
+            uv_min: [u, 0.5],
+            uv_max: [u + 0.25, 0.75],
+        };
+        let mut glyphs = std::collections::HashMap::new();
+        glyphs.insert('A', glyph(32.0, 34.0, 0.0));
+        glyphs.insert('B', glyph(24.0, 24.0, 0.5));
+        glyphs.insert(' ', glyph(16.0, 0.0, 0.0));
+        HudFont {
+            font: BitmapFont {
+                point_size: 56.0,
+                glyphs,
+                image: None,
+            },
+            image: Handle::default(),
+            sheet_size: Vec2::new(512.0, 256.0),
+        }
+    }
+
+    #[test]
+    fn font_layout_scales_and_justifies() {
+        let font = test_font();
+        // 28pt = half the 56pt font; text box 100 x 28.
+        let left = font.layout("A B", 28.0, JustifyText::Left, Vec2::new(100.0, 28.0));
+        // Space has no quad but advances.
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].0, Vec2::new(0.0, 4.5));
+        assert_eq!(left[0].1, Vec2::new(17.0, 18.0));
+        assert_eq!(left[0].2, Rect::new(0.0, 128.0, 128.0, 192.0));
+        assert_eq!(left[1].0.x, 24.0);
+
+        // Total width (32 + 16 + 24) / 2 = 36.
+        let right = font.layout("A B", 28.0, JustifyText::Right, Vec2::new(100.0, 28.0));
+        assert_eq!(right[0].0.x, 64.0);
+        let center = font.layout("A B", 28.0, JustifyText::Center, Vec2::new(100.0, 28.0));
+        assert_eq!(center[0].0.x, 32.0);
+        // Missing glyphs are skipped.
+        assert!(font
+            .layout("?", 28.0, JustifyText::Left, Vec2::ONE)
+            .is_empty());
+    }
+
+    #[test]
+    fn text_system_spawns_tinted_glyphs_on_change() {
+        let mut app = App::new();
+        app.insert_resource(Sky4HudAssets {
+            element_icons: Vec::new(),
+            font: Some(test_font()),
+        })
+        .add_systems(Update, sky4_hud_text_system);
+        app.world_mut().spawn(Sky4HudRoot);
+        let red = Color::srgb(1.0, 0.0, 0.0);
+        let text = app
+            .world_mut()
+            .spawn((
+                HudText {
+                    point_size: 28.0,
+                    justify: JustifyText::Left,
+                    color: red,
+                },
+                HudString("AB".into()),
+                HudGlyphs::default(),
+                HudSprite::new(None, Vec2::new(100.0, 28.0)),
+            ))
+            .id();
+        app.update();
+
+        let glyphs = app.world().get::<HudGlyphs>(text).unwrap().0.clone();
+        assert_eq!(glyphs.len(), 2);
+        let node = app.world().get::<ImageNode>(glyphs[1]).unwrap();
+        assert_eq!(node.color, red);
+        assert_eq!(node.rect, Some(Rect::new(256.0, 128.0, 384.0, 192.0)));
+        let sprite = app.world().get::<HudSprite>(glyphs[1]).unwrap();
+        assert_eq!(sprite.parent, Some(text));
+        assert_eq!(sprite.location, Vec2::new(16.0, 4.5));
+
+        // A new string replaces the old glyphs.
+        app.world_mut().get_mut::<HudString>(text).unwrap().0 = "B".into();
+        app.update();
+        let new = app.world().get::<HudGlyphs>(text).unwrap().0.clone();
+        assert_eq!(new.len(), 1);
+        assert!(app.world().get_entity(glyphs[0]).is_err());
+    }
+
+    #[test]
+    fn portrait_prefers_default_minion_head() {
+        let def = |name: &str, path: &str, image: bool| SpriteDef {
+            name: name.into(),
+            texture_path: Some(path.into()),
+            natural_size: [142.2, 71.1],
+            image: image.then_some(skylands_formats::IgzImage2 {
+                offset: 0,
+                width: 142,
+                height: 71,
+                depth: 1,
+                mipmap_count: 1,
+                array: 1,
+                format: 0,
+                texture_offset: 0,
+                texture_size: 0,
+            }),
+            alpha_image: None,
+        };
+        let sprites = [
+            def(
+                "016_MinionHead_Series3",
+                "UI_SKY4/HUD/Portraits/2014/256x128/a.png",
+                true,
+            ),
+            def(
+                "016_MinionHead",
+                "UI_SKY4/HUD/Portraits/2014/256x128/b.png",
+                true,
+            ),
+        ];
+        assert_eq!(portrait_sprite(&sprites).unwrap().name, "016_MinionHead");
+        let sprites = [
+            def("016_MinionHead", "x.png", false),
+            def("Other", "UI_SKY4/HUD/Portraits/2014/256x128/c.png", true),
+        ];
+        assert_eq!(portrait_sprite(&sprites).unwrap().name, "Other");
     }
 }

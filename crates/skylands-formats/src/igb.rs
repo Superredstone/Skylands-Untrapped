@@ -2455,7 +2455,7 @@ impl IgbModel {
     }
 
     #[inline]
-    fn read_u16(buf: &[u8], offset: usize, endian: IgbEndian) -> u16 {
+    pub(crate) fn read_u16(buf: &[u8], offset: usize, endian: IgbEndian) -> u16 {
         if offset + 2 > buf.len() {
             return 0;
         }
