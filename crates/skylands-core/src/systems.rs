@@ -1477,6 +1477,7 @@ pub fn spawn_level_content(
     let markers = model.extract_level_markers();
     let mut marker_id_counter = 5000u32;
     let mut has_spawn = false;
+    let mut tuning: Option<EnemyTuning> = None;
 
     for marker in &markers {
         match marker.kind {
@@ -1562,11 +1563,15 @@ pub fn spawn_level_content(
                 marker_id_counter += 1;
             }
             skylands_formats::igb::MarkerKind::Enemy(class) => {
+                let stats = tuning
+                    .get_or_insert_with(|| level_enemy_tuning(loader, &path))
+                    .get(class);
                 spawn_enemy(
                     commands,
                     marker_id_counter,
                     &marker.name,
                     class,
+                    stats,
                     Vec3::from(marker.position),
                 );
                 marker_id_counter += 1;
@@ -1586,11 +1591,25 @@ pub fn spawn_level_content(
     true
 }
 
+/// Enemy stats from the level's scripts and `global.bld`; defaults when either is
+/// missing or the evaluation fails (hub levels have no "Game - Define Enemy Stats").
+fn level_enemy_tuning(loader: &skylands_formats::AssetLoader, level_path: &str) -> EnemyTuning {
+    let parse = |p: &str| {
+        let bytes = loader.load_raw(p).ok()?;
+        skylands_formats::ScriptSet::parse(&bytes)
+    };
+    parse(level_path)
+        .zip(parse("global.bld"))
+        .and_then(|(level, global)| EnemyTuning::from_scripts(&level, &global).ok())
+        .unwrap_or_default()
+}
+
 pub fn spawn_enemy(
     commands: &mut Commands,
     id: u32,
     name: &str,
     class: EnemyClass,
+    stats: EnemyClassStats,
     pos: Vec3,
 ) -> Entity {
     commands
@@ -1604,10 +1623,10 @@ pub fn spawn_enemy(
                 model_path: None,
                 texture_path: None,
             },
-            Enemy::new(class),
+            Enemy::new(class, stats.damage),
             Health {
-                current: Enemy::HEALTH,
-                max: Enemy::HEALTH,
+                current: stats.health,
+                max: stats.health,
             },
             Transform::from_translation(pos),
             CharacterCollider::default(),
@@ -2690,7 +2709,8 @@ mod tests {
 
     fn spawn_test_enemy(app: &mut App, class: EnemyClass, pos: Vec3) -> Entity {
         let mut commands = app.world_mut().commands();
-        let e = spawn_enemy(&mut commands, 9000, "Enemy_S4_Test", class, pos);
+        let stats = EnemyTuning::default().get(class);
+        let e = spawn_enemy(&mut commands, 9000, "Enemy_S4_Test", class, stats, pos);
         app.world_mut().flush();
         e
     }
@@ -2754,8 +2774,43 @@ mod tests {
         assert!(hero_health(&app, hero) < 100, "projectile hit the hero");
         assert_eq!(
             app.world().get::<Health>(ally).unwrap().current,
-            Enemy::HEALTH,
+            EnemyTuning::default().near.health,
             "hostile projectile passes through enemies"
+        );
+    }
+
+    #[test]
+    fn test_level_enemy_tuning_from_scripts() {
+        let empty = skylands_formats::AssetLoader::new(Default::default());
+        assert_eq!(
+            level_enemy_tuning(&empty, "Level_302_Chompywurm.bld"),
+            EnemyTuning::default()
+        );
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("permanent/global.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("permanent/global.bld")).unwrap();
+        loader
+            .mount(dir.join("level/Level_302_Chompywurm.bld"))
+            .unwrap();
+        let t = level_enemy_tuning(&loader, "Level_302_Chompywurm.bld");
+        // Near: 10 * 5.5 HP, 100 / 9 dmg. Far: 10 * 4 HP, 100 / 15 dmg.
+        assert_eq!(
+            t.near,
+            EnemyClassStats {
+                health: 55,
+                damage: 11
+            }
+        );
+        assert_eq!(
+            t.far,
+            EnemyClassStats {
+                health: 40,
+                damage: 7
+            }
         );
     }
 
@@ -2767,7 +2822,7 @@ mod tests {
             .resource_mut::<Events<DamageEvent>>()
             .send(DamageEvent {
                 target: enemy,
-                damage: Enemy::HEALTH,
+                damage: EnemyTuning::default().near.health,
                 position: Vec3::new(3.0, 0.0, 0.0),
             });
         step_fixed(&mut app);

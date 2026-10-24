@@ -136,7 +136,7 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [x] Movement from DOL `ModelParameters` (`ModelParameters::default()` / `from_model`):
     - Units reversed via DOL `0x80586ef4`: engine kinematics are imperial (`ft / sec`, `ft / sec / sec`, `deg / sec`). Converted via `FEET_TO_UNITS = 0.3048`: ground max speed 20 ft/s = 6.10 m/s (explaining our earlier 5.0 guess), jump initial speed 32 ft/s = 9.75 m/s (explaining earlier 9.0 impulse), ground accel 160 ft/s² = 48.77 m/s², ground decel 80 ft/s² = 24.38 m/s², turn rate 720 deg/s, air turn rate 1440 deg/s.
     - Wired into `hero_movement_system`: steering target velocity with rate-limited acceleration/deceleration, smooth yaw rotation using `turn_rate`, and jump impulse from `jump_initial_speed`.
-  - [ ] HP/XP curve: needs the script VM (`OpUseMacro` / `ValueRHSVariant` arithmetic) in `global.bld`, so it moves to Phase 5 `ScriptSet`.
+  - [x] HP/XP curve data: `LevelupTable` (Init_Setup "Portal - Define Levelup Table": +11.1% max HP per level, 19 XP thresholds). Not yet applied to heroes (no XP/levels in core), see `agent/SCRIPT_VM.md`.
   - `ModelParameters` defaults come from DOL ctor `0x805a89fc` (SDA2 `r2` = `0x806f5a40`, `.sdata2` `0x806f05d4..`) with string unit definitions in `0x80586ef4`. Script base speed (`global.bld` `Return Value - Base Speed` 10/22) parsed when present.
   - Ghidra: `tools/rea-bridge/FindStatTables.java` (stat-string xrefs plus the `ModelParameters` ctor; writes local-only `/tmp/skylands-re/stats_dump.txt`).
 - [x] Villain timer/energy, trap return rules, trapping sequence:
@@ -158,15 +158,20 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - `Enemy` component (`Idle -> Chase -> Windup -> Recover`), `enemy_ai_system` after `hero_combat_system`. It targets the nearest hero (ties go to entity order) and steers with `ModelParameters` accel. Near = melee `DamageEvent`, Far = `Projectile { hostile: true }` that only hits heroes. No RNG, so the game stays deterministic.
   - Enemy defeat: `Combat.ai` "Creature Death Generate Loot" -> `LootSystem.ai` `LootValue = 5`, one `Collectible { value: 5 }`. Fixed, no rarity/drop-rate roll.
   - Hero defeat: `Portal_Manager.ai` "Tag Defeated" / "Request Player Needs Tag Message". The hero despawns, its character ID goes to `PortalGameplayState.defeated_heroes`, the same tag is refused until the level changes, and a prompt asks for another Skylander.
-  - Placeholders (need VM: `Minion_Tuning.ai` HP multiplier / difficulty formulas): enemy HP 100, melee 25, ranged 20, windup 0.5 s, recover 1.0 s, melee reach 1.5.
+  - Enemy HP/damage come from the script VM (`EnemyTuning`, Phase 5); fallback 100 HP, melee 25, ranged 20. Still fixed: windup 0.5 s, recover 1.0 s, melee reach 1.5.
   - Tests: `test_enemy_script_classification`, `test_level_enemy_markers` (ROM), `test_melee_enemy_chases_and_hits_hero`, `test_enemy_ignores_hero_outside_aggro_range`, `test_ranged_enemy_projectile_hurts_hero_not_enemies`, `test_enemy_defeat_drops_loot`, `test_defeated_hero_is_out_until_level_change`, `test_enemy_ai_is_deterministic`.
 - [ ] Save profile layout.
 - Constants go into Rust with a `// DOL 0x80xxxxxx` source note; no pasted decompiler output.
 
 ### Phase 5 - Scripts, text, audio, misc
-- [ ] `ScriptSet` / script VM (see `tools/igArchiveExtractor/Types/ScriptSet.cs`).
+- [x] `ScriptSet` / script VM (`skylands-formats/src/script.rs`, notes `agent/SCRIPT_VM.md`).
+  - Decoder for `tfbScriptInfo` op lists (set/inc/dec/check/loop/jump/macro define/use/params), `global.bld` handle resolution via `EXID` namespace + `TOOR` roots.
+  - `Vm`: deterministic evaluator (step and depth budget, unbound engine reads = 0 and listed). Reference/spawn/move ops are not executed.
+  - Tests: `vm_*` (synthetic), `rom_global_handles_resolve`, `rom_enemy_stats`, `rom_levelup_table`, core `test_level_enemy_tuning_from_scripts`.
 - [ ] Encounter arenas / waves (`Arena_Challenge_*`, `_ArenaMaster2.ai`, `BattleMaster.ai`, `Enemy_Setup_00x_Controller.ai`), after the VM.
-- [ ] Enemy tuning from `Minion_Tuning.ai`, loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate", after the VM.
+- [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
+  - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
+- [ ] Loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate" (needs `kRHSfuncRandom` + a seeded RNG).
 - [ ] Localization strings (EU en).
 - [ ] Sound bank to event mapping.
 - [ ] Mock tag persistence (`.tag`). Real tag write-back + hotplug need human review (portal protocol).

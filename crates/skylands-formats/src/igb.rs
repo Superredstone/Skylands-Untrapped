@@ -1150,7 +1150,11 @@ pub struct IgzFile {
     pub sections: Vec<IgzChunkDescriptor>,
     pub string_table: Vec<String>,
     pub exid_formats: Vec<u32>,
+    /// `EXID` second word: FNV-1a of the lower-case source file name (e.g. `global.bld`).
+    pub exid_namespaces: Vec<u32>,
     pub tmhn_entries: Vec<(usize, usize)>,
+    /// `TOOR` root object list (file offsets), the targets of cross-file `EXID` indices.
+    pub roots: Vec<usize>,
     /// `EXNM` handle index -> external object name.
     pub external_types: Vec<String>,
     pub objects: Option<IgzObjectList>,
@@ -3513,24 +3517,12 @@ impl IgbModel {
         let version = igz_header.version;
         let sections = &igz_header.descriptors;
 
-        #[derive(Debug, Clone)]
-        pub struct IgzFixupTable {
-            pub tag: [u8; 4],
-            pub count: u32,
-            pub size: u32,
-            pub offset: usize,
-        }
-
-        #[allow(unused_variables)]
-        let _ = |t: &IgzFixupTable| {
-            let _ = (t.tag, t.count, t.size, t.offset);
-        };
-
-        let mut _fixup_tables = Vec::new();
         let mut string_table = Vec::new();
         let mut type_table = Vec::new();
         let mut rvtb_offsets = Vec::new();
         let mut exid_formats = Vec::new();
+        let mut exid_namespaces = Vec::new();
+        let mut root_word = None;
         let mut tmhn_entries = Vec::new();
         let mut exnm_names = Vec::new();
 
@@ -3562,6 +3554,7 @@ impl IgbModel {
                             | b"NHMT"
                             | b"EXNM"
                             | b"MNXE"
+                            | b"TOOR"
                     );
 
                     if is_match {
@@ -3580,13 +3573,6 @@ impl IgbModel {
                         };
                         let header_len = if version <= 6 { 24 } else { 16 };
                         if (size as usize) <= sec0_data.len().saturating_sub(pos) {
-                            _fixup_tables.push(IgzFixupTable {
-                                tag,
-                                count,
-                                size,
-                                offset: sec0.offset + pos + header_len,
-                            });
-
                             let payload_start = pos + (start_of_data as usize).max(header_len);
                             let payload_end = (pos + size as usize).min(sec0_data.len());
                             let payload = if payload_start <= payload_end {
@@ -3626,8 +3612,15 @@ impl IgbModel {
                                     if k * 8 + 4 <= payload.len() {
                                         let hash = Self::read_u32(payload, k * 8, endian);
                                         exid_formats.push(hash);
+                                        exid_namespaces.push(Self::read_u32(
+                                            payload,
+                                            k * 8 + 4,
+                                            endian,
+                                        ));
                                     }
                                 }
+                            } else if tag == *b"TOOR" && payload.len() >= 4 {
+                                root_word = Some(Self::read_u32(payload, 0, endian));
                             } else if tag == *b"TMHN" || tag == *b"NHMT" {
                                 for k in 0..(count as usize) {
                                     if k * 8 + 8 <= payload.len() {
@@ -3694,14 +3687,29 @@ impl IgbModel {
             .iter()
             .map(|&i: &usize| string_table.get(i).cloned().unwrap_or_default())
             .collect();
-        let _ = &_fixup_tables;
+        // `TOOR` -> root `igObjectList` (`_count` +0x08, `_data` +0x14).
+        let ptr = |w: u32| -> Option<usize> {
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let word = |o: usize| data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian));
+        let roots = root_word
+            .and_then(ptr)
+            .and_then(|list| {
+                let n = word(list + 0x08)? as usize;
+                let arr = ptr(word(list + 0x14)?)?;
+                Some((0..n).filter_map(|k| ptr(word(arr + k * 4)?)).collect())
+            })
+            .unwrap_or_default();
         Ok(IgzFile {
             endian,
             version,
             sections: igz_header.descriptors.clone(),
             string_table,
             exid_formats,
+            exid_namespaces,
             tmhn_entries,
+            roots,
             external_types,
             objects: igz_objects,
         })
@@ -3717,6 +3725,7 @@ impl IgbModel {
             tmhn_entries,
             external_types,
             objects: igz_objects,
+            ..
         } = Self::scan_igz(data)?;
         let sections = &sections[..];
 

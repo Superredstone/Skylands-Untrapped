@@ -4,6 +4,7 @@ pub mod fsb;
 pub mod havok;
 pub mod igb;
 pub mod loader;
+pub mod script;
 pub mod texture;
 
 pub use archive::{hash_path, ArchiveMount, ArchiveReader, FileEntry};
@@ -16,11 +17,12 @@ pub use igb::{
     AttrSemantic, Bone, BoneTrack, CollisionPrimitive, CollisionShapeType, IgbAttrDesc,
     IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
     IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
-    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzHeader, IgzImage2, IgzObject, IgzObjectList,
-    IgzFile, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind, SceneInstance,
-    ScriptValue, Skeleton,
+    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzFile, IgzHeader, IgzImage2, IgzObject,
+    IgzObjectList, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind,
+    SceneInstance, ScriptValue, Skeleton,
 };
 pub use loader::{AssetError, AssetLoader};
+pub use script::{enemy_stats, EnemyStats, LevelupTable, ScriptSet, Vm, VmError};
 pub use texture::{decode_cmpr, decode_dxt1, decode_dxt1_block, decode_rgb565, TextureError};
 
 #[cfg(test)]
