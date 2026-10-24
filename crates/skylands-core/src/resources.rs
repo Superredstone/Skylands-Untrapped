@@ -225,6 +225,33 @@ impl Default for EnvironmentCollision {
     }
 }
 
+/// Conversation in progress with an `Npc`; the HUD draws `current_line`.
+#[derive(Resource, Debug, Clone, PartialEq, Default)]
+pub struct ActiveDialogue {
+    pub npc: Option<Entity>,
+    /// NPC display name, used when a line has no speaker.
+    pub npc_name: String,
+    pub lines: Vec<skylands_formats::DialogueLine>,
+    pub line: usize,
+}
+
+impl ActiveDialogue {
+    pub fn is_active(&self) -> bool {
+        self.npc.is_some()
+    }
+
+    /// `(speaker, text)` of the line on screen.
+    pub fn current_line(&self) -> Option<(&str, &str)> {
+        self.npc?;
+        let l = self.lines.get(self.line)?;
+        Some((l.speaker.as_deref().unwrap_or(&self.npc_name), &l.text))
+    }
+
+    pub fn close(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct GameStats {
     pub coins: u32,

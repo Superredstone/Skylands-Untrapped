@@ -7,6 +7,7 @@ pub mod loader;
 pub mod script;
 pub mod script_runtime;
 pub mod sprite;
+pub mod text;
 pub mod texture;
 
 pub use archive::{hash_path, ArchiveMount, ArchiveReader, FileEntry};
@@ -14,9 +15,9 @@ pub use dsp::{decode_dsp_adpcm, DspChannelState, DspError};
 pub use fsb::{parse_fsb5, AudioClip, FsbError, FsbHeader};
 pub use havok::{parse_havok_animation, parse_havok_skeleton, HavokRig, HAVOK_TAG};
 pub use igb::{
-    compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, quat_to_mat4, sample_quat,
-    sample_vec3, slerp_quat, transform_point, ActorPlacement, AnimationClip, AttrFormat,
-    AttrSemantic, Bone, BoneTrack, CollisionPrimitive, CollisionShapeType, IgbAttrDesc,
+    compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, npc_name, quat_to_mat4,
+    sample_quat, sample_vec3, slerp_quat, transform_point, ActorPlacement, AnimationClip,
+    AttrFormat, AttrSemantic, Bone, BoneTrack, CollisionPrimitive, CollisionShapeType, IgbAttrDesc,
     IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
     IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
     IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzFile, IgzHeader, IgzImage2, IgzObject,
@@ -27,6 +28,10 @@ pub use loader::{AssetError, AssetLoader};
 pub use script::{enemy_stats, EnemyStats, LevelupTable, ScriptSet, Vm, VmError};
 pub use script_runtime::{ActorScriptState, ScriptProgram};
 pub use sprite::{SpriteDef, SpriteLibrary};
+pub use text::{
+    npc_conversations, npc_dialogue, parse_language_pack, Conversation, DialogueLine, LevelString,
+    LevelText,
+};
 pub use texture::{
     decode_cmpr, decode_dxt1, decode_dxt1_block, decode_gx_rgba8, decode_rgb565, TextureError,
 };

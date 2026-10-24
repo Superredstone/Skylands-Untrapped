@@ -99,3 +99,10 @@ pub struct LevelChangedEvent {
     pub previous_level: String,
     pub new_level: String,
 }
+
+/// The hero started talking to an NPC.
+#[derive(Event, Debug, Clone, PartialEq)]
+pub struct NpcInteractEvent {
+    pub npc: Entity,
+    pub name: String,
+}

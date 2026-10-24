@@ -15,7 +15,10 @@ pub use debug_menu::{
     debug_menu_interaction_system, debug_menu_telemetry_system, debug_menu_toggle_system,
     setup_debug_menu_ui, DebugMenuState, DebugTab,
 };
-pub use hud::{damage_popup_ui_system, hud_update_system, setup_hud_ui};
+pub use hud::{
+    damage_popup_ui_system, dialogue_box_system, hud_update_system, setup_dialogue_box,
+    setup_hud_ui,
+};
 pub use mesh_conversion::{
     combine_or_normalize_model_meshes, combine_scene_instances_to_bevy, igb_character_submeshes,
     igb_mesh_to_bevy, igb_model_to_bevy_mesh, igb_model_to_bevy_meshes, normalize_model_mesh,
@@ -62,6 +65,7 @@ impl Plugin for SkylandsRenderPlugin {
                     setup_lighting,
                     setup_environment_and_assets,
                     setup_hud_ui,
+                    setup_dialogue_box,
                     setup_sky4_hud,
                     setup_debug_menu_ui,
                 ),
@@ -82,6 +86,7 @@ impl Plugin for SkylandsRenderPlugin {
                         .after(orbit_cam_system),
                     viewer_controls_system,
                     hud_update_system,
+                    dialogue_box_system,
                     damage_popup_ui_system,
                     (sky4_hud_update_system, sky4_hud_layout_system).chain(),
                     debug_menu_toggle_system,

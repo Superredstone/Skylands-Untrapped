@@ -1,7 +1,9 @@
 use crate::camera::MainCamera;
 use crate::viewer::ViewerSettings;
 use bevy::prelude::*;
-use skylands_core::{CaptureProgress, DamagePopup, GameStats, ZoneTransitionProgress};
+use skylands_core::{
+    ActiveDialogue, CaptureProgress, DamagePopup, GameStats, ZoneTransitionProgress,
+};
 
 #[derive(Component)]
 pub struct HudCaptureBanner;
@@ -26,6 +28,124 @@ pub struct HudViewerCard;
 
 #[derive(Component)]
 pub struct HudViewerText;
+
+/// Bottom-of-screen box for NPC conversations (`ActiveDialogue`).
+#[derive(Component)]
+pub struct HudDialogueBox;
+
+#[derive(Component)]
+pub struct HudDialogueSpeaker;
+
+#[derive(Component)]
+pub struct HudDialogueText;
+
+#[derive(Component)]
+pub struct HudDialogueHint;
+
+pub fn setup_dialogue_box(mut commands: Commands) {
+    commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            position_type: PositionType::Absolute,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::FlexEnd,
+            ..default()
+        })
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    width: Val::Percent(70.0),
+                    max_width: Val::Px(820.0),
+                    min_height: Val::Px(110.0),
+                    padding: UiRect::axes(Val::Px(22.0), Val::Px(14.0)),
+                    margin: UiRect::bottom(Val::Px(28.0)),
+                    border: UiRect::all(Val::Px(2.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.05, 0.07, 0.14, 0.94)),
+                BorderColor(Color::srgb(0.95, 0.75, 0.25)),
+                BorderRadius::all(Val::Px(10.0)),
+                Visibility::Hidden,
+                HudDialogueBox,
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: 17.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(1.0, 0.8, 0.3)),
+                    HudDialogueSpeaker,
+                ));
+                b.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.95, 0.96, 1.0)),
+                    HudDialogueText,
+                ));
+                b.spawn((
+                    Node {
+                        align_self: AlignSelf::FlexEnd,
+                        ..default()
+                    },
+                    Text::new(""),
+                    TextFont {
+                        font_size: 12.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.6, 0.75, 0.95)),
+                    HudDialogueHint,
+                ));
+            });
+        });
+}
+
+#[allow(clippy::type_complexity)]
+pub fn dialogue_box_system(
+    dialogue: Res<ActiveDialogue>,
+    mut boxes: Query<&mut Visibility, With<HudDialogueBox>>,
+    mut texts: Query<(
+        &mut Text,
+        Has<HudDialogueSpeaker>,
+        Has<HudDialogueText>,
+        Has<HudDialogueHint>,
+    )>,
+) {
+    let line = dialogue.current_line();
+    for mut vis in &mut boxes {
+        *vis = if line.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    let Some((speaker, body)) = line else {
+        return;
+    };
+    let last = dialogue.line + 1 >= dialogue.lines.len();
+    let hint = if last { "[A] Close" } else { "[A] Next" };
+    for (mut text, is_speaker, is_body, is_hint) in &mut texts {
+        let want = if is_speaker {
+            speaker
+        } else if is_body {
+            body
+        } else if is_hint {
+            hint
+        } else {
+            continue;
+        };
+        if text.0 != want {
+            text.0 = want.to_string();
+        }
+    }
+}
 
 pub fn setup_hud_ui(mut commands: Commands) {
     // Root container
@@ -301,6 +421,76 @@ pub fn damage_popup_ui_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dialogue_box_shows_current_line() {
+        let mut app = App::new();
+        app.init_resource::<ActiveDialogue>()
+            .add_systems(Startup, setup_dialogue_box)
+            .add_systems(Update, dialogue_box_system);
+        app.update();
+        let hidden = |app: &mut App| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Visibility, With<HudDialogueBox>>();
+            *q.single(app.world()) == Visibility::Hidden
+        };
+        assert!(hidden(&mut app));
+
+        let npc = app.world_mut().spawn_empty().id();
+        *app.world_mut().resource_mut::<ActiveDialogue>() = ActiveDialogue {
+            npc: Some(npc),
+            npc_name: "Flynn".into(),
+            lines: vec![
+                skylands_formats::DialogueLine {
+                    speaker: None,
+                    text: "Boom!".into(),
+                },
+                skylands_formats::DialogueLine {
+                    speaker: Some("Mags".into()),
+                    text: "Exactly.".into(),
+                },
+            ],
+            line: 0,
+        };
+        app.update();
+        assert!(!hidden(&mut app));
+        let text = |app: &mut App, marker: fn(&World, Entity) -> bool| {
+            let mut q = app.world_mut().query::<(Entity, &Text)>();
+            let w = app.world();
+            q.iter(w)
+                .find(|(e, _)| marker(w, *e))
+                .map(|(_, t)| t.0.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            text(&mut app, |w, e| w.get::<HudDialogueSpeaker>(e).is_some()),
+            "Flynn"
+        );
+        assert_eq!(
+            text(&mut app, |w, e| w.get::<HudDialogueText>(e).is_some()),
+            "Boom!"
+        );
+        assert_eq!(
+            text(&mut app, |w, e| w.get::<HudDialogueHint>(e).is_some()),
+            "[A] Next"
+        );
+
+        app.world_mut().resource_mut::<ActiveDialogue>().line = 1;
+        app.update();
+        assert_eq!(
+            text(&mut app, |w, e| w.get::<HudDialogueSpeaker>(e).is_some()),
+            "Mags"
+        );
+        assert_eq!(
+            text(&mut app, |w, e| w.get::<HudDialogueHint>(e).is_some()),
+            "[A] Close"
+        );
+
+        app.world_mut().resource_mut::<ActiveDialogue>().close();
+        app.update();
+        assert!(hidden(&mut app));
+    }
 
     #[test]
     fn test_hud_update_prompt() {

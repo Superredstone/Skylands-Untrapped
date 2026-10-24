@@ -657,6 +657,19 @@ pub struct DamagePopup {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelEntity;
 
+/// Talkable level character (`MarkerKind::Npc`). The level draws its model.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Npc {
+    pub name: String,
+    /// Hero distance at which the talk prompt shows.
+    pub talk_radius: f32,
+    /// From the level script and language pack (`skylands_formats::npc_dialogue`).
+    /// Empty = nothing to say, no talk prompt.
+    pub conversations: Vec<skylands_formats::Conversation>,
+    /// Conversation the next talk plays; talks cycle through them in order.
+    pub next_conversation: usize,
+}
+
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct ZoneTrigger {
     pub id: u32,

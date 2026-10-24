@@ -408,6 +408,8 @@ pub enum MarkerKind {
     TriggerZone,
     Doorway,
     Enemy(EnemyClass),
+    /// Talkable character (`NPC_<Name>.ai`, shop keepers).
+    Npc,
     Other,
 }
 
@@ -482,6 +484,41 @@ impl EnemyClass {
     }
 }
 
+/// Display name of the NPC an `.ai` script drives, `None` if the script is not an NPC.
+/// Hub: `NPC_<Name>[_<Variant>].ai`, `Auric.ai` (store), `Persephone_2014.ai` (upgrades).
+/// `NPC_WantedPosters.ai` is a board without a model, not a character.
+pub fn npc_name(script_path: &str) -> Option<String> {
+    let file = script_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(script_path);
+    let stem = file.strip_suffix(".ai").unwrap_or(file);
+    let lower = stem.to_ascii_lowercase();
+    npc_name_from_stem(&lower)?;
+    let name = match stem.get(..4) {
+        Some(p) if p.eq_ignore_ascii_case("npc_") => stem[4..].split('_').next()?,
+        _ => stem.split('_').next()?,
+    };
+    Some(match name {
+        "TBone" => "T-Bone".to_string(),
+        n => n.to_string(),
+    })
+}
+
+/// Lower-case script stem -> lower-case NPC name.
+fn npc_name_from_stem(stem: &str) -> Option<&str> {
+    match stem {
+        "auric" => Some("auric"),
+        "persephone_2014" => Some("persephone"),
+        "npc_wantedposters" => None,
+        _ => stem
+            .strip_prefix("npc_")?
+            .split('_')
+            .next()
+            .filter(|n| !n.is_empty()),
+    }
+}
+
 impl MarkerKind {
     /// Kind from the actor's `.ai` script path (`Placement._script` -> `tfbScriptInfo._name`).
     /// `None` = script known but not a marker we spawn (cameras, controllers, NPCs, ...).
@@ -505,6 +542,7 @@ impl MarkerKind {
             "big_pot" | "practice_dummy" | "lid" | "bauble_lid" | "chandelier" => {
                 Some(MarkerKind::Prop)
             }
+            _ if npc_name_from_stem(&stem).is_some() => Some(MarkerKind::Npc),
             _ if stem.contains("teleporter") => Some(MarkerKind::Doorway),
             _ if stem.starts_with("door_opener") => Some(MarkerKind::TriggerZone),
             _ => EnemyClass::from_script_stem(&stem).map(MarkerKind::Enemy),
@@ -4777,8 +4815,8 @@ impl IgbModel {
                 else {
                     continue;
                 };
-                // Inactive props are templates a script spawns later (lids, hats).
-                if kind == MarkerKind::Prop && !actor.active {
+                // Inactive props and NPCs are templates a script spawns later (lids, hats).
+                if matches!(kind, MarkerKind::Prop | MarkerKind::Npc) && !actor.active {
                     continue;
                 }
                 if actor.draws_level_model() {
@@ -5750,6 +5788,24 @@ mod tests {
         let cam = actor("spawn_cam", Some(&format!("{s}2014_Camera.ai")));
         assert_eq!(cam.kind(), None, "script overrides name");
         assert_eq!(actor("Door_X", None).kind(), Some(MarkerKind::Doorway));
+        let flynn = actor("Flynn", Some(&format!("{s}NPC_Flynn_Injured.ai")));
+        assert_eq!(flynn.kind(), Some(MarkerKind::Npc));
+        assert_eq!(
+            npc_name(&format!("{s}NPC_Flynn_Injured.ai")).as_deref(),
+            Some("Flynn")
+        );
+        assert_eq!(
+            npc_name(&format!("{s}NPC_TBone.ai")).as_deref(),
+            Some("T-Bone")
+        );
+        assert_eq!(
+            npc_name("x/Persephone_2014.ai").as_deref(),
+            Some("Persephone")
+        );
+        assert_eq!(npc_name("x/Auric.ai").as_deref(), Some("Auric"));
+        let posters = actor("Posters", Some(&format!("{s}NPC_WantedPosters.ai")));
+        assert_eq!(posters.kind(), None);
+        assert_eq!(npc_name("x/Persephone_2014_UpgradeFXControl.ai"), None);
 
         // +90 deg yaw maps +X to -Z (right-handed, Y up).
         let m = crystal.transform();

@@ -41,8 +41,10 @@ impl Plugin for SkylandsCorePlugin {
             .add_event::<WorldAudioCueEvent>()
             .add_event::<ZoneTransitionEvent>()
             .add_event::<LevelChangedEvent>()
+            .add_event::<NpcInteractEvent>()
             .init_resource::<PortalGameplayState>()
             .init_resource::<GameStats>()
+            .init_resource::<ActiveDialogue>()
             .init_resource::<WiiInputState>()
             .init_resource::<PortalAudioStreaming>()
             .init_resource::<CaptureProgress>()
@@ -87,6 +89,7 @@ impl Plugin for SkylandsCorePlugin {
                     apply_deferred,
                     systems::collectible_pickup_system,
                     systems::zone_trigger_system,
+                    systems::npc_interaction_system,
                     systems::animation_state_system,
                     systems::portal_audio_stream_system,
                     systems::villain_capture_system,

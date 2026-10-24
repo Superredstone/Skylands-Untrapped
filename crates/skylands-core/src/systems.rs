@@ -560,6 +560,7 @@ pub fn villain_energy_system(
 pub fn hero_movement_system(
     time: Option<Res<Time<Fixed>>>,
     input: Res<WiiInputState>,
+    dialogue: Option<Res<ActiveDialogue>>,
     env: Res<EnvironmentCollision>,
     mut query: Query<
         (
@@ -572,6 +573,12 @@ pub fn hero_movement_system(
         With<Hero>,
     >,
 ) {
+    // The hero stands still while talking.
+    let idle = WiiInputState::default();
+    let input = match dialogue {
+        Some(d) if d.is_active() => &idle,
+        _ => &*input,
+    };
     let dt = time
         .as_ref()
         .map(|t| {
@@ -742,10 +749,12 @@ pub fn actor_physics_system(
 }
 
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub fn hero_combat_system(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
     input: Res<WiiInputState>,
+    dialogue: Option<Res<ActiveDialogue>>,
     mut audio_events: EventWriter<WorldAudioCueEvent>,
     mut damage_events: EventWriter<DamageEvent>,
     mut hero_query: Query<
@@ -770,6 +779,9 @@ pub fn hero_combat_system(
         Without<Hero>,
     >,
 ) {
+    if dialogue.is_some_and(|d| d.is_active()) {
+        return;
+    }
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
     } else {
@@ -1222,6 +1234,87 @@ pub fn zone_trigger_system(
     stats.active_prompt = found_prompt;
 }
 
+/// Hero distance for the NPC talk prompt. Unverified against the DOL.
+pub const NPC_TALK_RADIUS: f32 = 3.0;
+
+/// Talk prompt for the nearest NPC with something to say (ties go to entity order),
+/// unless a zone prompt already shows. A fresh A press starts that NPC's next
+/// conversation, each further press shows the next line, and the last one closes it.
+/// Walking out of range also closes it. The hero cannot move or attack meanwhile.
+pub fn npc_interaction_system(
+    input: Res<WiiInputState>,
+    mut stats: ResMut<GameStats>,
+    mut dialogue: ResMut<ActiveDialogue>,
+    mut events: EventWriter<NpcInteractEvent>,
+    mut a_was_down: Local<bool>,
+    hero_query: Query<&Transform, With<Hero>>,
+    mut npc_query: Query<(Entity, &Transform, &mut Npc)>,
+) {
+    let a_down = input.is_down(WiiButton::A);
+    let a_pressed = a_down && !*a_was_down;
+    *a_was_down = a_down;
+
+    let Ok(hero_tf) = hero_query.get_single() else {
+        dialogue.close();
+        return;
+    };
+
+    if let Some(entity) = dialogue.npc {
+        let in_range = npc_query.get(entity).is_ok_and(|(_, tf, npc)| {
+            hero_tf.translation.distance(tf.translation) <= npc.talk_radius
+        });
+        if !in_range {
+            dialogue.close();
+        } else {
+            if a_pressed {
+                dialogue.line += 1;
+                if dialogue.line >= dialogue.lines.len() {
+                    dialogue.close();
+                }
+            }
+            // The dialogue box replaces the prompt banner.
+            stats.active_prompt = None;
+            return;
+        }
+    }
+
+    if stats.active_prompt.is_some() {
+        return;
+    }
+    let mut nearest: Option<(f32, Entity)> = None;
+    for (entity, tf, npc) in &npc_query {
+        let dist = hero_tf.translation.distance(tf.translation);
+        if !npc.conversations.is_empty()
+            && dist <= npc.talk_radius
+            && nearest.is_none_or(|(d, _)| dist < d)
+        {
+            nearest = Some((dist, entity));
+        }
+    }
+    let Some((_, entity)) = nearest else {
+        return;
+    };
+    let Ok((_, _, mut npc)) = npc_query.get_mut(entity) else {
+        return;
+    };
+    if !a_pressed {
+        stats.active_prompt = Some(format!("Press A to talk to {}", npc.name));
+        return;
+    }
+    let index = npc.next_conversation % npc.conversations.len();
+    npc.next_conversation = index + 1;
+    *dialogue = ActiveDialogue {
+        npc: Some(entity),
+        npc_name: npc.name.clone(),
+        lines: npc.conversations[index].lines.clone(),
+        line: 0,
+    };
+    events.send(NpcInteractEvent {
+        npc: entity,
+        name: npc.name.clone(),
+    });
+}
+
 /// Logical animation state per actor. Clip names are resolved to real clips by the renderer.
 pub fn animation_state_name(
     combo: Option<&AttackCombo>,
@@ -1498,6 +1591,7 @@ pub fn spawn_level_content(
     let mut marker_id_counter = 5000u32;
     let mut has_spawn = false;
     let mut tuning: Option<EnemyTuning> = None;
+    let mut level_text: Option<Option<skylands_formats::LevelText>> = None;
 
     for marker in &markers {
         match marker.kind {
@@ -1625,6 +1719,43 @@ pub fn spawn_level_content(
                 );
                 marker_id_counter += 1;
             }
+            skylands_formats::igb::MarkerKind::Npc => {
+                let name = marker
+                    .script
+                    .as_deref()
+                    .and_then(skylands_formats::npc_name)
+                    .unwrap_or_else(|| marker.name.clone());
+                let mut npc = commands.spawn((
+                    LevelEntity,
+                    ActorIdentity {
+                        id: marker_id_counter,
+                        character_id: 0,
+                        name: marker.name.clone(),
+                        is_villain: false,
+                        model_path: None,
+                        texture_path: None,
+                    },
+                    Npc {
+                        conversations: marker
+                            .script
+                            .as_deref()
+                            .map(|script| {
+                                let text = level_text
+                                    .get_or_insert_with(|| load_level_text(loader, &path));
+                                npc_dialogue(loader, &path, text.as_ref(), script, &name)
+                            })
+                            .unwrap_or_default(),
+                        name,
+                        talk_radius: NPC_TALK_RADIUS,
+                        next_conversation: 0,
+                    },
+                    Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform)),
+                ));
+                if marker.drawn_by_level {
+                    npc.insert(LevelDrawnModel);
+                }
+                marker_id_counter += 1;
+            }
             _ => {}
         }
     }
@@ -1643,6 +1774,35 @@ pub fn spawn_level_content(
     }
 
     true
+}
+
+/// The level's strings: `level.bld` `StringInfo` objects filled from the language pack
+/// in the same archive (`<Level>/ENGLISH.pak`, EU en).
+fn load_level_text(
+    loader: &skylands_formats::AssetLoader,
+    level_path: &str,
+) -> Option<skylands_formats::LevelText> {
+    let stem = level_path.strip_suffix(".bld").unwrap_or(level_path);
+    let pak = loader.load_raw(&format!("{stem}/ENGLISH.pak")).ok()?;
+    let pack = skylands_formats::parse_language_pack(&pak)?;
+    skylands_formats::LevelText::new(&loader.load_raw(level_path).ok()?, &pack)
+}
+
+fn npc_dialogue(
+    loader: &skylands_formats::AssetLoader,
+    level_path: &str,
+    text: Option<&skylands_formats::LevelText>,
+    script: &str,
+    name: &str,
+) -> Vec<skylands_formats::Conversation> {
+    let (Some(text), Ok(level)) = (text, loader.load_raw(level_path)) else {
+        return Vec::new();
+    };
+    let Some(set) = skylands_formats::ScriptSet::parse(&level) else {
+        return Vec::new();
+    };
+    let file = script.rsplit(['/', '\\']).next().unwrap_or(script);
+    skylands_formats::npc_dialogue(&level, &set, text, file, name)
 }
 
 /// The level's scripts with `global.bld` for global handles.
@@ -3155,6 +3315,203 @@ mod tests {
         let prop = spawn_scripted(&mut app, scripts, Transform::IDENTITY);
         step_fixed(&mut app);
         assert!(app.world().get_entity(prop).is_err());
+    }
+
+    fn npc(name: &str, conversations: &[&[&str]]) -> Npc {
+        Npc {
+            name: name.into(),
+            talk_radius: NPC_TALK_RADIUS,
+            conversations: conversations
+                .iter()
+                .map(|lines| skylands_formats::Conversation {
+                    lines: lines
+                        .iter()
+                        .map(|t| skylands_formats::DialogueLine {
+                            speaker: None,
+                            text: t.to_string(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            next_conversation: 0,
+        }
+    }
+
+    fn tap_a(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::A);
+        step_fixed(app);
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .release(WiiButton::A);
+        step_fixed(app);
+    }
+
+    #[test]
+    fn test_npc_talk_prompt_and_dialogue() {
+        let mut app = build_test_app();
+        let world = app.world_mut();
+        let hero = world.spawn((Hero, Transform::from_xyz(0.0, 0.0, 0.0))).id();
+        world.spawn((npc("Far", &[&["far"]]), Transform::from_xyz(2.5, 0.0, 0.0)));
+        // Nothing to say: no prompt even when closest.
+        world.spawn((npc("Mute", &[]), Transform::from_xyz(0.5, 0.0, 0.0)));
+        let flynn = world
+            .spawn((
+                npc("Flynn", &[&["one", "two"], &["three"]]),
+                Transform::from_xyz(1.0, 0.0, 0.0),
+            ))
+            .id();
+        let prompt = |app: &App| app.world().resource::<GameStats>().active_prompt.clone();
+        let line = |app: &App| {
+            let d = app.world().resource::<ActiveDialogue>();
+            d.current_line().map(|(s, t)| format!("{s}: {t}"))
+        };
+
+        step_fixed(&mut app);
+        assert_eq!(prompt(&app).as_deref(), Some("Press A to talk to Flynn"));
+
+        // Holding A only counts once.
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::A);
+        step_fixed(&mut app);
+        step_fixed(&mut app);
+        assert_eq!(line(&app).as_deref(), Some("Flynn: one"));
+        assert_eq!(prompt(&app), None);
+        let sent: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Events<NpcInteractEvent>>()
+            .drain()
+            .collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].npc, flynn);
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .release(WiiButton::A);
+        step_fixed(&mut app);
+
+        tap_a(&mut app);
+        assert_eq!(line(&app).as_deref(), Some("Flynn: two"));
+        tap_a(&mut app);
+        assert_eq!(line(&app), None, "last line closes");
+
+        // The next talk plays the next conversation, then wraps around.
+        tap_a(&mut app);
+        assert_eq!(line(&app).as_deref(), Some("Flynn: three"));
+        tap_a(&mut app);
+        tap_a(&mut app);
+        assert_eq!(line(&app).as_deref(), Some("Flynn: one"));
+
+        // Walking away ends the conversation and the prompt.
+        app.world_mut()
+            .get_mut::<Transform>(hero)
+            .unwrap()
+            .translation
+            .x = -20.0;
+        step_fixed(&mut app);
+        assert_eq!(line(&app), None);
+        assert_eq!(prompt(&app), None);
+    }
+
+    #[test]
+    fn test_hero_holds_still_while_talking() {
+        let mut app = build_test_app();
+        let world = app.world_mut();
+        let hero = world
+            .spawn((
+                Hero,
+                Transform::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                CharacterCollider {
+                    radius: 0.5,
+                    height: 1.0,
+                    step_height: 0.0,
+                    grounded: true,
+                },
+            ))
+            .id();
+        world.spawn((npc("Flynn", &[&["hi"]]), Transform::from_xyz(1.0, 0.0, 0.0)));
+        tap_a(&mut app);
+        assert!(app.world().resource::<ActiveDialogue>().is_active());
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .set_stick(1.0, 0.0);
+        for _ in 0..10 {
+            step_fixed(&mut app);
+        }
+        let v = app.world().get::<Velocity>(hero).unwrap().0;
+        assert!(v.x.abs() < 1e-4 && v.z.abs() < 1e-4, "{v:?}");
+    }
+
+    #[test]
+    fn test_hub_npcs_spawn() {
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("level/Level_Hub_2014_01.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader
+            .mount(dir.join("level/Level_Hub_2014_01.bld"))
+            .unwrap();
+        let mut app = build_test_app();
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        assert!(spawn_level_content(
+            &mut commands,
+            &loader,
+            "Level_Hub_2014_01.bld",
+            None,
+            &CampaignProgress::default(),
+        ));
+        queue.apply(world);
+        let mut q = world.query::<(&Npc, Has<LevelDrawnModel>)>();
+        let mut names: Vec<_> = q.iter(world).map(|(n, _)| n.name.clone()).collect();
+        let all: Vec<(String, String)> = q
+            .iter(world)
+            .flat_map(|(n, _)| {
+                n.conversations
+                    .iter()
+                    .flat_map(|c| &c.lines)
+                    .map(|l| (n.name.clone(), l.text.clone()))
+            })
+            .collect();
+        let lines = |who: &str| -> Vec<&str> {
+            all.iter()
+                .filter(|(n, _)| n == who)
+                .map(|(_, t)| t.as_str())
+                .collect()
+        };
+        names.sort();
+        eprintln!("hub npcs: {names:?}");
+        for n in [
+            "Auric",
+            "Buzz",
+            "Cali",
+            "Flynn",
+            "Persephone",
+            "T-Bone",
+            "Tessa",
+        ] {
+            assert!(names.iter().any(|x| x == n), "missing {n}");
+        }
+        assert!(
+            lines("Flynn")
+                .iter()
+                .any(|t| t.contains("talk to Persephone")),
+            "Flynn's lines come from the language pack"
+        );
+        assert!(!lines("Cali").is_empty() && !lines("Buzz").is_empty());
+        assert!(lines("Whiskers").is_empty());
+        // The inactive store template is not spawned.
+        assert_eq!(names.iter().filter(|x| *x == "Auric").count(), 1);
+        assert!(
+            q.iter(world).any(|(_, drawn)| drawn),
+            "NPC models come from the level"
+        );
     }
 
     #[test]

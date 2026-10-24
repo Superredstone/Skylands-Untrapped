@@ -187,11 +187,17 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - `OpStartUp` once, then the `OpPreScript` body every 60 Hz tick; `OpSlideValue` sliders (looping, ping-pong), relative facing/tilt/roll rates per tick, `Script Timer`. Self-remove only when no unresolved state (save flags, other files) was read that tick.
   - Tests: `script_runtime::tests::*`, `rom_hub_scripts_animate_props`, core `test_actor_script_spins_placed_prop`, `test_actor_script_remove_despawns_prop`, `test_hub_props_run_their_scripts`.
   - [ ] Not run: `OpUserBehavior` / `OpSetBehavior` event handlers, `OpSpawn`, `OpStartSequence` (animations), `OpFindVariable` (treated as not found), `visible`, `tint`, ease in/out, save data (`Levels_Completed` reads 0). Not visually verified in the GUI; per-tick angle units and facing axis assumed.
+- [ ] NPCs (started).
+  - [x] `MarkerKind::Npc` from `NPC_<Name>[_<Variant>].ai`, `Auric.ai` (store), `Persephone_2014.ai` (upgrades); `npc_name` gives the display name. `NPC_WantedPosters.ai` (no model) is not one. Inactive placements are templates and are skipped. Hub: Auric, Batterson, Brock, Buzz, Cali, Flynn, Flynn (`_Injured`), Mags, Persephone, T-Bone, Tessa, Whiskers.
+  - [x] Core `Npc` entity (level draws the model), `npc_interaction_system`: "Press A to talk to X" within `NPC_TALK_RADIUS` (3.0, guessed) of the nearest NPC with lines. A press starts its next conversation (`ActiveDialogue` + `NpcInteractEvent`), A steps lines, the last closes it; walking away closes it. Hero movement and attacks are held while talking.
+  - [x] Real dialogue text from the level `ENGLISH.pak` (`skylands-formats/src/text.rs`, notes `agent/DIALOGUE.md`), dialogue box in the render HUD (speaker, text, `[A] Next` / `[A] Close`).
+  - Tests: igb `test_actor_placement_kind_and_transform`, text `speaker_names_from_keys`, `rom_hub_language_pack_matches_string_infos`, `rom_hub_npc_conversations`, core `test_npc_talk_prompt_and_dialogue`, `test_hero_holds_still_while_talking`, `test_hub_npcs_spawn` (ROM), render `test_dialogue_box_shows_current_line`.
+  - [ ] Story gating of conversations (`Levels_Completed`, `OpSetBehavior`), the `$9b61ad43` set handle (most ambient lines use the `vo_<name>_*` fallback), VO playback (`tfbSoundDataInfo`), yes/no questions, which Flynn variant shows, idle/talk animations, collision, Auric store / Persephone upgrade menus.
+- [x] Localization strings (EU en): level `ENGLISH.pak` pools (`text.rs`). Global/UI strings not wired yet.
 - [ ] Encounter arenas / waves (`Arena_Challenge_*`, `_ArenaMaster2.ai`, `BattleMaster.ai`, `Enemy_Setup_00x_Controller.ai`), after the VM.
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
 - [ ] Loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate" (needs `kRHSfuncRandom` + a seeded RNG).
-- [ ] Localization strings (EU en).
 - [ ] Sound bank to event mapping.
 - [ ] Mock tag persistence (`.tag`). Real tag write-back + hotplug need human review (portal protocol).
 - [ ] Load perf: cache decoded level geometry (only if load time hurts).
