@@ -1222,9 +1222,48 @@ pub fn zone_trigger_system(
     stats.active_prompt = found_prompt;
 }
 
+/// Logical animation state per actor. Clip names are resolved to real clips by the renderer.
+pub fn animation_state_name(
+    combo: Option<&AttackCombo>,
+    enemy: Option<&Enemy>,
+    velocity: Option<&Velocity>,
+    collider: Option<&CharacterCollider>,
+) -> String {
+    if let Some(attack) = combo.and_then(|c| c.active.as_ref().map(|a| (c.step, a))) {
+        return match attack.1.kind {
+            AttackKind::PrimaryMelee => format!("attack_combo_{}", attack.0.max(1)),
+            AttackKind::SecondarySweep => "attack_sweep".to_string(),
+            AttackKind::SpecialProjectile => "attack_projectile".to_string(),
+        };
+    }
+    if enemy.is_some_and(|e| e.state == EnemyState::Windup) {
+        return "attack".to_string();
+    }
+    let vel = velocity.map(|v| v.0).unwrap_or(Vec3::ZERO);
+    if collider.is_some_and(|c| !c.grounded) {
+        return if vel.y > 0.0 { "jump" } else { "fall" }.to_string();
+    }
+    let h_speed = Vec2::new(vel.x, vel.z).length();
+    if h_speed > 3.0 {
+        "run"
+    } else if h_speed > 0.1 {
+        "walk"
+    } else {
+        "idle"
+    }
+    .to_string()
+}
+
+#[allow(clippy::type_complexity)]
 pub fn animation_state_system(
     time: Res<Time<Fixed>>,
-    mut query: Query<(&mut ActorAnimation, Option<&AttackCombo>, Option<&Velocity>)>,
+    mut query: Query<(
+        &mut ActorAnimation,
+        Option<&AttackCombo>,
+        Option<&Enemy>,
+        Option<&Velocity>,
+        Option<&CharacterCollider>,
+    )>,
 ) {
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
@@ -1232,33 +1271,13 @@ pub fn animation_state_system(
         time.timestep().as_secs_f32()
     };
 
-    for (mut anim, maybe_combo, maybe_vel) in &mut query {
+    for (mut anim, combo, enemy, vel, collider) in &mut query {
         anim.time += dt * anim.speed;
 
-        if let Some(combo) = maybe_combo {
-            let next_clip = if let Some(ref attack) = combo.active {
-                match attack.kind {
-                    AttackKind::PrimaryMelee => format!("attack_combo_{}", combo.step.max(1)),
-                    AttackKind::SecondarySweep => "attack_sweep".to_string(),
-                    AttackKind::SpecialProjectile => "attack_projectile".to_string(),
-                }
-            } else if let Some(vel) = maybe_vel {
-                let h_speed = Vec2::new(vel.0.x, vel.0.z).length();
-                if h_speed > 3.0 {
-                    "run".to_string()
-                } else if h_speed > 0.1 {
-                    "walk".to_string()
-                } else {
-                    "idle".to_string()
-                }
-            } else {
-                "idle".to_string()
-            };
-
-            if anim.current_clip.as_deref() != Some(&next_clip) {
-                anim.current_clip = Some(next_clip);
-                anim.time = 0.0;
-            }
+        let next_clip = animation_state_name(combo, enemy, vel, collider);
+        if anim.current_clip.as_deref() != Some(&next_clip) {
+            anim.current_clip = Some(next_clip);
+            anim.time = 0.0;
         }
     }
 }
@@ -2894,5 +2913,60 @@ mod tests {
             (hero_health(&app, hero), enemies)
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn test_animation_state_airborne_and_enemy() {
+        let airborne = CharacterCollider {
+            grounded: false,
+            ..Default::default()
+        };
+        let grounded = CharacterCollider::default();
+        let up = Velocity(Vec3::new(0.0, 5.0, 0.0));
+        let down = Velocity(Vec3::new(4.0, -5.0, 0.0));
+        let fast = Velocity(Vec3::new(4.0, 0.0, 0.0));
+        assert_eq!(
+            animation_state_name(None, None, Some(&up), Some(&airborne)),
+            "jump"
+        );
+        assert_eq!(
+            animation_state_name(None, None, Some(&down), Some(&airborne)),
+            "fall"
+        );
+        assert_eq!(
+            animation_state_name(None, None, Some(&fast), Some(&grounded)),
+            "run"
+        );
+
+        let mut enemy = Enemy::new(EnemyClass::Near, 10);
+        assert_eq!(
+            animation_state_name(None, Some(&enemy), None, Some(&grounded)),
+            "idle"
+        );
+        enemy.state = EnemyState::Windup;
+        assert_eq!(
+            animation_state_name(None, Some(&enemy), Some(&fast), Some(&grounded)),
+            "attack"
+        );
+    }
+
+    #[test]
+    fn test_animation_state_system_drives_enemies() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = build_test_app();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy::new(EnemyClass::Near, 10),
+                Velocity(Vec3::new(1.0, 0.0, 0.0)),
+                CharacterCollider::default(),
+                ActorAnimation::default(),
+            ))
+            .id();
+        app.world_mut()
+            .run_system_once(animation_state_system)
+            .unwrap();
+        let anim = app.world().get::<ActorAnimation>(enemy).unwrap();
+        assert_eq!(anim.current_clip.as_deref(), Some("walk"));
     }
 }

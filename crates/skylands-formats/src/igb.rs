@@ -1285,6 +1285,8 @@ pub struct AnimationClip {
     pub name: String,
     pub duration: f32,
     pub tracks: Vec<BoneTrack>,
+    /// Index into `IgbModel.skeletons` of the rig the tracks drive (`None` = unknown).
+    pub skeleton: Option<usize>,
 }
 
 pub fn lerp_vec3(a: &[f32; 3], b: &[f32; 3], t: f32) -> [f32; 3] {
@@ -1428,6 +1430,7 @@ impl AnimationClip {
             name: name.into(),
             duration,
             tracks,
+            skeleton: None,
         }
     }
 
@@ -1671,6 +1674,17 @@ impl IgbModel {
     }
 
     /// Returns a reference to the primary character skeleton, if any.
+    /// Clips that drive the primary rig. Character files also carry clips for
+    /// secondary rigs (Kaos: `kaosHead_Idle` on the 20-bone head before `Kaos_Idle`).
+    pub fn primary_animations(&self) -> Vec<AnimationClip> {
+        let primary = self.primary_skeleton_index();
+        self.animations
+            .iter()
+            .filter(|a| a.skeleton.is_none() || a.skeleton == primary)
+            .cloned()
+            .collect()
+    }
+
     pub fn primary_skeleton(&self) -> Option<&Skeleton> {
         self.primary_skeleton_index()
             .and_then(|idx| self.skeletons.get(idx))
@@ -5907,6 +5921,23 @@ mod tests {
                 ("BaseDamage_JumpSlam", 25.0)
             ]
         );
+    }
+
+    #[test]
+    fn test_primary_animations_skip_secondary_rig() {
+        let Some(bytes) = read_character_bld("1010_Kaos") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse kaos");
+        let primary = model.primary_skeleton_index();
+        // `kaosHead_Idle` (8.53 s, head rig) comes before `Kaos_Idle` (1.07 s, body rig).
+        let first_idle = model.animations.iter().find(|a| a.name == "idle").unwrap();
+        assert_ne!(first_idle.skeleton, primary);
+        let clips = model.primary_animations();
+        assert!(clips.iter().all(|a| a.skeleton == primary));
+        let idle = clips.iter().find(|a| a.name == "idle").expect("body idle");
+        assert!((idle.duration - 1.07).abs() < 1e-2, "{}", idle.duration);
+        assert!(clips.iter().any(|a| a.name == "walk"));
     }
 
     #[test]

@@ -511,11 +511,14 @@ pub fn parse_havok_animation(
         }
     }
 
-    let target_skel = skeletons
+    let target_idx = skeletons
         .iter()
-        .filter(|s| s.bones.len() > num_tracks)
-        .min_by_key(|s| s.bones.len() - num_tracks)
-        .or_else(|| skeletons.first());
+        .enumerate()
+        .filter(|(_, s)| s.bones.len() > num_tracks)
+        .min_by_key(|(_, s)| s.bones.len() - num_tracks)
+        .map(|(i, _)| i)
+        .or_else(|| (!skeletons.is_empty()).then_some(0));
+    let target_skel = target_idx.map(|i| &skeletons[i]);
 
     let bone_offset = if let Some(skel) = target_skel {
         if !skel.bones.is_empty()
@@ -870,7 +873,9 @@ pub fn parse_havok_animation(
         }
     }
 
-    Some(AnimationClip::new(clip_name, duration, bone_tracks))
+    let mut clip = AnimationClip::new(clip_name, duration, bone_tracks);
+    clip.skeleton = target_idx;
+    Some(clip)
 }
 
 #[cfg(test)]

@@ -101,6 +101,9 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - Multi-material extraction (`decode_drawable_materials` / `load_image_rgba`): links `Drawable` -> `tfbRuntimeMaterial` -> `igCachedAttrList` -> `tfbTextureBindAttr` -> `igImage2` offset -> image index in `model.images`. Spawns child `SkinnedMesh` entities per submesh, binding distinct diffuse textures (e.g. Spyro body vs wings) and diffuse tint colors.
   - Submesh filtering: protected skinned submeshes from auxiliary billboard/ring heuristics so wings and details are preserved.
 - Done: Spyro idle animates in `--viewer`.
+- [x] Gameplay-driven animation: `animation_state_name` (core) picks `idle`/`walk`/`run`/`jump`/`fall`/`attack_*` for heroes, villains and enemies (`EnemyState::Windup` = `attack`). `character_animation_system` follows `ActorAnimation` (viewer clip only when `viewer_mode`; before, the always-present `ViewerSettings` pinned everyone to idle). `resolve_clip` maps states to file clip names with fallbacks (`combatidle`, `jumpstanding`, `falling`, `spinattack`...); attacks and jump play once.
+  - Clip names are the last `_` segment of the `.ma` path (`CrockWarrior_CombatIdle.ma` -> `combatidle`). `AnimationClip.skeleton` records the Havok target rig; `IgbModel::primary_animations` drops secondary-rig clips (Kaos `kaosHead_Idle` 8.53 s vs `Kaos_Idle` 1.07 s).
+  - [ ] Hurt (`damagefront`), landing, idle-to-walk transitions, blending between clips, walk playback rate from speed. Debug-menu animation preview is overridden by gameplay state outside viewer mode.
 
 ### Phase 2 - DOL tooling & Alchemy metadata
 - [x] `tools/rea-bridge/rea_analyze.sh`: Ghidra headless import (`PowerPC:BE:32:Gekko_Broadway` / `PowerPC:BE:32:default`) + auto-analysis.

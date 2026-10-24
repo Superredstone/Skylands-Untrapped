@@ -8,7 +8,7 @@ use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
-    ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
+    ActorAnimation, ActorIdentity, Collectible, Element, Enemy, Hero, Projectile, Prop, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -614,30 +614,73 @@ pub struct CharacterAnimator {
     pub joints: Vec<Entity>,
 }
 
+/// Real clip for a logical state from `skylands_core::animation_state_name`, falling back
+/// through the names character files use (`CrockWarrior_CombatIdle`, `Kaos_JumpStanding`).
+pub fn resolve_clip<'a>(
+    clips: &'a [skylands_formats::AnimationClip],
+    state: &str,
+) -> Option<&'a skylands_formats::AnimationClip> {
+    let fallbacks: &[&str] = match state {
+        "idle" => &["combatidle"],
+        "walk" => &["run"],
+        "run" => &["walk"],
+        "jump" => &["jumpstanding", "flyup", "falling"],
+        "fall" => &["falling", "flightfalling"],
+        "attack_sweep" => &["spinattack", "smashattack", "attack"],
+        s if s.starts_with("attack") => &["attack"],
+        _ => &[],
+    };
+    let named = |n: &str| clips.iter().find(|a| a.name.eq_ignore_ascii_case(n));
+    named(state)
+        .or_else(|| fallbacks.iter().find_map(|n| named(n)))
+        .or_else(|| {
+            state
+                .starts_with("attack")
+                .then(|| clips.iter().find(|a| a.name.contains("attack")))
+                .flatten()
+        })
+        .or_else(|| named("idle"))
+        .or_else(|| clips.first())
+}
+
+/// Attacks and jump take-offs play once and hold their last frame; everything else loops.
+fn is_one_shot(state: &str) -> bool {
+    state.starts_with("attack") || state == "jump"
+}
+
 pub fn character_animation_system(
     time: Res<Time>,
     viewer_settings: Option<Res<crate::ViewerSettings>>,
-    mut anim_query: Query<&mut CharacterAnimator>,
+    mut anim_query: Query<(&mut CharacterAnimator, Option<&ActorAnimation>)>,
     mut transform_query: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs();
-    let clip_requested = viewer_settings.as_ref().map(|v| v.clip_name.as_str());
+    let viewer_clip = viewer_settings
+        .as_ref()
+        .filter(|v| v.viewer_mode)
+        .map(|v| v.clip_name.clone());
 
-    for mut anim in &mut anim_query {
-        anim.elapsed += dt;
+    for (mut anim, actor_anim) in &mut anim_query {
+        let requested = viewer_clip
+            .as_deref()
+            .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
+            .unwrap_or("idle");
+        if anim.current_clip != requested {
+            anim.current_clip = requested.to_string();
+            anim.elapsed = 0.0;
+        } else {
+            anim.elapsed += dt;
+        }
 
-        let target_clip_name = clip_requested.unwrap_or(&anim.current_clip);
-        let clip = anim
-            .animations
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(target_clip_name))
-            .or_else(|| anim.animations.iter().find(|a| a.name == "idle"))
-            .or_else(|| anim.animations.first());
-
-        let Some(clip) = clip else {
+        let Some(clip) = resolve_clip(&anim.animations, requested) else {
             continue;
         };
-        let global_transforms = clip.sample_global_transforms(anim.elapsed, &anim.skeleton);
+        let t = if is_one_shot(requested) {
+            anim.elapsed.min(clip.duration * 0.999)
+        } else {
+            anim.elapsed
+        };
+        let global_transforms = clip.sample_global_transforms(t, &anim.skeleton);
 
         for (i, &joint_entity) in anim.joints.iter().enumerate() {
             if i < global_transforms.len() {
@@ -800,7 +843,7 @@ pub fn actor_visual_sync_system(
                                 commands.entity(entity).insert((
                                     CharacterAnimator {
                                         skeleton: skeleton.clone(),
-                                        animations: md.animations.clone(),
+                                        animations: md.primary_animations(),
                                         current_clip: "idle".to_string(),
                                         elapsed: 0.0,
                                         joints: joints.clone(),
@@ -817,7 +860,7 @@ pub fn actor_visual_sync_system(
                                     },
                                     CharacterAnimator {
                                         skeleton: skeleton.clone(),
-                                        animations: md.animations.clone(),
+                                        animations: md.primary_animations(),
                                         current_clip: "idle".to_string(),
                                         elapsed: 0.0,
                                         joints: joints.clone(),
@@ -1201,6 +1244,71 @@ mod tests {
             (root_tf.translation.y - 0.5).abs() < 1e-2,
             "Root joint animated to Y=0.5, got {}",
             root_tf.translation.y
+        );
+    }
+
+    #[test]
+    fn test_resolve_clip_fallbacks() {
+        let clip = |n: &str| skylands_formats::AnimationClip::new(n, 1.0, vec![]);
+        let clips = vec![
+            clip("combatidle"),
+            clip("run"),
+            clip("jumpstanding"),
+            clip("falling"),
+            clip("smashattack"),
+        ];
+        let name = |s: &str| resolve_clip(&clips, s).map(|c| c.name.as_str());
+        assert_eq!(name("idle"), Some("combatidle"));
+        assert_eq!(name("walk"), Some("run"));
+        assert_eq!(name("jump"), Some("jumpstanding"));
+        assert_eq!(name("fall"), Some("falling"));
+        assert_eq!(name("attack_sweep"), Some("smashattack"));
+        assert_eq!(name("attack_combo_2"), Some("smashattack"));
+        assert_eq!(name("unknown"), Some("combatidle"));
+        assert!(resolve_clip(&[], "idle").is_none());
+    }
+
+    #[test]
+    fn test_animator_follows_gameplay_state_outside_viewer() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        // Always inserted by the render plugin; its clip must not override gameplay.
+        app.insert_resource(crate::ViewerSettings::default());
+        app.add_systems(Update, character_animation_system);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                CharacterAnimator {
+                    skeleton: skylands_formats::Skeleton::new(vec![], 0),
+                    animations: vec![
+                        skylands_formats::AnimationClip::new("idle", 1.0, vec![]),
+                        skylands_formats::AnimationClip::new("walk", 1.0, vec![]),
+                    ],
+                    current_clip: "idle".to_string(),
+                    elapsed: 0.7,
+                    joints: vec![],
+                },
+                ActorAnimation {
+                    current_clip: Some("walk".to_string()),
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+
+        let animator = app.world().get::<CharacterAnimator>(entity).unwrap();
+        assert_eq!(animator.current_clip, "walk");
+        assert_eq!(animator.elapsed, 0.0, "clip change restarts playback");
+
+        app.world_mut()
+            .resource_mut::<crate::ViewerSettings>()
+            .viewer_mode = true;
+        app.update();
+        let animator = app.world().get::<CharacterAnimator>(entity).unwrap();
+        assert_eq!(
+            animator.current_clip, "idle",
+            "viewer clip wins in viewer mode"
         );
     }
 
