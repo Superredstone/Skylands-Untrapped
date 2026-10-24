@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use bevy::prelude::*;
+use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy::render::RenderPlugin;
 use skylands_core::{
     resolve_character_id_by_name, ActiveLevel, ActivePortal, ActorIdentity, GameState,
     PortalGameplayState, SkylandsCorePlugin,
@@ -218,14 +220,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Windowed GUI mode
     info!("Starting Bevy 0.15 app lifecycle...");
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "Skylands Untrapped - Native Port".into(),
-            resolution: (1280.0_f32, 720.0_f32).into(),
-            ..default()
-        }),
-        ..default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Skylands Untrapped - Native Port".into(),
+                    resolution: (1280.0_f32, 720.0_f32).into(),
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(wgpu_settings(
+                    std::env::var_os("WGPU_BACKEND").is_some(),
+                )),
+                ..default()
+            }),
+    );
     app.add_plugins(SkylandsCorePlugin);
     app.add_plugins(SkylandsRenderPlugin {
         viewer_mode: args.viewer,
@@ -249,6 +260,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.run();
     Ok(())
+}
+
+/// wgpu settings for the windowed app.
+///
+/// By default wgpu also creates a GLES/EGL instance next to Vulkan. On Wayland
+/// that instance is dropped after winit has already closed the display
+/// connection, and `eglTerminate` then segfaults inside libwayland-client on
+/// exit. Restricting to the primary native backends avoids creating it; setting
+/// `WGPU_BACKEND` (e.g. `WGPU_BACKEND=gl`) still overrides the choice.
+fn wgpu_settings(backend_env_set: bool) -> WgpuSettings {
+    let mut settings = WgpuSettings::default();
+    if !backend_env_set {
+        settings.backends = Some(Backends::PRIMARY);
+    }
+    settings
 }
 
 #[cfg(test)]
@@ -290,6 +316,13 @@ mod tests {
             }
             _ => panic!("Expected Mock portal"),
         }
+    }
+
+    #[test]
+    fn test_wgpu_settings_skip_gl_backend_by_default() {
+        let backends = wgpu_settings(false).backends.expect("backends set");
+        assert!(!backends.contains(Backends::GL));
+        assert!(backends.contains(Backends::VULKAN));
     }
 
     #[test]

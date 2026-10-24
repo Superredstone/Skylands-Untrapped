@@ -1056,6 +1056,14 @@ impl IgzHeader {
     }
 }
 
+/// Object types whose raw `data`/`fields` payload `IgbModel::scan_igz` decodes.
+const IGZ_PAYLOAD_TYPES: &[&str] = &[
+    "igVertexBuffer",
+    "igIndexBuffer",
+    "igVertexFormat",
+    "igGeometryAttr",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgzObject {
     pub offset: usize,
@@ -1113,22 +1121,30 @@ impl IgzObject {
 
         let type_name = type_table.get(type_index).cloned();
 
+        // Level files hold hundreds of thousands of objects with up to 64 KiB of
+        // payload each; copying every one costs gigabytes, so only keep the
+        // payload of types whose `data`/`fields` are actually decoded.
+        let keep_payload = type_name
+            .as_deref()
+            .is_some_and(|t| IGZ_PAYLOAD_TYPES.contains(&t));
+
         let data_start = data_offset;
         let data_end = (data_start + length as usize).min(slice.len());
-        let obj_data = if data_start <= slice.len() {
+        let obj_data = if keep_payload && data_start <= slice.len() {
             slice[data_start..data_end].to_vec()
         } else {
             Vec::new()
         };
 
-        let mut fields = Vec::new();
-        if slice.len() >= 0x14 {
+        let fields = if keep_payload && slice.len() >= 0x14 {
             let field_slice = &slice[0x14..];
             let num_fields = (length as usize / 4).min(field_slice.len() / 4);
-            for i in 0..num_fields {
-                fields.push(IgbModel::read_u32(field_slice, i * 4, endian));
-            }
-        }
+            (0..num_fields)
+                .map(|i| IgbModel::read_u32(field_slice, i * 4, endian))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             offset,
@@ -6829,6 +6845,29 @@ mod tests {
         };
         assert!((v3.uv[0] - 1.0).abs() < 1e-4);
         assert!((v3.uv[1] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_igz_object_payload_kept_only_for_decoded_types() {
+        // v8 header: type index @2, flags @8 (0 -> length @14), payload after 16.
+        let mut igz = vec![0u8; 0x14 + 64];
+        igz[14..16].copy_from_slice(&64u16.to_be_bytes());
+        for (i, b) in igz[16..].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let types = vec!["igVertexBuffer".to_string(), "igImage2".to_string()];
+
+        let vb = IgzObject::parse(&igz, 0, 8, IgbEndian::Big, &types).unwrap();
+        assert_eq!(vb.data.len(), 64);
+        assert_eq!(vb.fields.len(), 16);
+        assert_eq!(vb.fields[0], 0x0405_0607);
+
+        igz[2..4].copy_from_slice(&1u16.to_be_bytes());
+        let img = IgzObject::parse(&igz, 0, 8, IgbEndian::Big, &types).unwrap();
+        assert_eq!(img.type_name.as_deref(), Some("igImage2"));
+        assert_eq!(img.length, 64);
+        assert!(img.data.is_empty());
+        assert!(img.fields.is_empty());
     }
 
     #[test]
