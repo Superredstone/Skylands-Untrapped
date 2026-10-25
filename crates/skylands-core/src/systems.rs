@@ -122,7 +122,7 @@ pub fn spawn_controlled_villain_actor(
         .unwrap_or(ProjectileParams {
             speed: 30.0,
             lifetime: 1.0,
-            ranged_primary: false,
+            primary_style: PrimaryAttackStyle::Melee,
         });
     let collider = model
         .as_deref()
@@ -851,16 +851,23 @@ pub fn hero_combat_system(
         let mut triggered_attack = None;
         if combo.active.is_none() {
             if input.is_down(WiiButton::B) {
-                let next_step = (combo.step % 3) + 1;
-                combo.step = next_step;
-                combo.cooldown = 0.6;
+                let (duration, cooldown, kind) = match projectile.primary_style {
+                    PrimaryAttackStyle::Breath => (0.15, 0.18, AttackKind::PrimaryBreath),
+                    PrimaryAttackStyle::Projectile => (0.25, 0.40, AttackKind::PrimaryMelee),
+                    PrimaryAttackStyle::Melee => {
+                        let next_step = (combo.step % 3) + 1;
+                        combo.step = next_step;
+                        (0.25, 0.60, AttackKind::PrimaryMelee)
+                    }
+                };
+                combo.cooldown = cooldown;
                 combo.active = Some(ActiveAttack {
                     timer: 0.0,
-                    duration: 0.25,
-                    kind: AttackKind::PrimaryMelee,
+                    duration,
+                    kind,
                     has_hit: false,
                 });
-                triggered_attack = Some(AttackKind::PrimaryMelee);
+                triggered_attack = Some(kind);
             } else if input.is_down(WiiButton::Z) {
                 combo.step = 0;
                 combo.cooldown = 0.0;
@@ -890,7 +897,7 @@ pub fn hero_combat_system(
             let forward = hero_tf.rotation * Vec3::Z; // movement turns +Z toward the stick
             let fwd_norm = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
 
-            let mut fire = |damage: f32| {
+            let mut fire = |damage: f32, piercing: bool| {
                 commands.spawn((
                     Projectile {
                         lifetime: 0.0,
@@ -899,6 +906,7 @@ pub fn hero_combat_system(
                         radius: 0.5,
                         hostile: false,
                         owner: Some(hero_entity),
+                        piercing,
                     },
                     Velocity(fwd_norm * projectile.speed),
                     Transform::from_translation(hero_tf.translation + Vec3::new(0.0, 0.8, 0.0))
@@ -906,10 +914,12 @@ pub fn hero_combat_system(
                 ));
             };
             match kind {
-                AttackKind::SpecialProjectile => fire(attack_damage.special),
-                // Ranged characters (Gill Grunt's harpoon, Spyro's fireball) shoot on Attack 1.
-                AttackKind::PrimaryMelee if projectile.ranged_primary => {
-                    fire(attack_damage.primary)
+                AttackKind::SpecialProjectile => fire(attack_damage.special, false),
+                AttackKind::PrimaryBreath => fire(attack_damage.primary, true),
+                AttackKind::PrimaryMelee
+                    if projectile.primary_style == PrimaryAttackStyle::Projectile =>
+                {
+                    fire(attack_damage.primary, false)
                 }
                 AttackKind::PrimaryMelee | AttackKind::SecondarySweep => {
                     let (range, cos_half_angle, damage) = if kind == AttackKind::PrimaryMelee {
@@ -1031,11 +1041,13 @@ pub fn projectile_flight_system(
                     damage: proj.damage,
                     position: target_tf.translation,
                 });
-                break;
+                if !proj.piercing {
+                    break;
+                }
             }
         }
 
-        if hit {
+        if hit && !proj.piercing {
             commands.entity(proj_entity).despawn_recursive();
         }
     }
@@ -1376,6 +1388,7 @@ pub fn animation_state_name(
             AttackKind::PrimaryMelee => format!("attack_combo_{}", attack.0.max(1)),
             AttackKind::SecondarySweep => "attack_sweep".to_string(),
             AttackKind::SpecialProjectile => "attack_projectile".to_string(),
+            AttackKind::PrimaryBreath => "attack_breath".to_string(),
         };
     }
     if enemy.is_some_and(|e| e.state == EnemyState::Windup) {
@@ -2044,6 +2057,7 @@ pub fn enemy_ai_system(
                                 radius: 0.5,
                                 hostile: true,
                                 owner: None,
+                                piercing: false,
                             },
                             Velocity(Vec3::new(dir.x, 0.0, dir.y) * Enemy::PROJECTILE_SPEED),
                             Transform::from_translation(pos + Vec3::new(0.0, 0.8, 0.0)),
@@ -2467,7 +2481,7 @@ mod tests {
             ProjectileParams {
                 speed: 40.0,
                 lifetime: 0.35,
-                ranged_primary: false,
+                primary_style: PrimaryAttackStyle::Melee,
             },
             ActorAnimation::default(),
         ));
@@ -2508,7 +2522,7 @@ mod tests {
                 ProjectileParams {
                     speed: 45.0,
                     lifetime: 1.0,
-                    ranged_primary: true,
+                    primary_style: PrimaryAttackStyle::Projectile,
                 },
                 ActorAnimation::default(),
             ))
@@ -2527,6 +2541,128 @@ mod tests {
         assert_eq!((spawned[0].0, spawned[0].1), (20, Some(hero)));
         // Facing = rotated +Z (hero_movement_system turns +Z toward the stick).
         assert!(spawned[0].2.z > 44.0, "fired backwards: {:?}", spawned[0].2);
+    }
+
+    #[test]
+    fn test_breath_primary_fires_piercing_burst() {
+        let mut app = build_test_app();
+        let hero = app
+            .world_mut()
+            .spawn((
+                Hero,
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                AttackCombo::default(),
+                AttackDamage {
+                    primary: 15.0,
+                    secondary: 10.0,
+                    special: 12.0,
+                },
+                ProjectileParams {
+                    speed: 40.0 * crate::components::FEET_TO_UNITS,
+                    lifetime: 0.35,
+                    primary_style: PrimaryAttackStyle::Breath,
+                },
+                ActorAnimation::default(),
+            ))
+            .id();
+
+        // 2 villains in line with enough HP to survive multiple frame contacts
+        let v1 = app
+            .world_mut()
+            .spawn((
+                Villain,
+                Health {
+                    current: 500,
+                    max: 500,
+                },
+                CharacterCollider {
+                    radius: 0.5,
+                    height: 1.0,
+                    step_height: 0.1,
+                    grounded: true,
+                },
+                Transform::from_xyz(0.0, 0.8, 1.5),
+            ))
+            .id();
+        let v2 = app
+            .world_mut()
+            .spawn((
+                Villain,
+                Health {
+                    current: 500,
+                    max: 500,
+                },
+                CharacterCollider {
+                    radius: 0.5,
+                    height: 1.0,
+                    step_height: 0.1,
+                    grounded: true,
+                },
+                Transform::from_xyz(0.0, 0.8, 2.8),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::B);
+        step_fixed(&mut app);
+
+        // Breath projectile spawned and marked piercing
+        let mut q = app.world_mut().query::<&Projectile>();
+        let proj = q
+            .iter(app.world())
+            .next()
+            .expect("breath projectile spawned");
+        assert!(proj.piercing);
+        assert_eq!(proj.owner, Some(hero));
+
+        // Advance enough ticks for projectile to travel past both villains (~15 ticks at ~0.2u/tick)
+        for _ in 0..16 {
+            step_fixed(&mut app);
+        }
+
+        let h1 = app.world().get::<Health>(v1).unwrap().current;
+        let h2 = app.world().get::<Health>(v2).unwrap().current;
+        assert!(h1 < 500, "v1 took damage: {h1}");
+        assert!(h2 < 500, "v2 took damage: {h2}");
+    }
+
+    #[test]
+    fn test_melee_primary_character_does_not_fire_projectile() {
+        let mut app = build_test_app();
+        app.world_mut().spawn((
+            Hero,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            CharacterCollider::default(),
+            Velocity::default(),
+            MovementSpeed(5.0),
+            AttackCombo::default(),
+            AttackDamage {
+                primary: 25.0,
+                secondary: 10.0,
+                special: 12.0,
+            },
+            ProjectileParams {
+                speed: 40.0,
+                lifetime: 1.0,
+                primary_style: PrimaryAttackStyle::Melee,
+            },
+            ActorAnimation::default(),
+        ));
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::B);
+        step_fixed(&mut app);
+
+        let mut q = app.world_mut().query::<&Projectile>();
+        assert_eq!(
+            q.iter(app.world()).count(),
+            0,
+            "melee primary should not spawn projectile"
+        );
     }
 
     #[test]

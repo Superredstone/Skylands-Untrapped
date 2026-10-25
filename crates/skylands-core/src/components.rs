@@ -5,6 +5,7 @@ pub enum AttackKind {
     PrimaryMelee,
     SecondarySweep,
     SpecialProjectile,
+    PrimaryBreath,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -325,15 +326,22 @@ impl AttackDamage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrimaryAttackStyle {
+    #[default]
+    Melee,
+    Projectile,
+    Breath,
+}
+
 /// Per-character projectile flight, raw engine units (characters are native scale
 /// in levels: `Placement._scaleVec` = 100%, Spyro 1.77 units tall).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct ProjectileParams {
     pub speed: f32,
     pub lifetime: f32,
-    /// The primary attack fires the character's projectile actor
-    /// (`IgbModel.projectile`) instead of a melee swing.
-    pub ranged_primary: bool,
+    /// Style of primary attack (Attack 1 / B button).
+    pub primary_style: PrimaryAttackStyle,
 }
 
 impl Default for ProjectileParams {
@@ -341,16 +349,84 @@ impl Default for ProjectileParams {
         Self {
             speed: 12.0,
             lifetime: 1.5,
-            ranged_primary: false,
+            primary_style: PrimaryAttackStyle::Melee,
         }
     }
 }
 
 impl ProjectileParams {
     pub fn from_model(model: &skylands_formats::IgbModel) -> Self {
+        let style = Self::deduce_style(model);
         Self {
-            ranged_primary: model.projectile.is_some(),
+            primary_style: style,
             ..Self::from_constants(&model.script_constants)
+        }
+    }
+
+    /// Deduce whether the primary attack is melee, projectile, or a breath stream.
+    /// Reverses the character's primary slot naming and animation set from the ROM.
+    pub fn deduce_style(model: &skylands_formats::IgbModel) -> PrimaryAttackStyle {
+        let primary_name = model.script_constants.iter().find_map(|(k, _)| {
+            k.strip_prefix("BaseDamage_PrimaryAttack_")
+                .or_else(|| k.strip_prefix("BaseDamage_"))
+        });
+
+        let has_breath_anim = model
+            .animations
+            .iter()
+            .any(|a| a.name.contains("breath") || a.name.contains("breathe"));
+
+        if let Some(name) = primary_name {
+            let l = name.to_ascii_lowercase();
+            // Explicit melee keywords always mean melee (even if the character has a secondary projectile actor)
+            let is_melee = [
+                "melee", "combo", "spin", "slash", "hammer", "fist", "tongue", "ballwhip", "whip",
+                "slam", "jump",
+            ]
+            .iter()
+            .any(|k| l.contains(k));
+            if is_melee {
+                return PrimaryAttackStyle::Melee;
+            }
+
+            // Breath/beam names or breath animations (e.g. Spyro `BaseDamage_PrimaryAttack_Fire` + `firebreathloop`)
+            let is_breath = l.contains("breath")
+                || (has_breath_anim
+                    && (l.contains("fire") || l.contains("sun") || l.contains("potion")));
+            if is_breath {
+                return PrimaryAttackStyle::Breath;
+            }
+
+            // Explicit projectile keywords
+            let is_proj = [
+                "harpoon",
+                "shot",
+                "bullet",
+                "arrow",
+                "missile",
+                "shell",
+                "boomerang",
+                "disc",
+                "frisbee",
+                "cannon",
+                "starfish",
+                "acorn",
+                "sunprojectile",
+                "fireball",
+            ]
+            .iter()
+            .any(|k| l.contains(k));
+            if is_proj || model.projectile.is_some() {
+                return PrimaryAttackStyle::Projectile;
+            }
+        }
+
+        if has_breath_anim {
+            PrimaryAttackStyle::Breath
+        } else if model.projectile.is_some() {
+            PrimaryAttackStyle::Projectile
+        } else {
+            PrimaryAttackStyle::Melee
         }
     }
 
@@ -376,7 +452,7 @@ impl ProjectileParams {
         Self {
             speed: find(&["speed", "velocity"]).map_or(d.speed, |v| v * FEET_TO_UNITS),
             lifetime: find(&["lifetime", "lifespan"]).unwrap_or(d.lifetime),
-            ranged_primary: false,
+            primary_style: PrimaryAttackStyle::Melee,
         }
     }
 }
@@ -568,6 +644,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_primary_attack_style_deduction() {
+        use skylands_formats::IgbModel;
+
+        // Spyro: BaseDamage_PrimaryAttack_Fire + firebreathloop animation -> Breath
+        let spyro_model = IgbModel {
+            script_constants: consts(&[("BaseDamage_PrimaryAttack_Fire", 15.0)]),
+            animations: vec![skylands_formats::AnimationClip::new(
+                "firebreathloop",
+                0.8,
+                vec![],
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectileParams::deduce_style(&spyro_model),
+            PrimaryAttackStyle::Breath
+        );
+
+        // Gill Grunt: Harpoon -> Projectile
+        let gill_model = IgbModel {
+            script_constants: consts(&[("BaseDamage_PrimaryAttack_Harpoon", 20.0)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectileParams::deduce_style(&gill_model),
+            PrimaryAttackStyle::Projectile
+        );
+
+        // Flame Knight (Ignitor): primary is ComboBase even though he has a projectile actor! -> Melee
+        let ignitor_model = IgbModel {
+            script_constants: consts(&[("BaseDamage_PrimaryAttack_ComboBase", 15.0)]),
+            projectile: Some(skylands_formats::CharacterProjectile {
+                actor: "010_Fireball".into(),
+                model: "fireball.mdl".into(),
+                meshes: vec![0],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectileParams::deduce_style(&ignitor_model),
+            PrimaryAttackStyle::Melee
+        );
+
+        // Stealth Elf: ComboBase, no projectile actor -> Melee
+        let elf_model = IgbModel {
+            script_constants: consts(&[("BaseDamage_PrimaryAttack_ComboBase", 9.0)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectileParams::deduce_style(&elf_model),
+            PrimaryAttackStyle::Melee
+        );
+    }
+
     fn consts(items: &[(&str, f32)]) -> Vec<(String, ScriptValue)> {
         items
             .iter()
@@ -690,6 +821,8 @@ pub struct Projectile {
     pub hostile: bool,
     /// Actor that fired it; its character's projectile model is drawn.
     pub owner: Option<Entity>,
+    /// Pierces targets instead of despawning on first hit (e.g. breath streams).
+    pub piercing: bool,
 }
 
 #[derive(Component, Debug, Clone, PartialEq)]

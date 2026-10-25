@@ -216,6 +216,7 @@ impl AudioEngine {
             crate::components::AttackKind::SpecialProjectile => {
                 self.system.play_sfx_tone(740.0, 0.12)
             }
+            crate::components::AttackKind::PrimaryBreath => self.system.play_sfx_tone(620.0, 0.06),
         }
     }
 
