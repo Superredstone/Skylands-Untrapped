@@ -159,6 +159,11 @@ pub enum Op {
     PreScript,
     StartUp,
     ShutDown,
+    /// `OpFindVariable`: look up a variable by name on a target object/group path.
+    FindVariable {
+        name: String,
+        target: Vec<Ref>,
+    },
     /// Anything else (spawn, movement, sound...): skipped by the evaluator.
     Other(String),
 }
@@ -509,6 +514,10 @@ impl Reader<'_> {
             "OpPreScript" => Op::PreScript,
             "OpStartUp" => Op::StartUp,
             "OpShutDown" => Op::ShutDown,
+            "OpFindVariable" => Op::FindVariable {
+                name: self.cstr(o + 0x24),
+                target: self.lhs(o + 0x30),
+            },
             "OpCheckReference" | "OpCheckMembership" | "OpSetReference" => {
                 let set = t == "OpSetReference";
                 let p = |f: usize| {
@@ -837,6 +846,9 @@ impl ScriptSet {
                 Op::PreScript => "PRESCRIPT".into(),
                 Op::StartUp => "STARTUP".into(),
                 Op::ShutDown => "SHUTDOWN".into(),
+                Op::FindVariable { name, target } => {
+                    format!("find variable {:?} on {}", name, self.path_str(target))
+                }
                 Op::Other(t) => {
                     let mut s = t.clone();
                     for (f, operand) in self.opaque_operands.get(&ins.offset).into_iter().flatten()
@@ -971,7 +983,7 @@ impl VmIndex {
         for (si, s) in set.scripts.iter().enumerate() {
             for (oi, ins) in s.ops.iter().enumerate() {
                 match &ins.op {
-                    Op::CheckValue { .. } | Op::LoopValue { .. } => {
+                    Op::CheckValue { .. } | Op::LoopValue { .. } | Op::FindVariable { .. } => {
                         index.aliases.insert(ins.offset, (si, oi));
                     }
                     Op::DefineMacro { .. } => {
@@ -1351,7 +1363,7 @@ impl<'a> Vm<'a> {
                 Op::Behavior { .. } => pc += skip,
                 // Blocks of ops that need live objects (find variable, spawn, for each):
                 // skipped, as if nothing was found.
-                Op::Other(_) => pc += skip,
+                Op::FindVariable { .. } | Op::Other(_) => pc += skip,
                 Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::PreScript => {}
             }
         }
@@ -1443,6 +1455,39 @@ impl<'a> Vm<'a> {
             match alias {
                 Some(Op::CheckValue { lhs, .. }) => {
                     p = lhs.iter().chain(&p[1..]).copied().collect();
+                }
+                Some(Op::FindVariable { name, target }) => {
+                    // Try looking up the variable by name in globals
+                    if let Some(v) = self.globals.get(name) {
+                        return Err(match v {
+                            Value::Int(i) => *i,
+                            Value::Float(f) => *f as i32,
+                        });
+                    }
+                    if let Some(base) = name.strip_suffix(" tag") {
+                        if let Some(v) = self.globals.get(base) {
+                            return Err(match v {
+                                Value::Int(i) => *i,
+                                Value::Float(f) => *f as i32,
+                            });
+                        }
+                    }
+                    // Try targeting path
+                    if !target.is_empty() {
+                        let mut resolved: Vec<Ref> =
+                            target.iter().chain(&p[1..]).copied().collect();
+                        if let Ok(c) = self.canon(&resolved) {
+                            resolved = c;
+                        }
+                        if self.vars.contains_key(&resolved) {
+                            p = resolved;
+                            continue;
+                        }
+                    }
+                    p = p[1..].to_vec();
+                    if p.is_empty() {
+                        return Err(0);
+                    }
                 }
                 Some(Op::LoopValue { .. }) if p.len() == 1 => {
                     return Err(self.loops.get(o).copied().unwrap_or(0));
@@ -2016,6 +2061,59 @@ mod tests {
         let mut vm = Vm::new(&s, None);
         // i = 0, 1 run clamp (1 + 3); i = 2 skipped; i = 3 runs clamp (7) then returns.
         assert_eq!(out_of(vm.call("outer", &[]).unwrap(), "n"), I(11));
+    }
+
+    #[test]
+    fn vm_op_find_variable_lookup() {
+        let fv = 0x20;
+        let dest = 0x21;
+        let mut s = script_set(
+            vec![
+                ins(
+                    1,
+                    5,
+                    Op::DefineMacro {
+                        name: "test_find_var".into(),
+                    },
+                ),
+                ins(2, 1, Op::Interface),
+                param(dest, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    fv,
+                    0,
+                    Op::FindVariable {
+                        name: "Levels_Completed tag".into(),
+                        target: vec![Ref::Handle(127)],
+                    },
+                ),
+                ins(
+                    3,
+                    0,
+                    set(
+                        dest,
+                        Rhs {
+                            a: rd(fv),
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[(dest, "out")],
+        );
+        s.vars.insert(
+            fv,
+            VarInfo {
+                name: "".into(),
+                type_name: "OpFindVariable".into(),
+                init: None,
+            },
+        );
+        let mut vm = Vm::new(&s, None);
+        vm.globals
+            .insert("Levels_Completed".to_string(), Value::Int(7));
+        assert_eq!(out_of(vm.call("test_find_var", &[]).unwrap(), "out"), I(7));
     }
 
     #[test]

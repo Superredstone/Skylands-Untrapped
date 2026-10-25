@@ -3847,7 +3847,7 @@ mod tests {
                 offset: 3,
                 flags: 0,
                 br: 0,
-                op: remove,
+                op: remove.clone(),
             },
         ];
         let mut vars = std::collections::HashMap::new();
@@ -3890,6 +3890,83 @@ mod tests {
         }
         step_fixed(&mut app);
         assert!(app.world().get_entity(prop).is_err());
+
+        // Test OpFindVariable dynamic resolution with Levels_Completed tag
+        let find_var_op = Op::FindVariable {
+            name: "Levels_Completed tag".into(),
+            target: vec![Ref::Handle(0)],
+        };
+        let check_find_var = Op::CheckValue {
+            lhs: vec![Ref::Obj(2)], // refers to OpFindVariable at offset 2
+            rel: 2,                 // >= 3
+            rhs: Rhs {
+                a: Operand::Lit(Value::Int(3)),
+                arith: -1,
+                b: None,
+                func: 0,
+            },
+        };
+        let ops2 = vec![
+            Instr {
+                offset: 0,
+                flags: 0,
+                br: 4,
+                op: Op::PreScript,
+            },
+            Instr {
+                offset: 1,
+                flags: 0,
+                br: 0,
+                op: Op::StartUp,
+            },
+            Instr {
+                offset: 2,
+                flags: 0,
+                br: 0,
+                op: find_var_op,
+            },
+            Instr {
+                offset: 3,
+                flags: 0,
+                br: 1,
+                op: check_find_var,
+            },
+            Instr {
+                offset: 4,
+                flags: 0,
+                br: 0,
+                op: remove,
+            },
+        ];
+        let mut vars2 = std::collections::HashMap::new();
+        vars2.insert(
+            2,
+            VarInfo {
+                name: "".into(),
+                type_name: "OpFindVariable".into(),
+                init: None,
+            },
+        );
+        let set2 = ScriptSet {
+            scripts: vec![Script {
+                name: "gate_find_var.ai".into(),
+                ops: ops2,
+            }],
+            handle_ids: vec![field::MY],
+            handle_ns: vec![name_hash("my")],
+            export_base: 0,
+            roots: Vec::new(),
+            vars: vars2,
+            sets: Default::default(),
+            opaque_operands: Default::default(),
+        };
+        let scripts2 = LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
+            set2, None,
+        )));
+        let prop2 = spawn_scripted(&mut app, scripts2, Transform::IDENTITY);
+        // Completed chapters is 5 (>= 3): check passes, prop2 removed
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(prop2).is_err());
     }
 
     fn npc(name: &str, conversations: &[&[&str]]) -> Npc {
