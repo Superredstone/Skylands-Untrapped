@@ -1328,22 +1328,39 @@ pub fn hero_max_hp(
     global: &ScriptSet,
     tuning: &MinionTuning,
 ) -> Option<f32> {
-    let rhs = character
+    let (_, rhs) =
+        local_stat_sets(character).find(|&(v, _)| character.var_name(v).ends_with("_HP_local"))?;
+    tuned_vm(character, global, tuning)
+        .eval_rhs(rhs)
+        .ok()
+        .map(|v| v.as_f32())
+}
+
+/// Assignments to the character's `<id>_*_local` stat variables, in file order, without
+/// the Eons Elite branch (`* "Elite - HP Mult"`): a normal toy.
+fn local_stat_sets(character: &ScriptSet) -> impl Iterator<Item = (usize, &Rhs)> {
+    character
         .scripts
         .iter()
         .flat_map(|s| &s.ops)
-        .find_map(|i| match &i.op {
+        .filter_map(move |i| match &i.op {
             Op::SetValue { lhs, rhs } => match lhs[..] {
                 [Ref::Obj(v)]
-                    if character.var_name(v).ends_with("_HP_local")
+                    if character.var_name(v).ends_with("_local")
                         && !character.rhs_str(rhs).contains("Elite") =>
                 {
-                    Some(rhs)
+                    Some((v, rhs))
                 }
                 _ => None,
             },
             _ => None,
-        })?;
+        })
+}
+
+/// `Vm` over `character` with its `global.bld` handles seeded from `tuning` and its
+/// `*_local` stats assigned (their `ValueInfo` initial values can be stale: Gill Grunt's
+/// `014_Movement_Speed_local` is 18 until the Def macro sets `Speed_Slow`).
+fn tuned_vm<'a>(character: &'a ScriptSet, global: &'a ScriptSet, tuning: &MinionTuning) -> Vm<'a> {
     let mut vm = Vm::new(character, Some(global));
     for h in 0..character.handle_ids.len() as u32 {
         if let Some(v) = character
@@ -1353,7 +1370,57 @@ pub fn hero_max_hp(
             vm.set_var(vec![Ref::Handle(h)], *v);
         }
     }
-    vm.eval_rhs(rhs).ok().map(|v| v.as_f32())
+    let mut seen = Vec::new();
+    for (var, rhs) in local_stat_sets(character) {
+        if !seen.contains(&var) {
+            seen.push(var);
+            if let Ok(v) = vm.eval_rhs(rhs) {
+                vm.set_var(vec![Ref::Obj(var)], v);
+            }
+        }
+    }
+    vm
+}
+
+/// Movement a Skylander's script passes to global `Minion.ai` "Minion - setup pre
+/// descriptions", which writes them to `my.movement` (ft/s, deg/s).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeroMovement {
+    pub ground_max_speed: f32,
+    pub air_max_speed: f32,
+    pub ground_turn_rate: f32,
+    pub air_turn_rate: f32,
+}
+
+/// Spyro: `default speed` 24 (`$acf`), `default air speed` 25, turn rates `$ade`.
+pub fn hero_movement(
+    character: &ScriptSet,
+    global: &ScriptSet,
+    tuning: &MinionTuning,
+) -> Option<HeroMovement> {
+    let mut vm = tuned_vm(character, global, tuning);
+    let mut param = |name: &str| -> Option<f32> {
+        let rhs = character
+            .scripts
+            .iter()
+            .flat_map(|s| &s.ops)
+            .find_map(|i| match &i.op {
+                Op::Param {
+                    var,
+                    rhs: Some(rhs),
+                    ..
+                } if character.var_name(*var) == name => Some(rhs),
+                _ => None,
+            })?;
+        let v = vm.eval_rhs(rhs).ok()?.as_f32();
+        (v > 0.0).then_some(v)
+    };
+    Some(HeroMovement {
+        ground_max_speed: param("default speed")?,
+        air_max_speed: param("default air speed")?,
+        ground_turn_rate: param("default ground turn rate")?,
+        air_turn_rate: param("default air turn rate")?,
+    })
 }
 
 /// `Init_Setup_SaveGame_Portal.ai` "Portal - Define Levelup Table" defaults.
@@ -1795,6 +1862,19 @@ mod tests {
         assert_eq!(tuning.get("HP_Minion_VeryLow"), Some(200.0));
         assert_eq!(tuning.get("HP_Minion_NudgeAmount"), Some(10.0));
         assert_eq!(hero_max_hp(&spyro, &g, &tuning), Some(280.0));
+        assert_eq!(tuning.get("Speed_Med"), Some(24.0));
+        assert_eq!(
+            hero_movement(&spyro, &g, &tuning),
+            Some(HeroMovement {
+                ground_max_speed: 24.0,
+                air_max_speed: 25.0,
+                ground_turn_rate: 1440.0,
+                air_turn_rate: 1440.0,
+            })
+        );
+        // `014_Movement_Speed_local` = `Speed_Slow`, not its stale initial 18.
+        let gill_move = hero_movement(&gill, &g, &tuning).unwrap();
+        assert_eq!(gill_move.ground_max_speed, 23.0);
         // Eons Elite branch (x3) is not taken.
         assert_eq!(hero_max_hp(&gill, &g, &tuning), Some(270.0));
     }

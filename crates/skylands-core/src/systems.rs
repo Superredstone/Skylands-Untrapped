@@ -40,10 +40,16 @@ pub fn spawn_hero_actor(
         .as_deref()
         .map(CharacterCollider::from_model)
         .unwrap_or_default();
-    let model_params = model
+    let mut model_params = model
         .as_deref()
         .map(ModelParameters::from_model)
         .unwrap_or_default();
+    if let Some(m) = asset_server.and_then(|s| s.hero_movement(model_path)) {
+        model_params.ground_max_speed = m.ground_max_speed * FEET_TO_UNITS;
+        model_params.air_max_speed = m.air_max_speed * FEET_TO_UNITS;
+        model_params.ground_turn_rate = m.ground_turn_rate;
+        model_params.air_turn_rate = m.air_turn_rate;
+    }
     let health = asset_server
         .and_then(|s| s.hero_max_hp(model_path))
         .map(|hp| Health {
@@ -3253,7 +3259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hero_max_health_from_character_script() {
+    fn test_hero_stats_from_character_script() {
         let mut app = App::new();
         let dir = ["assets/files", "../../assets/files"]
             .into_iter()
@@ -3283,6 +3289,13 @@ mod tests {
             })
         );
         assert_eq!(server.hero_max_hp("missing.bld"), None);
+        // Spyro's "default speed" `Speed_Med` (24 ft/s), not the 20 ft/s DOL default.
+        let params = app.world().get::<ModelParameters>(hero).unwrap();
+        assert!((params.ground_max_speed - 24.0 * FEET_TO_UNITS).abs() < 1e-4);
+        assert!((params.air_max_speed - 25.0 * FEET_TO_UNITS).abs() < 1e-4);
+        assert_eq!(params.ground_turn_rate, 1440.0);
+        let speed = app.world().get::<MovementSpeed>(hero).unwrap().0;
+        assert!((speed - params.ground_max_speed).abs() < 1e-4);
     }
 
     #[test]

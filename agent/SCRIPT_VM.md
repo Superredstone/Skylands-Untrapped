@@ -73,6 +73,9 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
 - Hero base HP: `<id>_Def.ai` `set "<id>_HP_local" = HP_Minion_<tier> [+ HP_Minion_NudgeAmount]`.
   The tiers are 1.0 in `global.bld`; `Init_Setup_Minions.ai` "Minion - Tune Minions" writes the real
   values (Medium 270, Nudge 10, ...). `Vm::global_writes` collects them by export name.
+- Hero movement: `<id>_<Name>.ai` startup `use` of "Minion - setup pre descriptions" passes
+  `default speed` (Spyro `Speed_Med` 24), `default air speed`, `default ground/air turn rate`.
+  `*_local` initial values can be stale; apply their Def-script `set`s first.
 
 ## Actor runtime (`script_runtime.rs`)
 - Script shape: `OpPreScript` (br = whole script) holds `OpStartUp` (block, run once), `OpShutDown`

@@ -2,7 +2,9 @@ use crate::audio::PortalSpeakerSink;
 use crate::collision::CollisionMesh;
 use crate::events::PortalEvent;
 use bevy::prelude::*;
-use skylands_formats::{hero_max_hp, AssetLoader, MinionTuning, ScriptSet};
+use skylands_formats::{
+    hero_max_hp, hero_movement, AssetLoader, HeroMovement, MinionTuning, ScriptSet,
+};
 use skylands_portal::protocol::{
     decode_portal_response, encode_color_packet, encode_trap_light_packet, PortalZone, REPORT_SIZE,
 };
@@ -34,6 +36,23 @@ impl GameAssetServer {
     /// Level-1 max HP from the character file's `<id>_HP_local` (`hero_max_hp`), parsed
     /// once per server. `None` when the scripts are missing.
     pub fn hero_max_hp(&self, model_path: &str) -> Option<u32> {
+        let (character, scripts) = self.character_scripts(model_path)?;
+        hero_max_hp(&character, &scripts.0, &scripts.1)
+            .filter(|&hp| hp > 0.0)
+            .map(|hp| hp.round() as u32)
+    }
+
+    /// Movement the character's script passes to "Minion - setup pre descriptions"
+    /// (`hero_movement`, ft/s and deg/s).
+    pub fn hero_movement(&self, model_path: &str) -> Option<HeroMovement> {
+        let (character, scripts) = self.character_scripts(model_path)?;
+        hero_movement(&character, &scripts.0, &scripts.1)
+    }
+
+    fn character_scripts(
+        &self,
+        model_path: &str,
+    ) -> Option<(ScriptSet, Arc<(ScriptSet, MinionTuning)>)> {
         let parse = |p: &str| {
             let bytes = self.loader.lock().ok()?.load_raw(p).ok()?;
             ScriptSet::parse(&bytes)
@@ -46,10 +65,7 @@ impl GameAssetServer {
                 Some(Arc::new((global, tuning)))
             })
             .clone()?;
-        let character = parse(model_path)?;
-        hero_max_hp(&character, &scripts.0, &scripts.1)
-            .filter(|&hp| hp > 0.0)
-            .map(|hp| hp.round() as u32)
+        Some((parse(model_path)?, scripts))
     }
 }
 
