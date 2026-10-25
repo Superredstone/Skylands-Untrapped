@@ -47,10 +47,18 @@ impl SaveParamDef {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SaveSchema {
     pub params: Vec<SaveParamDef>,
+    /// `"level count"` set (`global.bld` `$72e`): field `i` of every per-level param
+    /// (`level flags`, `collection - story tablets`...) belongs to `levels[i]`.
+    pub levels: Vec<String>,
 }
 
+/// `count` field of a set (`$39b1ddf4`, FNV-1a of `"count"`).
+const COUNT_FIELD: u32 = 0x39b1_ddf4;
+
 impl SaveSchema {
-    pub fn from_scripts(init_setup: &ScriptSet) -> Option<Self> {
+    /// `global` resolves `<set>.count` counts from static `global.bld` sets (level and
+    /// save slot lists); without it they stay `SaveCount::Runtime`.
+    pub fn from_scripts(init_setup: &ScriptSet, global: Option<&ScriptSet>) -> Option<Self> {
         let script = init_setup.script("Init_Setup_SaveGame.ai")?;
         let define_at = script.ops.iter().find_map(|i| match &i.op {
             Op::DefineMacro { name } if name == DEFINE_SAVE_PARAM => Some(i.offset),
@@ -58,6 +66,15 @@ impl SaveSchema {
         })?;
         // Locals only ever set to one literal (`"minion count" = 160`). `"track i"` starts at
         // 0 and is summed in a loop, so it stays a runtime count.
+        let set_of = |path: &[Ref]| match (path, global) {
+            ([Ref::Handle(set), Ref::Handle(field)], Some(g))
+                if init_setup.handle_ids.get(*field as usize) == Some(&COUNT_FIELD) =>
+            {
+                init_setup.global_set(*set, g)
+            }
+            _ => None,
+        };
+        let mut levels = Vec::new();
         let mut locals: HashMap<usize, Option<Value>> = HashMap::new();
         for ins in &script.ops {
             match &ins.op {
@@ -65,6 +82,12 @@ impl SaveSchema {
                     if let [Ref::Obj(v)] = lhs[..] {
                         let lit = match (&rhs.a, &rhs.b) {
                             (Operand::Lit(val), None) => Some(*val),
+                            (Operand::Read { path, .. }, None) => set_of(path).map(|members| {
+                                if init_setup.var_name(v) == "level count" {
+                                    levels = members.to_vec();
+                                }
+                                Value::Int(members.len() as i32)
+                            }),
                             _ => None,
                         };
                         let e = locals.entry(v).or_insert(lit);
@@ -99,7 +122,7 @@ impl SaveSchema {
             // figure data, mobile), not params of this savegame.
             .filter(|p| !p.name.starts_with('^'))
             .collect();
-        Some(Self { params })
+        Some(Self { params, levels })
     }
 
     /// One "Define Save Param" call site: `ops` starts at its interface.
@@ -211,6 +234,7 @@ mod tests {
                 p("flags", false, SaveCount::Fixed(180), 1),
                 p("slots", true, SaveCount::Fixed(4), 8),
             ],
+            levels: Vec::new(),
         };
         let none = |_: &str| None;
         let header: Vec<_> = schema
@@ -229,20 +253,36 @@ mod tests {
 
     #[test]
     fn rom_save_schema() {
-        let Some(bytes) = ["assets/files/character", "../../assets/files/character"]
-            .iter()
-            .map(|d| std::path::Path::new(d).join("Init_Setup.bld"))
-            .find(|p| p.exists())
-            .and_then(|p| {
-                let mut m = crate::archive::ArchiveMount::new();
-                m.mount(&p).ok()?;
-                m.read_file("level.bld").ok()
-            })
+        let read = |dir: &str, name: &str| {
+            ["assets/files", "../../assets/files"]
+                .iter()
+                .map(|d| {
+                    std::path::Path::new(d)
+                        .join(dir)
+                        .join(format!("{name}.bld"))
+                })
+                .find(|p| p.exists())
+                .and_then(|p| {
+                    let mut m = crate::archive::ArchiveMount::new();
+                    m.mount(&p).ok()?;
+                    ScriptSet::parse(&m.read_file("level.bld").ok()?)
+                })
+        };
+        let (Some(set), Some(global)) =
+            (read("character", "Init_Setup"), read("permanent", "global"))
         else {
             return;
         };
-        let set = ScriptSet::parse(&bytes).unwrap();
-        let schema = SaveSchema::from_scripts(&set).expect("schema");
+        let unresolved = SaveSchema::from_scripts(&set, None).expect("schema");
+        assert!(matches!(
+            &unresolved.params.iter().find(|p| p.name == "level flags").unwrap().fields,
+            SaveCount::Runtime(n) if n == "level count"
+        ));
+        let schema = SaveSchema::from_scripts(&set, Some(&global)).expect("schema");
+        assert_eq!(schema.levels.len(), 22);
+        assert_eq!(schema.levels[0], "Level_300_BirdCage");
+        assert_eq!(schema.levels[2], "Level_302_ChompyWurm");
+        assert_eq!(schema.levels[21], "Level_327_Kaos_Exp");
         let get = |n: &str| schema.params.iter().find(|p| p.name == n).unwrap();
         let first = &schema.params[0];
         assert_eq!(first.name, "header - savegame version");
@@ -255,10 +295,8 @@ mod tests {
         assert_eq!(get("portalmaster - stars").fields, SaveCount::Fixed(180));
         assert_eq!(get("village generic vars").fields, SaveCount::Fixed(100));
         assert!(get("village generic vars").signed);
-        assert_eq!(
-            get("level flags").fields,
-            SaveCount::Runtime("level count".into())
-        );
+        assert_eq!(get("level flags").fields, SaveCount::Fixed(22));
+        assert_eq!(get("header - slot level IDs").fields, SaveCount::Fixed(4));
         assert_eq!(
             get("collection - toys").fields,
             SaveCount::Runtime("track i".into())
@@ -276,6 +314,10 @@ mod tests {
         assert_eq!(at("header - options sound vols"), Some(12));
         assert_eq!(at("portalmaster ID"), Some(48));
         assert_eq!(at("header - slot level IDs"), Some(112));
-        assert_eq!(at("header - slot minions collected"), None);
+        // Slot fields resolve (4 slots); the toy collection (`track i`) stays unknown.
+        assert_eq!(at("header - slot minions collected"), Some(144));
+        assert_eq!(at("header - slot complete pct"), Some(153));
+        assert_eq!(at("collection - toys"), Some(607));
+        assert_eq!(at("collection - toys - items"), None);
     }
 }

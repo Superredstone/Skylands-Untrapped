@@ -174,6 +174,9 @@ pub struct ScriptSet {
     /// Operands of ops the decoder has no variant for (`OpSpawn`, `OpStartSequence`,
     /// `OpControl`...), keyed by op offset: (field offset, operand). Listing only.
     pub opaque_operands: HashMap<usize, Vec<(usize, OpaqueOperand)>>,
+    /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
+    /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
+    pub sets: HashMap<usize, Vec<String>>,
 }
 
 /// Ops whose operands `ScriptSet::opaque_operands` records.
@@ -518,6 +521,22 @@ impl ScriptSet {
             };
             vars.insert(o.offset, info);
         }
+        let sets = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
+            .map(|o| {
+                let members = r
+                    .ptr(o.offset + 0x18)
+                    .map(|l| r.list(l))
+                    .unwrap_or_default();
+                let names = members
+                    .into_iter()
+                    .filter_map(|w| r.decode_ptr(w))
+                    .map(|m| r.cstr(m + 0x08))
+                    .collect();
+                (o.offset, names)
+            })
+            .collect();
         let mut opaque_operands = HashMap::new();
         let scripts = objects
             .iter()
@@ -560,6 +579,7 @@ impl ScriptSet {
             roots: file.roots.clone(),
             export_base: file.external_types.len(),
             opaque_operands,
+            sets,
         })
     }
 
@@ -590,6 +610,16 @@ impl ScriptSet {
         }
         let id = (*self.handle_ids.get(i)? as usize).checked_sub(global.export_base)?;
         global.vars.get(global.roots.get(id)?)
+    }
+
+    /// Members of the static `ScriptSet` behind `EXID` handle `h` exported by `global`.
+    pub fn global_set<'g>(&self, h: u32, global: &'g ScriptSet) -> Option<&'g [String]> {
+        let i = h as usize;
+        if *self.handle_ns.get(i)? != name_hash("global.bld") {
+            return None;
+        }
+        let id = (*self.handle_ids.get(i)? as usize).checked_sub(global.export_base)?;
+        global.sets.get(global.roots.get(id)?).map(Vec::as_slice)
     }
 
     pub fn script(&self, name_suffix: &str) -> Option<&Script> {
