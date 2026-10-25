@@ -1927,6 +1927,8 @@ pub struct IgbModel {
     pub actor_models: Vec<ActorModel>,
     /// `tfbAnimationState`s: the ids `OpStartSequence` on the `animation palette` plays.
     pub animation_states: Vec<AnimationStateInfo>,
+    /// `tfbAnimationStateData._transitions`: which state a request plays and the blend time.
+    pub animation_transitions: Vec<AnimationTransition>,
     /// `ScriptColorInfo` (`+0x08` name, `_value` `+0x18`, `0xAABBGGRR`): script colour
     /// constants such as `MM_element_00_magic_color`.
     pub script_colors: Vec<(String, u32)>,
@@ -1965,6 +1967,66 @@ pub struct AnimationStateInfo {
     pub name: String,
     /// Index into `IgbModel.animations` of the state's first clip.
     pub clip: Option<usize>,
+}
+
+/// `tfbAnimationTransition*` (0x28): `+0x08` name, `+0x10` requested state id (-1: taken
+/// when the source state's clip ends), `+0x1c` blend seconds, `+0x20` source
+/// `tfbAnimationStateList` (empty: any state), `+0x24` destination list (the state played).
+/// Spyro: "idle to idletowalk" plays `IdletoWalk` (99) when walk (1) is requested from idle,
+/// "idletowalk to walk" then auto-advances to walk.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnimationTransition {
+    pub name: String,
+    pub request: i32,
+    pub from: Vec<i32>,
+    pub to: i32,
+    pub blend: f32,
+}
+
+/// Requested state id that marks an automatic transition at the end of the source clip.
+pub const AUTO_TRANSITION: i32 = -1;
+
+/// A character's animation states (id, clip name) and the transitions between them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnimationGraph {
+    pub states: Vec<(i32, String)>,
+    pub transitions: Vec<AnimationTransition>,
+}
+
+impl AnimationGraph {
+    pub fn state_for_clip(&self, clip: &str) -> Option<i32> {
+        self.states
+            .iter()
+            .find(|(_, c)| c.eq_ignore_ascii_case(clip))
+            .map(|&(id, _)| id)
+    }
+
+    pub fn clip_for_state(&self, id: i32) -> Option<&str> {
+        self.states
+            .iter()
+            .find(|&&(s, _)| s == id)
+            .map(|(_, c)| c.as_str())
+    }
+
+    /// Transition taken when `request` is asked for in state `current`: one listing
+    /// `current` as a source wins over an any-source one.
+    pub fn transition(&self, current: Option<i32>, request: i32) -> Option<&AnimationTransition> {
+        let candidates = || {
+            self.transitions
+                .iter()
+                .filter(move |t| t.request == request)
+        };
+        current
+            .and_then(|c| candidates().find(|t| t.from.contains(&c)))
+            .or_else(|| candidates().find(|t| t.from.is_empty()))
+    }
+
+    /// Transition taken when the clip of state `current` ends.
+    pub fn auto_transition(&self, current: i32) -> Option<&AnimationTransition> {
+        self.transitions
+            .iter()
+            .find(|t| t.request == AUTO_TRANSITION && t.from.contains(&current))
+    }
 }
 
 /// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
@@ -2050,6 +2112,7 @@ impl Default for IgbModel {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         }
     }
@@ -2212,6 +2275,7 @@ impl IgbModel {
                 marker_scripts: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
+                animation_transitions: Vec::new(),
                 script_colors: Vec::new(),
             });
         }
@@ -2254,6 +2318,7 @@ impl IgbModel {
                 marker_scripts: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
+                animation_transitions: Vec::new(),
                 script_colors: Vec::new(),
             });
         }
@@ -2444,6 +2509,7 @@ impl IgbModel {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         })
     }
@@ -3714,6 +3780,23 @@ impl IgbModel {
             .collect()
     }
 
+    /// States whose clip belongs to the primary rig, by clip name, and their transitions.
+    pub fn animation_graph(&self) -> AnimationGraph {
+        let primary = self.primary_skeleton_index();
+        AnimationGraph {
+            states: self
+                .animation_states
+                .iter()
+                .filter_map(|s| {
+                    let clip = self.animations.get(s.clip?)?;
+                    (clip.skeleton.is_none() || clip.skeleton == primary)
+                        .then(|| (s.id, clip.name.clone()))
+                })
+                .collect(),
+            transitions: self.animation_transitions.clone(),
+        }
+    }
+
     /// Clip of the `tfbAnimationState` with `_id` `id` (`OpStartSequence` on the
     /// `animation palette`: Magic Moment rig 3 = "New Toy", hero 80 = `ToyAlive`).
     pub fn animation_for_state(&self, id: i32) -> Option<&AnimationClip> {
@@ -3722,6 +3805,65 @@ impl IgbModel {
             .find(|s| s.id == id)
             .and_then(|s| s.clip)
             .and_then(|c| self.animations.get(c))
+    }
+
+    fn decode_animation_transitions(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+    ) -> Vec<AnimationTransition> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        // `tfbAnimationStateList`: `+0x08` count, `+0x14` items -> state (`_id` `+0x0c`).
+        let state_ids = |list: Option<usize>| -> Vec<i32> {
+            let Some(list) = list else {
+                return Vec::new();
+            };
+            let count = rd(list + 0x08).unwrap_or(0) as usize;
+            let Some(items) = ptr(list + 0x14) else {
+                return Vec::new();
+            };
+            (0..count)
+                .filter_map(|i| ptr(items + i * 4))
+                .filter_map(|state| rd(state + 0x0c))
+                .map(|id| id as i32)
+                .collect()
+        };
+        objects
+            .iter()
+            .filter(|o| {
+                o.type_name.as_deref().is_some_and(|t| {
+                    t.starts_with("tfbAnimationTransition") && t != "tfbAnimationTransitionList"
+                })
+            })
+            .filter_map(|t| {
+                let request = rd(t.offset + 0x10)? as i32;
+                let to = *state_ids(ptr(t.offset + 0x24)).first()?;
+                Some(AnimationTransition {
+                    name: cstr(t.offset + 0x08),
+                    request,
+                    from: state_ids(ptr(t.offset + 0x20)),
+                    to,
+                    blend: f32::from_bits(rd(t.offset + 0x1c).unwrap_or(0)),
+                })
+            })
+            .collect()
     }
 
     /// Meshes of a rigid `tfbPhysicsModel`: `+0x68` `tfbBodyEntityInfo` `+0x14` ->
@@ -5651,6 +5793,10 @@ impl IgbModel {
             animations = vec![idle_clip, walk_clip, attack_clip];
         }
 
+        let animation_transitions = igz_objects
+            .as_ref()
+            .map(|list| Self::decode_animation_transitions(data, sections, &list.objects, endian))
+            .unwrap_or_default();
         let (actor_models, animation_states) = match &igz_objects {
             Some(list) => (
                 Self::decode_actor_models(
@@ -5718,6 +5864,7 @@ impl IgbModel {
             marker_scripts,
             actor_models,
             animation_states,
+            animation_transitions,
             script_colors,
         })
     }
@@ -6702,6 +6849,7 @@ mod tests {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         };
 
@@ -6827,6 +6975,7 @@ mod tests {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         };
 
@@ -7106,6 +7255,7 @@ mod tests {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         };
 
@@ -7281,6 +7431,37 @@ mod tests {
         assert_eq!(toy_alive.name, "toyalive");
         assert!((toy_alive.duration - 3.33).abs() < 0.01);
         assert_eq!(model.animation_for_state(81).unwrap().name, "toy");
+    }
+
+    #[test]
+    fn test_spyro_animation_transitions() {
+        let Some(bytes) = read_character_bld("016_Spyro") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        let graph = model.animation_graph();
+        assert_eq!(graph.clip_for_state(99), Some("idletowalk"));
+        assert_eq!(graph.state_for_clip("walk"), Some(1));
+
+        // Walk from idle goes through IdletoWalk, then auto-advances to walk.
+        let t = graph.transition(Some(0), 1).expect("idle to idletowalk");
+        assert_eq!(t.name, "idle to idletowalk");
+        assert_eq!(t.to, 99);
+        assert!((t.blend - 0.1333).abs() < 1e-3);
+        let auto = graph.auto_transition(99).expect("idletowalk to walk");
+        assert_eq!(auto.to, 1);
+
+        // Specific sources win; other sources fall back to the any-source default.
+        let run_to_walk = graph.transition(Some(3), 1).unwrap();
+        assert!((run_to_walk.blend - 0.2667).abs() < 1e-3);
+        let any = graph.transition(Some(57), 1).unwrap();
+        assert!(any.from.is_empty());
+        assert!((any.blend - 0.064).abs() < 1e-4);
+
+        // JumpStanding lands on its own; landing blends to idle on request.
+        assert_eq!(graph.auto_transition(101).unwrap().to, 61);
+        let land_idle = graph.transition(Some(61), 0).unwrap();
+        assert!((land_idle.blend - 0.0667).abs() < 1e-3);
     }
 
     #[test]

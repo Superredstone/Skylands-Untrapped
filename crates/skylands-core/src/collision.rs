@@ -670,6 +670,7 @@ mod tests {
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
+            animation_transitions: Vec::new(),
             script_colors: Vec::new(),
         };
 

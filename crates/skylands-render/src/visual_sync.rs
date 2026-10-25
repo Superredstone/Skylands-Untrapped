@@ -861,9 +861,157 @@ pub fn setup_environment_and_assets(
 pub struct CharacterAnimator {
     pub skeleton: skylands_formats::Skeleton,
     pub animations: Vec<skylands_formats::AnimationClip>,
+    /// Logical state last requested (`animation_state_name`, viewer or Magic Moment clip).
     pub current_clip: String,
+    /// Seconds into `playing`.
     pub elapsed: f32,
     pub joints: Vec<Entity>,
+    /// The character's `tfbAnimationState` transitions (empty: plain clip switches).
+    pub graph: skylands_formats::AnimationGraph,
+    /// Clip actually playing; differs from the request inside a transition (`idletowalk`).
+    pub playing: String,
+    /// `tfbAnimationState` id of `playing`, when the graph knows it.
+    pub state: Option<i32>,
+    pub blend: Option<ClipBlend>,
+}
+
+impl CharacterAnimator {
+    pub fn new(
+        skeleton: skylands_formats::Skeleton,
+        animations: Vec<skylands_formats::AnimationClip>,
+        graph: skylands_formats::AnimationGraph,
+        joints: Vec<Entity>,
+    ) -> Self {
+        let mut animator = Self {
+            skeleton,
+            animations,
+            current_clip: String::new(),
+            elapsed: 0.0,
+            joints,
+            graph,
+            playing: String::new(),
+            state: None,
+            blend: None,
+        };
+        animator.advance("idle", 0.0);
+        animator.blend = None;
+        animator
+    }
+
+    fn clip(&self, name: &str) -> Option<&skylands_formats::AnimationClip> {
+        self.animations.iter().find(|c| c.name == name)
+    }
+
+    /// Switches to `clip`, cross-fading from the current pose over `blend` seconds.
+    fn start(&mut self, clip: String, state: Option<i32>, blend: f32) {
+        self.blend = (blend > 0.0 && !self.playing.is_empty()).then(|| ClipBlend {
+            from: std::mem::take(&mut self.playing),
+            from_time: self.sample_time(),
+            duration: blend,
+            elapsed: 0.0,
+        });
+        self.playing = clip;
+        self.state = state;
+        self.elapsed = 0.0;
+    }
+
+    /// Steps playback by `dt` towards the logical state `requested`. A new request goes
+    /// through the graph's transition for it (destination state and blend time); a clip
+    /// that ends with an automatic transition moves on to its destination.
+    pub fn advance(&mut self, requested: &str, dt: f32) {
+        if let Some(blend) = &mut self.blend {
+            blend.elapsed += dt;
+            if blend.elapsed >= blend.duration {
+                self.blend = None;
+            }
+        }
+        if self.current_clip != requested {
+            self.current_clip = requested.to_string();
+            let Some(target) = resolve_clip(&self.animations, requested).map(|c| c.name.clone())
+            else {
+                self.playing.clear();
+                self.state = None;
+                self.elapsed = 0.0;
+                return;
+            };
+            let request = self.graph.state_for_clip(&target);
+            let transition = request
+                .and_then(|r| self.graph.transition(self.state, r))
+                .and_then(|t| {
+                    let clip = self.graph.clip_for_state(t.to)?;
+                    self.clip(clip)
+                        .map(|c| (c.name.clone(), Some(t.to), t.blend))
+                });
+            let (clip, state, blend) = transition.unwrap_or((target, request, 0.0));
+            self.start(clip, state, blend);
+            return;
+        }
+        self.elapsed += dt;
+        let ended = self
+            .clip(&self.playing)
+            .is_some_and(|c| self.elapsed >= c.duration);
+        let next = self
+            .state
+            .filter(|_| ended)
+            .and_then(|s| self.graph.auto_transition(s))
+            .and_then(|t| {
+                let clip = self.clip(self.graph.clip_for_state(t.to)?)?;
+                Some((clip.name.clone(), t.to, t.blend))
+            });
+        if let Some((clip, state, blend)) = next {
+            self.start(clip, Some(state), blend);
+        }
+    }
+
+    /// Attacks, jump take-offs, the portal entrance and states that auto-advance play once
+    /// and hold their last frame; everything else loops.
+    fn holds_last_frame(&self) -> bool {
+        is_one_shot(&self.current_clip)
+            || self
+                .state
+                .is_some_and(|s| self.graph.auto_transition(s).is_some())
+    }
+
+    fn sample_time(&self) -> f32 {
+        match self.clip(&self.playing) {
+            Some(c) if self.holds_last_frame() => self.elapsed.min(c.duration * 0.999),
+            _ => self.elapsed,
+        }
+    }
+
+    /// Joint transforms (model space) for the current frame, cross-faded while blending.
+    pub fn pose(&self) -> Vec<Transform> {
+        let sample = |clip: &str, t: f32| -> Vec<Transform> {
+            self.clip(clip)
+                .map(|c| c.sample_global_transforms(t, &self.skeleton))
+                .unwrap_or_default()
+                .iter()
+                .map(|m| Transform::from_matrix(Mat4::from_cols_array(m)))
+                .collect()
+        };
+        let mut pose = sample(&self.playing, self.sample_time());
+        if let Some(blend) = &self.blend {
+            let from = sample(&blend.from, blend.from_time);
+            let w = (blend.elapsed / blend.duration).clamp(0.0, 1.0);
+            for (to, from) in pose.iter_mut().zip(from) {
+                *to = Transform {
+                    translation: from.translation.lerp(to.translation, w),
+                    rotation: from.rotation.slerp(to.rotation, w),
+                    scale: from.scale.lerp(to.scale, w),
+                };
+            }
+        }
+        pose
+    }
+}
+
+/// Cross-fade from the pose `from` held at `from_time` (`AnimationTransition.blend`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipBlend {
+    pub from: String,
+    pub from_time: f32,
+    pub duration: f32,
+    pub elapsed: f32,
 }
 
 /// Real clip for a logical state from `skylands_core::animation_state_name`, falling back
@@ -920,39 +1068,30 @@ pub fn character_animation_system(
         .map(|v| v.clip_name.clone());
 
     for (mut anim, actor_anim, mm_pose) in &mut anim_query {
-        let requested = match mm_pose {
-            Some(pose) => pose.clip.as_str(),
-            None => viewer_clip
-                .as_deref()
-                .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
-                .unwrap_or("idle"),
-        };
-        if anim.current_clip != requested {
-            anim.current_clip = requested.to_string();
-            anim.elapsed = 0.0;
-        } else {
-            anim.elapsed += dt;
-        }
-        // The Magic Moment drives its Skylander's clip time (`ToyAlive` held at rate 0).
-        if let Some(pose) = mm_pose {
-            anim.elapsed = pose.time;
+        match mm_pose {
+            // The Magic Moment drives its Skylander's clip and time (`ToyAlive` held at
+            // rate 0), with no transitions.
+            Some(pose) => {
+                let clip = resolve_clip(&anim.animations, &pose.clip).map(|c| c.name.clone());
+                anim.current_clip = pose.clip.clone();
+                anim.playing = clip.unwrap_or_default();
+                anim.state = None;
+                anim.blend = None;
+                anim.elapsed = pose.time;
+            }
+            None => {
+                let requested = viewer_clip
+                    .as_deref()
+                    .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
+                    .unwrap_or("idle")
+                    .to_string();
+                anim.advance(&requested, dt);
+            }
         }
 
-        let Some(clip) = resolve_clip(&anim.animations, requested) else {
-            continue;
-        };
-        let t = if mm_pose.is_some() || is_one_shot(requested) {
-            anim.elapsed.min(clip.duration * 0.999)
-        } else {
-            anim.elapsed
-        };
-        let global_transforms = clip.sample_global_transforms(t, &anim.skeleton);
-
-        for (i, &joint_entity) in anim.joints.iter().enumerate() {
-            if i < global_transforms.len() {
-                if let Ok(mut tf) = transform_query.get_mut(joint_entity) {
-                    *tf = Transform::from_matrix(Mat4::from_cols_array(&global_transforms[i]));
-                }
+        for (&joint_entity, pose) in anim.joints.iter().zip(anim.pose()) {
+            if let Ok(mut tf) = transform_query.get_mut(joint_entity) {
+                *tf = pose;
             }
         }
     }
@@ -1114,13 +1253,12 @@ pub fn actor_visual_sync_system(
                                     commands.entity(entity).add_child(child);
                                 }
                                 commands.entity(entity).insert((
-                                    CharacterAnimator {
-                                        skeleton: skeleton.clone(),
-                                        animations: md.primary_animations(),
-                                        current_clip: "idle".to_string(),
-                                        elapsed: 0.0,
-                                        joints: joints.clone(),
-                                    },
+                                    CharacterAnimator::new(
+                                        skeleton.clone(),
+                                        md.primary_animations(),
+                                        md.animation_graph(),
+                                        joints.clone(),
+                                    ),
                                     Visibility::default(),
                                 ));
                             } else {
@@ -1131,13 +1269,12 @@ pub fn actor_visual_sync_system(
                                         inverse_bindposes: ibp_handle,
                                         joints: joints.clone(),
                                     },
-                                    CharacterAnimator {
-                                        skeleton: skeleton.clone(),
-                                        animations: md.primary_animations(),
-                                        current_clip: "idle".to_string(),
-                                        elapsed: 0.0,
-                                        joints: joints.clone(),
-                                    },
+                                    CharacterAnimator::new(
+                                        skeleton.clone(),
+                                        md.primary_animations(),
+                                        md.animation_graph(),
+                                        joints.clone(),
+                                    ),
                                 ));
                             }
                             commands.entity(entity).add_children(&joints);
@@ -1757,14 +1894,16 @@ mod tests {
             .world_mut()
             .spawn((
                 CharacterAnimator {
-                    skeleton: skylands_formats::Skeleton::new(vec![], 0),
-                    animations: vec![
-                        skylands_formats::AnimationClip::new("idle", 1.0, vec![]),
-                        skylands_formats::AnimationClip::new("walk", 1.0, vec![]),
-                    ],
-                    current_clip: "idle".to_string(),
                     elapsed: 0.7,
-                    joints: vec![],
+                    ..CharacterAnimator::new(
+                        skylands_formats::Skeleton::new(vec![], 0),
+                        vec![
+                            skylands_formats::AnimationClip::new("idle", 1.0, vec![]),
+                            skylands_formats::AnimationClip::new("walk", 1.0, vec![]),
+                        ],
+                        default(),
+                        vec![],
+                    )
                 },
                 ActorAnimation {
                     current_clip: Some("walk".to_string()),
@@ -1786,6 +1925,79 @@ mod tests {
         assert_eq!(
             animator.current_clip, "idle",
             "viewer clip wins in viewer mode"
+        );
+    }
+
+    #[test]
+    fn test_animator_follows_state_transitions_and_blends() {
+        use skylands_formats::{
+            AnimationClip, AnimationGraph, AnimationTransition, Bone, BoneTrack, Keyframe,
+            Skeleton, AUTO_TRANSITION,
+        };
+        // One bone, each clip holding it at a different height.
+        let clip = |name: &str, duration: f32, y: f32| {
+            AnimationClip::new(
+                name,
+                duration,
+                vec![BoneTrack {
+                    bone_index: 0,
+                    positions: vec![Keyframe::new(0.0, [0.0, y, 0.0])],
+                    ..default()
+                }],
+            )
+        };
+        let transition = |name: &str, request, from: Vec<i32>, to, blend| AnimationTransition {
+            name: name.to_string(),
+            request,
+            from,
+            to,
+            blend,
+        };
+        // Spyro's walk-from-idle path (`016_Spyro.bld`).
+        let graph = AnimationGraph {
+            states: vec![
+                (0, "idle".into()),
+                (1, "walk".into()),
+                (99, "idletowalk".into()),
+            ],
+            transitions: vec![
+                transition("", 1, vec![], 1, 0.064),
+                transition("idle to idletowalk", 1, vec![0], 99, 0.2),
+                transition("idletowalk to walk", AUTO_TRANSITION, vec![99], 1, 0.1),
+            ],
+        };
+        let mut anim = CharacterAnimator::new(
+            Skeleton::new(vec![Bone::default()], 0),
+            vec![
+                clip("idle", 1.0, 0.0),
+                clip("walk", 1.0, 2.0),
+                clip("idletowalk", 0.5, 1.0),
+            ],
+            graph,
+            vec![],
+        );
+        assert_eq!((anim.playing.as_str(), anim.state), ("idle", Some(0)));
+
+        anim.advance("walk", 1.0 / 60.0);
+        assert_eq!(
+            (anim.playing.as_str(), anim.state),
+            ("idletowalk", Some(99))
+        );
+        anim.advance("walk", 0.1);
+        let y = anim.pose()[0].translation.y;
+        assert!((y - 0.5).abs() < 1e-4, "halfway idle -> idletowalk: {y}");
+
+        anim.advance("walk", 0.4);
+        assert_eq!(anim.playing, "walk", "idletowalk auto-advances at its end");
+        anim.advance("walk", 0.1);
+        assert_eq!(anim.blend, None);
+        assert!((anim.pose()[0].translation.y - 2.0).abs() < 1e-4);
+
+        // No specific transition from walk to idle here: plain switch, no blend.
+        anim.advance("idle", 1.0 / 60.0);
+        assert_eq!(
+            (anim.playing.as_str(), anim.blend.is_none()),
+            ("idle", true)
         );
     }
 

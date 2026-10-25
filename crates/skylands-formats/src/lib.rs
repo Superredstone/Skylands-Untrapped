@@ -19,12 +19,12 @@ pub use havok::{parse_havok_animation, parse_havok_skeleton, HavokRig, HAVOK_TAG
 pub use igb::{
     compose_transform, lerp_vec3, mat4_identity, mat4_mul, meta_fields, npc_name, quat_to_mat4,
     sample_quat, sample_vec3, slerp_quat, transform_point, ActorPlacement, AnimationClip,
-    AttrFormat, AttrSemantic, Bone, BoneTrack, CollisionPrimitive, CollisionShapeType, IgbAttrDesc,
-    IgbAttrList, IgbDirectoryEntry, IgbEndian, IgbError, IgbGeometryNode, IgbHeader,
-    IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel, IgbObjectType, IgbSceneNode, IgbTextureRef,
-    IgbVertex, IgbVertexBuffer, IgzChunkDescriptor, IgzFile, IgzHeader, IgzImage2, IgzObject,
-    IgzObjectList, IgzOffsetMapFixup, IndexTopology, Keyframe, LevelMarker, MarkerKind,
-    SceneInstance, ScriptValue, Skeleton,
+    AnimationGraph, AnimationTransition, AttrFormat, AttrSemantic, Bone, BoneTrack,
+    CollisionPrimitive, CollisionShapeType, IgbAttrDesc, IgbAttrList, IgbDirectoryEntry, IgbEndian,
+    IgbError, IgbGeometryNode, IgbHeader, IgbIndexBuffer, IgbMaterial, IgbMesh, IgbModel,
+    IgbObjectType, IgbSceneNode, IgbTextureRef, IgbVertex, IgbVertexBuffer, IgzChunkDescriptor,
+    IgzFile, IgzHeader, IgzImage2, IgzObject, IgzObjectList, IgzOffsetMapFixup, IndexTopology,
+    Keyframe, LevelMarker, MarkerKind, SceneInstance, ScriptValue, Skeleton, AUTO_TRANSITION,
 };
 pub use loader::{AssetError, AssetLoader};
 pub use script::{enemy_stats, EnemyStats, LevelupTable, ScriptSet, Vm, VmError};
