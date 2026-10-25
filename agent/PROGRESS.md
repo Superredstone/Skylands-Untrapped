@@ -219,3 +219,11 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
 - `devenv shell -- cargo test --workspace`
 - `devenv shell -- cargo run -p skylands-app -- --headless --ticks 120`
 - Viewer: `devenv shell -- cargo run -p skylands-app -- --viewer --character spyro`
+
+## Character table (2026-10-25)
+- Character archive numbers in `assets/files/character` are internal file IDs, not the IDs the name table assumed, so names and models were shifted (e.g. 1004 was named "Golden Queen" but loaded `1004_Chef.bld`).
+- `portal_gameplay::CHARACTERS` is now the single source for name, element, archive and portrait; `get_character_info`, `get_character_asset_paths`, `resolve_character_model_archive` and `resolve_character_id_by_name` all read from it.
+- Fixed hero archives: Wildfire → `458_HeatShield`, Wallop → `454_Earth_Hunter`, Gearshift → `471_Tech_Helix`, Krypt King → `478_KingCut`.
+- Villain IDs now follow the archive IDs: 1002 Dr. Krankcase, 1003 Wolfgang, 1004 Chef Pepper Jack, 1007 Golden Queen, 1008 Dreamcatcher, 1040 Pain-Yatta.
+- Light/Dark characters (482-485, `1005_Thief`, `1006_LightVillain`) are left out until `Element` has Light/Dark.
+- The debug menu roster lists every entry in `CHARACTERS` and scrolls with the mouse wheel.

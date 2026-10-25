@@ -10,30 +10,6 @@ use crate::camera::{free_cam_cursor, FreeCamState, MainCamera};
 use crate::viewer::ViewerSettings;
 use crate::visual_sync::CharacterAnimator;
 
-pub const DEBUG_ROSTER: &[(u16, &str, &str, Color)] = &[
-    (400, "Snap Shot", "WATER", Color::srgb(0.16, 0.50, 0.73)),
-    (401, "Food Fight", "LIFE", Color::srgb(0.18, 0.80, 0.44)),
-    (402, "Wildfire", "FIRE", Color::srgb(0.90, 0.30, 0.24)),
-    (403, "Wallop", "EARTH", Color::srgb(0.85, 0.55, 0.13)),
-    (404, "Gearshift", "TECH", Color::srgb(0.58, 0.65, 0.65)),
-    (405, "Krypt King", "UNDEAD", Color::srgb(0.55, 0.27, 0.68)),
-    (406, "Enigma", "MAGIC", Color::srgb(0.70, 0.30, 0.90)),
-    (407, "Gusto", "AIR", Color::srgb(0.10, 0.74, 0.61)),
-    (14, "Gill Grunt", "WATER", Color::srgb(0.20, 0.60, 0.86)),
-    (16, "Spyro", "MAGIC", Color::srgb(0.60, 0.35, 0.71)),
-    (19, "Trigger Happy", "TECH", Color::srgb(0.95, 0.77, 0.06)),
-    (1010, "Kaos", "KAOS", Color::srgb(0.75, 0.10, 0.25)),
-    (1001, "Chompy Mage", "LIFE", Color::srgb(0.30, 0.69, 0.31)),
-    (1002, "Wolfgang", "UNDEAD", Color::srgb(0.40, 0.20, 0.60)),
-    (1004, "Golden Queen", "EARTH", Color::srgb(0.85, 0.65, 0.13)),
-    (
-        1005,
-        "Chef Pepper Jack",
-        "FIRE",
-        Color::srgb(0.80, 0.25, 0.15),
-    ),
-];
-
 pub const DEBUG_ANIMATIONS: &[(&str, &str)] = &[
     ("idle", "IDLE"),
     ("walk", "WALK"),
@@ -113,6 +89,32 @@ pub enum DebugMenuAction {
 
 #[derive(Component)]
 pub struct TelemetryText;
+
+#[derive(Component)]
+pub struct DebugRosterScroll;
+
+const ROSTER_SCROLL_LINE_PX: f32 = 32.0;
+
+/// Scrolls the character roster with the mouse wheel while the menu is open.
+pub fn debug_menu_scroll_system(
+    menu_state: Res<DebugMenuState>,
+    mut wheel: EventReader<bevy::input::mouse::MouseWheel>,
+    mut rosters: Query<&mut ScrollPosition, With<DebugRosterScroll>>,
+) {
+    let delta: f32 = wheel
+        .read()
+        .map(|ev| match ev.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => ev.y * ROSTER_SCROLL_LINE_PX,
+            bevy::input::mouse::MouseScrollUnit::Pixel => ev.y,
+        })
+        .sum();
+    if !menu_state.is_open || delta == 0.0 {
+        return;
+    }
+    for mut pos in &mut rosters {
+        pos.offset_y = (pos.offset_y - delta).max(0.0);
+    }
+}
 
 #[derive(Component)]
 pub struct FreeCamButtonText;
@@ -269,16 +271,25 @@ pub fn setup_debug_menu_ui(mut commands: Commands) {
 
                         // 4-column grid of Skylander buttons
                         char_tab
-                            .spawn(Node {
-                                width: Val::Percent(100.0),
-                                flex_direction: FlexDirection::Row,
-                                flex_wrap: FlexWrap::Wrap,
-                                row_gap: Val::Px(6.0),
-                                column_gap: Val::Px(6.0),
-                                ..default()
-                            })
+                            .spawn((
+                                Node {
+                                    width: Val::Percent(100.0),
+                                    max_height: Val::Px(280.0),
+                                    flex_direction: FlexDirection::Row,
+                                    flex_wrap: FlexWrap::Wrap,
+                                    row_gap: Val::Px(6.0),
+                                    column_gap: Val::Px(6.0),
+                                    overflow: Overflow::scroll_y(),
+                                    ..default()
+                                },
+                                ScrollPosition::default(),
+                                DebugRosterScroll,
+                            ))
                             .with_children(|grid| {
-                                for &(id, name, element, color) in DEBUG_ROSTER {
+                                for &(id, name, element, _, _) in skylands_core::CHARACTERS {
+                                    let (r, g, b) = element.rgb();
+                                    let color = Color::srgb_u8(r, g, b);
+                                    let element = element.name().to_uppercase();
                                     grid.spawn((
                                         Button,
                                         Node {

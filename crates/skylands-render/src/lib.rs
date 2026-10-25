@@ -13,8 +13,8 @@ pub use camera::{
     sky_camera_sync_system, FreeCamState, MainCamera, OrbitCameraState, SkyCamera, SKY_LAYER,
 };
 pub use debug_menu::{
-    debug_menu_interaction_system, debug_menu_telemetry_system, debug_menu_toggle_system,
-    setup_debug_menu_ui, DebugMenuState, DebugTab,
+    debug_menu_interaction_system, debug_menu_scroll_system, debug_menu_telemetry_system,
+    debug_menu_toggle_system, setup_debug_menu_ui, DebugMenuState, DebugTab,
 };
 pub use hud::{
     damage_popup_ui_system, dialogue_box_system, hud_update_system, setup_dialogue_box,
@@ -107,6 +107,7 @@ impl Plugin for SkylandsRenderPlugin {
                     debug_menu_toggle_system,
                     debug_menu_interaction_system,
                     debug_menu_telemetry_system,
+                    debug_menu_scroll_system,
                     (magic_moment_system, magic_moment_layer_system)
                         .chain()
                         .before(actor_visual_sync_system)
