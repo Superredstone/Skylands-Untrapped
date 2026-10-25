@@ -259,7 +259,7 @@ pub fn portal_gameplay_system(
 
                     // Spawn hero entity
                     let hero_pos = spawn_origin + Vec3::new(0.0, 0.2, 0.0);
-                    spawn_hero_actor(
+                    let hero = spawn_hero_actor(
                         &mut commands,
                         hero_pos,
                         Quat::IDENTITY,
@@ -267,6 +267,7 @@ pub fn portal_gameplay_system(
                         char_id,
                         asset_server.as_deref(),
                     );
+                    commands.entity(hero).insert(PortalSpawn::default());
                 }
 
                 let tag = SkylanderTag {
@@ -573,11 +574,13 @@ pub fn hero_movement_system(
         ),
         With<Hero>,
     >,
+    spawning: Query<&PortalSpawn, With<Hero>>,
 ) {
-    // The hero stands still while talking.
+    // The hero stands still while talking or entering through the portal.
     let idle = WiiInputState::default();
     let input = match dialogue {
         Some(d) if d.is_active() => &idle,
+        _ if spawning.iter().any(|s| s.remaining > 0.0) => &idle,
         _ => &*input,
     };
     let dt = time
@@ -779,8 +782,9 @@ pub fn hero_combat_system(
         ),
         Without<Hero>,
     >,
+    spawning: Query<&PortalSpawn, With<Hero>>,
 ) {
-    if dialogue.is_some_and(|d| d.is_active()) {
+    if dialogue.is_some_and(|d| d.is_active()) || spawning.iter().any(|s| s.remaining > 0.0) {
         return;
     }
     let dt = if time.delta_secs() > 0.0 {
@@ -1364,6 +1368,7 @@ pub fn animation_state_system(
         Option<&Enemy>,
         Option<&Velocity>,
         Option<&CharacterCollider>,
+        Option<&mut PortalSpawn>,
     )>,
 ) {
     let dt = if time.delta_secs() > 0.0 {
@@ -1372,10 +1377,16 @@ pub fn animation_state_system(
         time.timestep().as_secs_f32()
     };
 
-    for (mut anim, combo, enemy, vel, collider) in &mut query {
+    for (mut anim, combo, enemy, vel, collider, spawn) in &mut query {
         anim.time += dt * anim.speed;
 
-        let next_clip = animation_state_name(combo, enemy, vel, collider);
+        let next_clip = match spawn {
+            Some(mut s) if s.remaining > 0.0 => {
+                s.remaining -= dt;
+                "spawn".to_string()
+            }
+            _ => animation_state_name(combo, enemy, vel, collider),
+        };
         if anim.current_clip.as_deref() != Some(&next_clip) {
             anim.current_clip = Some(next_clip);
             anim.time = 0.0;
@@ -2527,6 +2538,51 @@ mod tests {
         let (_, ident) = hero_query.iter(app.world()).next().unwrap();
         assert_eq!(ident.character_id, 16);
         assert_eq!(ident.name, "Spyro");
+    }
+
+    #[test]
+    fn test_portal_tag_plays_spawn_animation_and_locks_input() {
+        let mut app = build_test_app();
+        app.world_mut()
+            .resource_mut::<Events<PortalEvent>>()
+            .send(PortalEvent::TagArrived {
+                tag_index: 1,
+                zone: PortalZone::LeftRing,
+            });
+        step_fixed(&mut app);
+
+        let hero = app
+            .world_mut()
+            .query_filtered::<Entity, With<Hero>>()
+            .single(app.world());
+        assert!(app.world().get::<PortalSpawn>(hero).is_some());
+        assert_eq!(
+            app.world()
+                .get::<ActorAnimation>(hero)
+                .unwrap()
+                .current_clip
+                .as_deref(),
+            Some("spawn")
+        );
+
+        // Input is ignored while the entrance plays.
+        app.world_mut().resource_mut::<WiiInputState>().stick = [0.0, 1.0];
+        step_fixed(&mut app);
+        assert_eq!(app.world().get::<Velocity>(hero).unwrap().0.x, 0.0);
+        assert_eq!(app.world().get::<Velocity>(hero).unwrap().0.z, 0.0);
+
+        let ticks = (PortalSpawn::DURATION * 60.0).ceil() as usize + 1;
+        for _ in 0..ticks {
+            step_fixed(&mut app);
+        }
+        assert_ne!(
+            app.world()
+                .get::<ActorAnimation>(hero)
+                .unwrap()
+                .current_clip
+                .as_deref(),
+            Some("spawn")
+        );
     }
 
     #[test]

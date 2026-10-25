@@ -651,6 +651,26 @@ impl Default for ActorAnimation {
     }
 }
 
+/// Portal entrance: a Skylander just put on the Traptanium plays its `spawn` clip and
+/// ignores input until `remaining` runs out.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct PortalSpawn {
+    pub remaining: f32,
+}
+
+impl PortalSpawn {
+    /// Hero `spawn02` clips run 0.67-0.77 s (Spyro, Gill Grunt).
+    pub const DURATION: f32 = 0.75;
+}
+
+impl Default for PortalSpawn {
+    fn default() -> Self {
+        Self {
+            remaining: Self::DURATION,
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, PartialEq, Default)]
 pub struct AttackCombo {
     pub step: u8,

@@ -878,6 +878,7 @@ pub fn resolve_clip<'a>(
         "run" => &["walk"],
         "jump" => &["jumpstanding", "flyup", "falling"],
         "fall" => &["falling", "flightfalling"],
+        "spawn" => &["spawn02", "spawn01"],
         "attack_sweep" => &["spinattack", "smashattack", "attack"],
         s if s.starts_with("attack") => &["attack"],
         _ => &[],
@@ -895,9 +896,10 @@ pub fn resolve_clip<'a>(
         .or_else(|| clips.first())
 }
 
-/// Attacks and jump take-offs play once and hold their last frame; everything else loops.
+/// Attacks, jump take-offs and the portal entrance play once and hold their last frame;
+/// everything else loops.
 fn is_one_shot(state: &str) -> bool {
-    state.starts_with("attack") || state == "jump"
+    state.starts_with("attack") || state == "jump" || state == "spawn"
 }
 
 pub fn character_animation_system(
@@ -1712,6 +1714,7 @@ mod tests {
             clip("jumpstanding"),
             clip("falling"),
             clip("smashattack"),
+            clip("spawn02"),
         ];
         let name = |s: &str| resolve_clip(&clips, s).map(|c| c.name.as_str());
         assert_eq!(name("idle"), Some("combatidle"));
@@ -1720,6 +1723,7 @@ mod tests {
         assert_eq!(name("fall"), Some("falling"));
         assert_eq!(name("attack_sweep"), Some("smashattack"));
         assert_eq!(name("attack_combo_2"), Some("smashattack"));
+        assert_eq!(name("spawn"), Some("spawn02"));
         assert_eq!(name("unknown"), Some("combatidle"));
         assert!(resolve_clip(&[], "idle").is_none());
     }
