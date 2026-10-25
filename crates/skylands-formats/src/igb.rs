@@ -746,6 +746,8 @@ pub struct LevelMarker {
     /// The script animates the actor; its model is drawn apart from the level
     /// (`IgbModel::node_owner`).
     pub animated: bool,
+    /// Associated `ActorModel` index when known.
+    pub actor_model_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1950,6 +1952,8 @@ pub struct ActorModel {
     pub mesh_bones: Vec<Option<usize>>,
     /// `BoneAttachInfoList` (`+0x28`): the model's `attach nodes`, in order.
     pub attach_nodes: Vec<AttachNode>,
+    /// State ID to clip index map from `tfbAnimationStateData`.
+    pub animation_states: std::collections::HashMap<i32, usize>,
 }
 
 /// `BoneAttachInfo`: `+0x08` node name, `_boneName` `+0x1c`.
@@ -3642,6 +3646,7 @@ impl IgbModel {
         endian: IgbEndian,
         mesh_by_geo: &std::collections::HashMap<usize, usize>,
         skeleton_by_offset: &std::collections::HashMap<usize, (usize, Vec<u32>)>,
+        animations: &[AnimationClip],
     ) -> Vec<ActorModel> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
@@ -3723,6 +3728,31 @@ impl IgbModel {
                         Some((mesh, bone))
                     })
                     .unzip();
+                let mut animation_states = std::collections::HashMap::new();
+                if let Some(state_data) = ptr(model + 0x20) {
+                    if let Some(list) = ptr(state_data + 0x0c) {
+                        for state in list_items(list) {
+                            let Some(id) = rd(state + 0x0c).map(|i| i as i32) else {
+                                continue;
+                            };
+                            let clip_source = ptr(state + 0x14)
+                                .filter(|&l| rd(l + 0x08).unwrap_or(0) > 0)
+                                .and_then(&ptr)
+                                .and_then(&ptr)
+                                .and_then(|c| ptr(c + 0x38))
+                                .and_then(|a| ptr(a + 0x08))
+                                .map(cstr);
+                            if let Some(src) = clip_source {
+                                if let Some(clip_idx) = animations
+                                    .iter()
+                                    .position(|a| a.source.eq_ignore_ascii_case(&src))
+                                {
+                                    animation_states.insert(id, clip_idx);
+                                }
+                            }
+                        }
+                    }
+                }
                 Some(ActorModel {
                     actor: cstr(actor.offset + 0x08),
                     model: cstr(model + 0x08),
@@ -3730,6 +3760,7 @@ impl IgbModel {
                     skeleton,
                     mesh_bones,
                     attach_nodes,
+                    animation_states,
                 })
             })
             .collect()
@@ -4750,6 +4781,17 @@ impl IgbModel {
                 }
             };
 
+            let actor_model_index = self
+                .actor_models
+                .iter()
+                .position(|a| a.actor == node.name)
+                .or_else(|| {
+                    self.actor_models.iter().position(|a| {
+                        !a.meshes.is_empty()
+                            && (a.actor.starts_with(&node.name) || node.name.starts_with(&a.actor))
+                    })
+                });
+
             markers.push(LevelMarker {
                 name: node.name.clone(),
                 kind,
@@ -4761,6 +4803,7 @@ impl IgbModel {
                 drawn_by_level: self.level_drawn_markers.contains(&node_idx),
                 script: self.marker_scripts.get(&node_idx).cloned(),
                 animated: self.animated_markers.contains(&node_idx),
+                actor_model_index,
             });
         }
 
@@ -5352,7 +5395,7 @@ impl IgbModel {
                 if let Some(script) = &actor.script {
                     marker_scripts.insert(nodes.len(), script.clone());
                 }
-                if animated && kind == MarkerKind::Prop {
+                if (animated && kind == MarkerKind::Prop) || kind == MarkerKind::Npc {
                     animated_markers.insert(nodes.len());
                     animated_actor_marker.insert(ai, nodes.len());
                 }
@@ -5806,6 +5849,7 @@ impl IgbModel {
                     endian,
                     &mesh_by_geo,
                     &skeleton_by_offset,
+                    &animations,
                 ),
                 Self::decode_animation_states(data, sections, &list.objects, endian, &animations),
             ),

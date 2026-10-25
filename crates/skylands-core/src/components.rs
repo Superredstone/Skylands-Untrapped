@@ -772,6 +772,8 @@ pub struct ActorAnimation {
     pub current_clip: Option<String>,
     pub time: f32,
     pub speed: f32,
+    /// `tfbAnimationState` id when state-driven (`ActorScript`).
+    pub state: Option<i32>,
 }
 
 impl Default for ActorAnimation {
@@ -780,6 +782,7 @@ impl Default for ActorAnimation {
             current_clip: Some("idle".to_string()),
             time: 0.0,
             speed: 1.0,
+            state: None,
         }
     }
 }
@@ -847,6 +850,8 @@ pub struct Npc {
     pub conversations: Vec<skylands_formats::Conversation>,
     /// Conversation the next talk plays; talks cycle through them in order.
     pub next_conversation: usize,
+    /// Level marker node index.
+    pub marker_node: Option<usize>,
 }
 
 #[derive(Component, Debug, Clone, PartialEq)]

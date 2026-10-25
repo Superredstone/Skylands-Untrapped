@@ -963,6 +963,48 @@ impl CharacterAnimator {
         }
     }
 
+    pub fn advance_state(&mut self, state_id: i32, dt: f32) {
+        if let Some(blend) = &mut self.blend {
+            blend.elapsed += dt;
+            if blend.elapsed >= blend.duration {
+                self.blend = None;
+            }
+        }
+        if self.state != Some(state_id) {
+            let clip = self
+                .graph
+                .clip_for_state(state_id)
+                .and_then(|name| self.clip(name))
+                .map(|c| c.name.clone());
+            if let Some(clip) = clip {
+                let transition = self.graph.transition(self.state, state_id).and_then(|t| {
+                    let c = self.clip(self.graph.clip_for_state(t.to)?)?;
+                    Some((c.name.clone(), Some(t.to), t.blend))
+                });
+                let (target_clip, target_state, blend) =
+                    transition.unwrap_or((clip, Some(state_id), 0.0));
+                self.current_clip = target_clip.clone();
+                self.start(target_clip, target_state, blend);
+                return;
+            }
+        }
+        self.elapsed += dt;
+        let ended = self
+            .clip(&self.playing)
+            .is_some_and(|c| self.elapsed >= c.duration);
+        let next = self
+            .state
+            .filter(|_| ended)
+            .and_then(|s| self.graph.auto_transition(s))
+            .and_then(|t| {
+                let clip = self.clip(self.graph.clip_for_state(t.to)?)?;
+                Some((clip.name.clone(), t.to, t.blend))
+            });
+        if let Some((clip, state, blend)) = next {
+            self.start(clip, Some(state), blend);
+        }
+    }
+
     /// Attacks, jump take-offs, the portal entrance and states that auto-advance play once
     /// and hold their last frame; everything else loops.
     fn holds_last_frame(&self) -> bool {
@@ -1080,12 +1122,24 @@ pub fn character_animation_system(
                 anim.elapsed = pose.time;
             }
             None => {
-                let requested = viewer_clip
-                    .as_deref()
-                    .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
-                    .unwrap_or("idle")
-                    .to_string();
-                anim.advance(&requested, dt);
+                if viewer_clip.is_none() {
+                    if let Some(state_id) = actor_anim.and_then(|a| a.state) {
+                        anim.advance_state(state_id, dt);
+                    } else {
+                        let requested = actor_anim
+                            .and_then(|a| a.current_clip.as_deref())
+                            .unwrap_or("idle")
+                            .to_string();
+                        anim.advance(&requested, dt);
+                    }
+                } else {
+                    let requested = viewer_clip
+                        .as_deref()
+                        .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
+                        .unwrap_or("idle")
+                        .to_string();
+                    anim.advance(&requested, dt);
+                }
             }
         }
 
@@ -1999,6 +2053,14 @@ mod tests {
             (anim.playing.as_str(), anim.blend.is_none()),
             ("idle", true)
         );
+
+        // Advance by state ID: state 1 has intermediate state 99 (idletowalk) from state 0 (idle)
+        anim.advance_state(1, 1.0 / 60.0);
+        assert_eq!(anim.playing, "idletowalk");
+        assert_eq!(anim.state, Some(99));
+        anim.advance_state(1, 0.5);
+        assert_eq!(anim.playing, "walk");
+        assert_eq!(anim.state, Some(1));
     }
 
     #[test]
@@ -2649,5 +2711,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_character_animation_system_routes_actor_animation_state() {
+        use skylands_formats::igb::{AnimationClip, AnimationGraph, Bone, Skeleton};
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin);
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                CharacterAnimator {
+                    playing: "idle".to_string(),
+                    current_clip: "idle".to_string(),
+                    state: Some(0),
+                    elapsed: 0.0,
+                    skeleton: Skeleton::new(vec![Bone::default()], 0),
+                    animations: vec![
+                        AnimationClip::new("idle", 1.0, vec![]),
+                        AnimationClip::new("talk", 1.0, vec![]),
+                    ],
+                    graph: AnimationGraph {
+                        states: vec![(0, "idle".into()), (9, "talk".into())],
+                        transitions: vec![],
+                    },
+                    blend: None,
+                    joints: vec![],
+                },
+                ActorAnimation {
+                    current_clip: Some("idle".to_string()),
+                    time: 0.0,
+                    speed: 1.0,
+                    state: Some(9),
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, character_animation_system);
+        app.update();
+
+        let anim = app.world().get::<CharacterAnimator>(entity).unwrap();
+        assert_eq!(
+            anim.playing, "talk",
+            "character_animation_system must advance to state 9 (talk)"
+        );
+        assert_eq!(anim.state, Some(9));
     }
 }

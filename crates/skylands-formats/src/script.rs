@@ -78,10 +78,18 @@ pub enum Op {
         rel: i32,
         rhs: Rhs,
     },
-    /// `OpCheckReference` / `OpCheckMembership`: needs live objects, so the evaluator
-    /// treats `NE` (reference set) as true and everything else as false.
+    /// `OpCheckReference` / `OpCheckMembership`: `==` / `!=` of two references when the VM
+    /// knows both (`lhs` +0x1c, `rhs` +0x24); else `NE` is true and everything else false.
     CheckRef {
         rel: i32,
+        desc: String,
+        lhs: Vec<Ref>,
+        rhs: Vec<Ref>,
+    },
+    /// `OpSetReference`: point the reference `lhs` (+0x1c) at `rhs` (+0x20).
+    SetRef {
+        lhs: Vec<Ref>,
+        rhs: Vec<Ref>,
         desc: String,
     },
     /// Unconditional `pc += br` (else / skip blocks).
@@ -127,6 +135,26 @@ pub enum Op {
     Remove {
         target: Vec<Ref>,
     },
+    /// `OpStartSequence`: play state `index` of the sequence group at `group` (`my`'s
+    /// `animation palette`). Owns a setup block of `br` ops, skipped when nothing resolves.
+    StartSequence {
+        group: Vec<Ref>,
+        index: Option<Rhs>,
+    },
+    /// `OpTurnTo`: turn the object at `target` (+0x20; +0x24 picks a group member) to
+    /// `facing` degrees.
+    TurnTo {
+        facing: Rhs,
+        target: Vec<Ref>,
+    },
+    /// `OpUserBehavior`: named block run only while it is the actor's current behaviour.
+    Behavior {
+        name: String,
+    },
+    /// `OpSetBehavior`: make the `OpUserBehavior` at op offset `target` current.
+    SetBehavior {
+        target: Option<usize>,
+    },
     /// Event blocks of a script (`OpPreScript` / `OpStartUp` / `OpShutDown`).
     PreScript,
     StartUp,
@@ -171,8 +199,7 @@ pub struct ScriptSet {
     pub roots: Vec<usize>,
     /// Export ids start after the file's `EXNM` handles.
     pub export_base: usize,
-    /// Operands of ops the decoder has no variant for (`OpSpawn`, `OpStartSequence`,
-    /// `OpControl`...), keyed by op offset: (field offset, operand). Listing only.
+    /// Operands of ops the decoder has no variant for (`OpSpawn`, `OpControl`...), keyed by op offset: (field offset, operand). Listing only.
     pub opaque_operands: HashMap<usize, Vec<(usize, OpaqueOperand)>>,
     /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
     /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
@@ -182,7 +209,6 @@ pub struct ScriptSet {
 /// Ops whose operands `ScriptSet::opaque_operands` records.
 const OPAQUE_LISTED: &[&str] = &[
     "OpSpawn",
-    "OpStartSequence",
     "OpControl",
     "OpChangeMembership",
     "OpForEach",
@@ -295,15 +321,26 @@ impl Reader<'_> {
             "RHSValueStack" => {
                 let kind = self.kind(o + 0x20);
                 let path = self.path(o);
-                if path.is_empty() {
+                let value = if path.is_empty() {
                     let raw = self.u32(o + 0x24)?;
-                    Some(Operand::Lit(match kind {
+                    Operand::Lit(match kind {
                         NumKind::Float => Value::Float(f32::from_bits(raw)),
                         _ => Value::Int(raw as i32),
-                    }))
+                    })
                 } else {
-                    Some(Operand::Read { path, kind })
-                }
+                    Operand::Read { path, kind }
+                };
+                // `_properties` (+0x1c) low half: result func id (`random`, `abs`...).
+                let func = self.u32(o + 0x1c).unwrap_or(0) & 0xffff;
+                Some(match func {
+                    0 => value,
+                    _ => Operand::Expr(Box::new(Rhs {
+                        a: value,
+                        arith: -1,
+                        b: None,
+                        func,
+                    })),
+                })
             }
             _ => None,
         }
@@ -447,6 +484,28 @@ impl Reader<'_> {
             "OpRemove" => Op::Remove {
                 target: self.lhs(o + 0x1c),
             },
+            "OpStartSequence" => Op::StartSequence {
+                group: self.lhs(o + 0x1c),
+                index: self.rhs_at(o + 0x20),
+            },
+            "OpTurnTo" => match self.rhs_at(o + 0x1c) {
+                Some(facing) => Op::TurnTo {
+                    facing,
+                    target: self.lhs(o + 0x20),
+                },
+                None => Op::Other(t.into()),
+            },
+            "OpUserBehavior" => Op::Behavior {
+                name: self.cstr(o + 0x08),
+            },
+            "OpSetBehavior" => Op::SetBehavior {
+                target: self.ptr(o + 0x1c).and_then(|s| {
+                    self.path(s).into_iter().find_map(|r| match r {
+                        Ref::Obj(p) if self.ty(p) == "OpUserBehavior" => Some(p),
+                        _ => None,
+                    })
+                }),
+            },
             "OpPreScript" => Op::PreScript,
             "OpStartUp" => Op::StartUp,
             "OpShutDown" => Op::ShutDown,
@@ -463,10 +522,20 @@ impl Reader<'_> {
                     p(0x1c),
                     p(if set { 0x20 } else { 0x24 })
                 );
+                let lhs = self.lhs(o + 0x1c);
                 if set {
-                    Op::Other(desc)
+                    Op::SetRef {
+                        lhs,
+                        rhs: self.lhs(o + 0x20),
+                        desc,
+                    }
                 } else {
-                    Op::CheckRef { rel, desc }
+                    Op::CheckRef {
+                        rel,
+                        desc,
+                        lhs,
+                        rhs: self.lhs(o + 0x24),
+                    }
                 }
             }
             _ => Op::Other(t.into()),
@@ -698,7 +767,7 @@ impl ScriptSet {
                         self.rhs_str(rhs)
                     )
                 }
-                Op::CheckRef { desc, .. } => desc.clone(),
+                Op::CheckRef { desc, .. } | Op::SetRef { desc, .. } => desc.clone(),
                 Op::Interface => "interface".into(),
                 Op::Jump => "jump".into(),
                 Op::End => "end".into(),
@@ -752,6 +821,19 @@ impl ScriptSet {
                     )
                 }
                 Op::Remove { target } => format!("remove {}", self.path_str(target)),
+                Op::StartSequence { group, index } => format!(
+                    "start sequence {} [{}]",
+                    self.path_str(group),
+                    index.as_ref().map_or("-".into(), |r| self.rhs_str(r))
+                ),
+                Op::TurnTo { facing, target } => {
+                    format!("turn {} to {}", self.path_str(target), self.rhs_str(facing))
+                }
+                Op::Behavior { name } => format!("behavior {name:?}"),
+                Op::SetBehavior { target } => format!(
+                    "set behavior {}",
+                    target.map_or("?".into(), |t| format!("@{t:x}"))
+                ),
                 Op::PreScript => "PRESCRIPT".into(),
                 Op::StartUp => "STARTUP".into(),
                 Op::ShutDown => "SHUTDOWN".into(),
@@ -825,7 +907,26 @@ pub struct Vm<'a> {
     /// Engine state read before any write (spawned objects, save data, other files),
     /// in first-read order. Such reads yield 0.
     pub unbound: Vec<String>,
+    /// State of the `random` result func's generator.
+    pub rng: u64,
+    /// Op offset of the actor's current `OpUserBehavior` (`actor+0xac`).
+    pub behavior: Option<usize>,
+    /// What `OpSetReference` pointed each reference variable at.
+    pub(crate) refs: HashMap<Vec<Ref>, RefTarget>,
 }
+
+/// Object a script reference points at, as far as the VM can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefTarget {
+    Null,
+    /// Engine object by name-hash path (`my`...).
+    Engine(Vec<u32>),
+    /// Something only the live engine knows (spawned object, macro output...).
+    Unknown,
+}
+
+/// Name hash of the engine's `null` reference.
+const NULL_HASH: u32 = 0x7707_4ba4;
 
 /// Engine action requested by a script op.
 #[derive(Debug, Clone, PartialEq)]
@@ -847,6 +948,11 @@ pub enum Effect {
     },
     /// `OpRemove` of the engine object `target` (name-hash path).
     Remove { target: Vec<u32> },
+    /// `OpStartSequence` of state `state` on the engine sequence group `group`
+    /// (`[ANIMATION_PALETTE]`: `my` plays `tfbAnimationState` `state`).
+    StartSequence { group: Vec<u32>, state: i32 },
+    /// `OpTurnTo` of the engine object `target`: face `facing` degrees.
+    TurnTo { target: Vec<u32>, facing: f32 },
 }
 
 /// Per-set lookup tables, shared by every `Vm` over the set.
@@ -900,6 +1006,32 @@ impl<'a> Vm<'a> {
             engine: HashMap::new(),
             effects: Vec::new(),
             unbound: Vec::new(),
+            rng: 0,
+            behavior: None,
+            refs: HashMap::new(),
+        }
+    }
+
+    /// `null` / engine handles resolve to themselves; script reference variables to what
+    /// `OpSetReference` stored (members of a `null` reference are `null`).
+    fn ref_target(&self, path: &[Ref]) -> RefTarget {
+        if let Some(k) = self.set.engine_key(path) {
+            return match k[..] {
+                [NULL_HASH] => RefTarget::Null,
+                _ => RefTarget::Engine(k),
+            };
+        }
+        let Ok(p) = self.canon(path) else {
+            return RefTarget::Unknown;
+        };
+        if let Some(t) = self.refs.get(&p) {
+            return t.clone();
+        }
+        match p.first() {
+            Some(Ref::Obj(_)) if self.refs.get(&p[..1]) == Some(&RefTarget::Null) => {
+                RefTarget::Null
+            }
+            _ => RefTarget::Unknown,
         }
     }
 
@@ -1020,9 +1152,16 @@ impl<'a> Vm<'a> {
                 self.unbound.push(what);
             }
             for (var, _, rhs) in site {
-                if let Some(rhs) = rhs {
-                    let v = self.eval(rhs)?;
-                    self.write(&[Ref::Obj(var)], v);
+                match rhs {
+                    Some(rhs) => {
+                        let v = self.eval(rhs)?;
+                        self.write(&[Ref::Obj(var)], v);
+                    }
+                    // Reference params: such macros look up live objects (`Combat - Check
+                    // Hurt` loops over `hurts`); with none, they come back null.
+                    None => {
+                        self.refs.insert(vec![Ref::Obj(var)], RefTarget::Null);
+                    }
                 }
             }
             return Ok(after);
@@ -1086,8 +1225,26 @@ impl<'a> Vm<'a> {
                         pc += skip;
                     }
                 }
-                Op::CheckRef { rel, .. } => {
-                    if *rel != 5 {
+                Op::SetRef { lhs, rhs, .. } => {
+                    let t = self.ref_target(rhs);
+                    if let Ok(p) = self.canon(lhs) {
+                        self.refs.insert(p, t);
+                    }
+                }
+                Op::CheckRef {
+                    rel,
+                    desc,
+                    lhs,
+                    rhs,
+                } => {
+                    let known = desc.starts_with("OpCheckReference") && matches!(rel, 1 | 5);
+                    let holds = match (self.ref_target(lhs), self.ref_target(rhs)) {
+                        (a, b) if known && a != RefTarget::Unknown && b != RefTarget::Unknown => {
+                            (a == b) == (*rel == 1)
+                        }
+                        _ => *rel == 5,
+                    };
+                    if !holds {
                         pc += skip;
                     }
                 }
@@ -1161,8 +1318,36 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
-                // Blocks of ops that need live objects (find variable, spawn, for each,
-                // user behaviors): skipped, as if nothing was found.
+                // `0x80087208`: an unresolved group skips the setup block, else the block
+                // runs (`looping` and friends on the sequence).
+                Op::StartSequence { group, index } => match self.set.engine_key(group) {
+                    Some(group) => {
+                        let state = match index {
+                            Some(r) => self.eval(r)?.as_f32() as i32,
+                            None => 0,
+                        };
+                        self.effects.push(Effect::StartSequence { group, state });
+                    }
+                    None => pc += skip,
+                },
+                // `0x8007d418`: `pc += br` when the target does not resolve.
+                Op::TurnTo { facing, target } => match self.set.engine_key(target) {
+                    Some(target) => {
+                        let facing = self.eval(facing)?.as_f32();
+                        self.effects.push(Effect::TurnTo { target, facing });
+                    }
+                    None => pc += skip,
+                },
+                // `0x8006fad0`: only swaps the current behaviour; it runs from next tick.
+                Op::SetBehavior { target } => {
+                    if target.is_some() {
+                        self.behavior = *target;
+                    }
+                }
+                // Behaviour blocks run only when current (`ScriptProgram::tick`).
+                Op::Behavior { .. } => pc += skip,
+                // Blocks of ops that need live objects (find variable, spawn, for each):
+                // skipped, as if nothing was found.
                 Op::Other(_) => pc += skip,
                 Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::PreScript => {}
             }
@@ -1171,17 +1356,67 @@ impl<'a> Vm<'a> {
     }
 
     fn eval(&mut self, rhs: &Rhs) -> Result<Value, VmError> {
-        if rhs.func != 0 {
-            return Err(VmError::Unsupported(format!("result func {}", rhs.func)));
-        }
         let a = self.operand(&rhs.a)?;
-        match &rhs.b {
+        let v = match &rhs.b {
             Some(b) if rhs.arith >= 0 => {
                 let b = self.operand(b)?;
-                arith(a, rhs.arith, b)
+                arith(a, rhs.arith, b)?
             }
-            _ => Ok(a),
-        }
+            _ => a,
+        };
+        self.result_func(rhs.func, v)
+    }
+
+    /// `_resultFunc` table at `0x80506a38` (`id - 1`), applied after the arithmetic.
+    fn result_func(&mut self, func: u32, v: Value) -> Result<Value, VmError> {
+        use Value::{Float, Int};
+        let f = v.as_f32();
+        let round = |x: f32| Int((x + if x < 0.0 { -0.5 } else { 0.5 }) as i32);
+        Ok(match (func, v) {
+            (0, _) => v,
+            // `0x80071404` random: int `[0, v]` (`rng & 0x7fffffff` mod `v ± 1`), float `[0, v)`.
+            (1, Int(x)) => {
+                let d = x.wrapping_add(if x < 0 { -1 } else { 1 });
+                Int(((self.next_rand() & 0x7fff_ffff) as i32).wrapping_rem(d))
+            }
+            (1, Float(x)) => Float(x * (self.next_rand() as f32 / 4_294_967_296.0)),
+            (2, _) => Int(f as i32),
+            (3, _) => round(f),
+            (4, _) => round(f.floor()),
+            (5, _) => round(f.ceil()),
+            (6, Int(x)) => Int(x.wrapping_abs()),
+            (6, Float(x)) => Float(x.abs()),
+            // `0x8007189c`: zero (float within 1e-9) stays 0, else ±1.
+            (7, Float(x)) if x.abs() < 1e-9 => Int(0),
+            (7, _) if f == 0.0 => Int(0),
+            (7, _) => Int(if f < 0.0 { -1 } else { 1 }),
+            (8, Int(x)) => Int(x.wrapping_mul(x)),
+            (8, Float(x)) => Float(x * x),
+            // `0x8007197c`: fmod 360 into (-180, 180].
+            (10, _) => {
+                let a = f % 360.0;
+                Float(if a > 180.0 {
+                    a - 360.0
+                } else if a <= -180.0 {
+                    a + 360.0
+                } else {
+                    a
+                })
+            }
+            (11, _) => Float(f.to_radians().sin()),
+            _ => return Err(VmError::Unsupported(format!("result func {func}"))),
+        })
+    }
+
+    /// ponytail: the game draws from one global Mersenne Twister (`r13-0x39f0`) shared
+    /// by every system, which cannot be replayed; this is a per-VM SplitMix64 the caller
+    /// seeds (`rng`), deterministic per actor. Exact only if the global stream is ever modelled.
+    fn next_rand(&mut self) -> u32 {
+        self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((z ^ (z >> 31)) >> 32) as u32
     }
 
     fn operand(&mut self, o: &Operand) -> Result<Value, VmError> {
@@ -1631,6 +1866,29 @@ mod tests {
     }
 
     #[test]
+    fn vm_result_funcs() {
+        let s = script_set(Vec::new(), &[]);
+        let mut vm = Vm::new(&s, None);
+        let mut f = |func, v| vm.result_func(func, v).unwrap();
+        assert_eq!(f(2, F(-2.7)), I(-2));
+        assert_eq!(f(3, F(-2.5)), I(-3));
+        assert_eq!(f(4, F(-2.1)), I(-3));
+        assert_eq!(f(5, F(2.1)), I(3));
+        assert_eq!(f(6, I(-4)), I(4));
+        assert_eq!(f(7, F(-0.5)), I(-1));
+        assert_eq!(f(7, I(0)), I(0));
+        assert_eq!(f(8, I(-3)), I(9));
+        assert_eq!(f(10, F(270.0)), F(-90.0));
+        assert_eq!(f(10, F(-180.0)), F(180.0));
+        assert!(matches!(f(11, F(90.0)), Value::Float(x) if (x - 1.0).abs() < 1e-6));
+        for _ in 0..200 {
+            assert!(matches!(f(1, I(99)), Value::Int(0..=99)));
+            assert!(matches!(f(1, F(2.0)), Value::Float(x) if (0.0..2.0).contains(&x)));
+        }
+        assert!(vm.result_func(9, F(4.0)).is_err());
+    }
+
+    #[test]
     fn vm_branches_and_arith() {
         let s = clamp_set();
         let mut vm = Vm::new(&s, None);
@@ -1785,6 +2043,8 @@ mod tests {
                     Op::CheckRef {
                         rel: 5,
                         desc: String::new(),
+                        lhs: Vec::new(),
+                        rhs: Vec::new(),
                     },
                 ),
             ],

@@ -665,6 +665,7 @@ pub fn debug_menu_interaction_system(
                                     current_clip: Some("spawn".to_string()),
                                     time: 0.0,
                                     speed: 1.0,
+                                    state: None,
                                 },
                                 PortalSpawn::default(),
                             ));
@@ -1016,6 +1017,7 @@ mod tests {
                     current_clip: Some("idle".to_string()),
                     time: 0.0,
                     speed: 1.0,
+                    state: None,
                 },
             ))
             .id();

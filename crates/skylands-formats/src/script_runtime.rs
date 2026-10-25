@@ -3,7 +3,9 @@
 //! per-tick body (everything else). The actor itself is the engine object `my`; its
 //! fields are name-hash paths (`ScriptSet::engine_key`). Notes: `agent/SCRIPT_VM.md`.
 
-use crate::script::{name_hash, Effect, Op, Ref, ScriptSet, Value, Vm, VmError, VmIndex};
+use crate::script::{
+    name_hash, Effect, Op, Ref, RefTarget, ScriptSet, Value, Vm, VmError, VmIndex,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
@@ -24,6 +26,8 @@ pub mod field {
     pub const UNIFORM: u32 = 0xde37_5a53;
     pub const LOOPING: u32 = 0x7593_992d;
     pub const PLAYBACK_MODE: u32 = 0x056c_6ca7;
+    /// Sequence group of `my`'s `tfbAnimationState`s (`OpStartSequence` index = state id).
+    pub const ANIMATION_PALETTE: u32 = 0x8d18_097e;
 }
 
 /// `my` fields that move, turn, scale or remove the actor.
@@ -76,6 +80,13 @@ pub struct ActorScriptState {
     pub displacement: [f32; 3],
     /// `OpRemove my` ran.
     pub removed: bool,
+    /// `tfbAnimationState` id last started on the `animation palette`.
+    pub anim_state: Option<i32>,
+    /// `random` generator state; seed it per actor for distinct, repeatable runs.
+    pub rng: u64,
+    /// Op offset of the current `OpUserBehavior`.
+    behavior: Option<usize>,
+    refs: HashMap<Vec<Ref>, RefTarget>,
     /// The script hit an op the VM does not model; it no longer runs.
     pub error: Option<VmError>,
 }
@@ -154,16 +165,36 @@ impl ScriptProgram {
         vm.engine = std::mem::take(&mut st.engine);
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
+        vm.rng = st.rng;
+        vm.refs = std::mem::take(&mut st.refs);
         self.advance_sliders(&mut vm, &mut st.sliders, dt);
 
+        let ops = &self.set.scripts[si].ops;
         let mut result = Ok(());
         if !st.started {
             st.started = true;
+            // `OpStartUp` (`0x8006f58c`): the first behaviour is the op after `OpPreScript`.
+            st.behavior = ops
+                .get(body.1)
+                .filter(|i| matches!(i.op, Op::Behavior { .. }))
+                .map(|i| i.offset);
             result = vm.run_range(si, startup.0, startup.1);
         }
+        vm.behavior = st.behavior;
         if result.is_ok() {
             result = vm.run_range(si, body.0, body.1);
         }
+        // End of `OpPreScript` (`0x8006f4d4`): jump into the current behaviour block, which
+        // stops the tick when it ends (`0x8006f0c8`).
+        let current = vm
+            .behavior
+            .and_then(|b| ops.iter().position(|i| i.offset == b));
+        if let (Ok(()), Some(at)) = (&result, current) {
+            let end = (at + 1 + ops[at].br as usize).min(ops.len());
+            result = vm.run_range(si, at + 1, end);
+        }
+        st.behavior = vm.behavior;
+        st.refs = std::mem::take(&mut vm.refs);
         if let Err(e) = result {
             st.error = Some(e);
         }
@@ -200,6 +231,17 @@ impl ScriptProgram {
                     }
                 }
                 Effect::Remove { target } if target == [field::MY] => st.removed = true,
+                Effect::StartSequence { group, state } if group == [field::ANIMATION_PALETTE] => {
+                    st.anim_state = Some(state)
+                }
+                // ponytail: the turn is applied at once; the engine turns over time (target
+                // vtable +0x90, rate unknown). Add the rate once it is reversed.
+                Effect::TurnTo { target, facing } if target.first() == Some(&field::MY) => {
+                    vm.engine.insert(
+                        vec![field::MY, field::ORIENTATION, field::FACING],
+                        Value::Float(facing),
+                    );
+                }
                 _ => {}
             }
         }
@@ -222,6 +264,7 @@ impl ScriptProgram {
         }
         st.vars = std::mem::take(&mut vm.vars);
         st.engine = std::mem::take(&mut vm.engine);
+        st.rng = vm.rng;
         st.time += dt;
     }
 
@@ -495,6 +538,35 @@ mod tests {
         let mut m = crate::archive::ArchiveMount::new();
         m.mount(&p).ok()?;
         m.read_file("level.bld").ok()
+    }
+
+    #[test]
+    fn rom_hub_bird_picks_idle_states_at_random() {
+        let Some(b) = read_level("Level_Hub_2014_01") else {
+            return;
+        };
+        let p = ScriptProgram::new(ScriptSet::parse(&b).unwrap(), None);
+        let si = (0..p.set.scripts.len())
+            .find(|&i| p.set.scripts[i].name.ends_with("Bird_Ambient_new.ai"))
+            .unwrap();
+        let run = |seed| {
+            let mut st = ActorScriptState {
+                rng: seed,
+                ..Default::default()
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..60 * 60 {
+                p.tick(si, &mut st, 1.0 / 60.0);
+                seen.extend(st.anim_state);
+            }
+            assert!(st.error.is_none(), "{:?}", st.error);
+            (seen, st.get(&[MY, ORIENTATION, FACING]))
+        };
+        let (seen, facing) = run(7);
+        // IdlePeck, IdleShake, IdleHop, IdleStill.
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), [7, 8, 9, 10]);
+        assert!(facing.is_some());
+        assert_eq!(run(7), run(7));
     }
 
     #[test]

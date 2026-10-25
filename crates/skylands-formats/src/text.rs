@@ -152,7 +152,7 @@ pub fn npc_conversations(
             );
         }
         match &ins.op {
-            Op::Other(t) if t == "OpUserBehavior" => {
+            Op::Behavior { .. } => {
                 out.extend(
                     current
                         .take()
@@ -162,7 +162,7 @@ pub fn npc_conversations(
                 current = Some(Vec::new());
                 block_end = i + 1 + ins.br as usize;
             }
-            Op::CheckRef { desc, .. } if desc.starts_with("OpSetReference") => {
+            Op::SetRef { .. } => {
                 let lhs = ptr(level, &file, ins.offset + SET_REF_LHS).and_then(first);
                 let rhs = ptr(level, &file, ins.offset + SET_REF_RHS).and_then(first);
                 if let (Some(var), Some(target)) = (lhs, rhs) {

@@ -1760,6 +1760,7 @@ pub fn spawn_level_content(
                         step_height: 0.0,
                         grounded: true,
                     },
+                    ActorAnimation::default(),
                 ));
                 if marker.drawn_by_level {
                     prop.insert(LevelDrawnModel);
@@ -1823,6 +1824,11 @@ pub fn spawn_level_content(
                     .as_deref()
                     .and_then(skylands_formats::npc_name)
                     .unwrap_or_else(|| marker.name.clone());
+                let script = marker.script.as_deref().and_then(|sname| {
+                    let program = scripts.get_or_insert_with(|| level_scripts(loader, &path));
+                    Some((program.as_ref()?.0.find(sname)?, program.clone()?))
+                });
+                let base = Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform));
                 let mut npc = commands.spawn((
                     LevelEntity,
                     ActorIdentity {
@@ -1846,11 +1852,27 @@ pub fn spawn_level_content(
                         name,
                         talk_radius: NPC_TALK_RADIUS,
                         next_conversation: 0,
+                        marker_node: Some(marker.node_index),
                     },
                     Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform)),
+                    ActorAnimation::default(),
                 ));
                 if marker.drawn_by_level {
                     npc.insert(LevelDrawnModel);
+                }
+                if let Some((si, _)) = script {
+                    let mut state = skylands_formats::ActorScriptState::default();
+                    use skylands_formats::script_runtime::field;
+                    state.set(&[field::MY, field::SCALE, field::UNIFORM], 100.0);
+                    npc.insert((
+                        ActorScript {
+                            script: si,
+                            marker_node: marker.node_index,
+                            state,
+                            base,
+                        },
+                        base,
+                    ));
                 }
                 marker_id_counter += 1;
             }
@@ -1914,16 +1936,25 @@ fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Op
 /// `orientation` angles (degrees, relative to the placement; facing = yaw about +Y,
 /// tilt = X, roll = Z, composed `Rz * Ry * Rx` like placements), `vertical offset`,
 /// `OpDisplace` and `scale.uniform`. `OpRemove my` despawns the actor.
+#[allow(clippy::type_complexity)]
 pub fn actor_script_system(
     mut commands: Commands,
     time: Res<Time>,
     scripts: Option<Res<LevelScripts>>,
-    mut actors: Query<(Entity, &mut ActorScript, &mut Transform)>,
+    dialogue: Option<Res<ActiveDialogue>>,
+    mut actors: Query<(
+        Entity,
+        &mut ActorScript,
+        &mut Transform,
+        Option<&mut ActorAnimation>,
+        Option<&Npc>,
+    )>,
 ) {
     use skylands_formats::script_runtime::field::*;
     let Some(scripts) = scripts else { return };
     let dt = time.delta_secs();
-    for (entity, mut actor, mut transform) in &mut actors {
+    let talking_npc = dialogue.as_ref().and_then(|d| d.npc);
+    for (entity, mut actor, mut transform, mut anim, npc) in &mut actors {
         let actor = &mut *actor;
         scripts.0.tick(actor.script, &mut actor.state, dt);
         let st = &actor.state;
@@ -1938,6 +1969,19 @@ pub fn actor_script_system(
         transform.translation = actor.base.translation + lift + Vec3::from(st.displacement);
         transform.rotation = actor.base.rotation * turn;
         transform.scale = actor.base.scale * scale;
+
+        if let Some(ref mut anim) = anim {
+            if npc.is_some() && talking_npc == Some(entity) {
+                // Talk state: slot 9 or 151 or requested in script, fallback to current
+                anim.state = if st.anim_state != Some(0) {
+                    st.anim_state
+                } else {
+                    Some(9)
+                };
+            } else {
+                anim.state = st.anim_state;
+            }
+        }
     }
 }
 
@@ -3769,6 +3813,7 @@ mod tests {
                 })
                 .collect(),
             next_conversation: 0,
+            marker_node: None,
         }
     }
 
