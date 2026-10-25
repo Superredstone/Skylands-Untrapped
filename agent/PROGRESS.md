@@ -44,6 +44,7 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 ### Core (`crates/skylands-core`)
 - [x] Deterministic 60Hz fixed tick. States: `Hub`, `VillainCapture`, `ZoneTransition`.
 - [x] Character archive name resolution (`resolve_character_model_archive`): canonical mappings for standard Skylander IDs (0..=32, 400..=407, 1001..=1010) and filtering out minigame/auxiliary archives (`musicmini`, `outro`, `stream`, `card`, `ally_icon`, `_alt`, `legendary`).
+- [x] Debug build symbol bloat (`target/` 46GB, ~900MB per crate test binary, OOM during linking). Fixed via `.cargo/config.toml` disabling debuginfo symbols (`debug = 0`) on dev and test profiles. Binary size 900MB -> 9MB.
 - [x] Hero spawn on ring tag, villain on trap tag. gilrs + keyboard input.
 - [x] Movement, gravity, jump, ground raycast; combo/sweep/projectile combat; coins/gems.
 - [x] Character projectiles (`IgbModel.projectile`, `decode_projectile`): `tfbActorInfo` templates (`+0x08` name, `+0xec` rigid `tfbPhysicsModel`), spawned by `OpSpawn` (`+0x48` -> template, or a variable). Picked by name tier, direct spawns first; upgrade / Wow Pow / prop / `inviso` actors skipped. Gill Grunt `014_HarpoonSpear_Projectile`, Spyro `016_Fire`, Eruptor `009_LavaProjectile`, Gusto `450_Boomerang`, Trigger Happy `019_GoldBullet`; Stealth Elf none.
