@@ -2,28 +2,54 @@ use crate::audio::PortalSpeakerSink;
 use crate::collision::CollisionMesh;
 use crate::events::PortalEvent;
 use bevy::prelude::*;
-use skylands_formats::AssetLoader;
+use skylands_formats::{hero_max_hp, AssetLoader, MinionTuning, ScriptSet};
 use skylands_portal::protocol::{
     decode_portal_response, encode_color_packet, encode_trap_light_packet, PortalZone, REPORT_SIZE,
 };
 use skylands_portal::{MockPortal, SkylanderTag, UsbPortal};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// `global.bld` scripts and the boot tuning `Init_Setup.bld` writes into them.
+type MinionScripts = Option<Arc<(ScriptSet, MinionTuning)>>;
 
 #[derive(Resource, Clone, Default)]
 pub struct GameAssetServer {
     pub loader: Arc<Mutex<AssetLoader>>,
+    minion_scripts: Arc<OnceLock<MinionScripts>>,
 }
 
 impl GameAssetServer {
     pub fn new(loader: AssetLoader) -> Self {
-        Self {
-            loader: Arc::new(Mutex::new(loader)),
-        }
+        Self::from_arc(Arc::new(Mutex::new(loader)))
     }
 
     pub fn from_arc(loader: Arc<Mutex<AssetLoader>>) -> Self {
-        Self { loader }
+        Self {
+            loader,
+            minion_scripts: Default::default(),
+        }
+    }
+
+    /// Level-1 max HP from the character file's `<id>_HP_local` (`hero_max_hp`), parsed
+    /// once per server. `None` when the scripts are missing.
+    pub fn hero_max_hp(&self, model_path: &str) -> Option<u32> {
+        let parse = |p: &str| {
+            let bytes = self.loader.lock().ok()?.load_raw(p).ok()?;
+            ScriptSet::parse(&bytes)
+        };
+        let scripts = self
+            .minion_scripts
+            .get_or_init(|| {
+                let global = parse("global.bld")?;
+                let tuning = MinionTuning::from_scripts(&parse("Init_Setup.bld")?, &global).ok()?;
+                Some(Arc::new((global, tuning)))
+            })
+            .clone()?;
+        let character = parse(model_path)?;
+        hero_max_hp(&character, &scripts.0, &scripts.1)
+            .filter(|&hp| hp > 0.0)
+            .map(|hp| hp.round() as u32)
     }
 }
 
@@ -35,7 +61,7 @@ impl From<AssetLoader> for GameAssetServer {
 
 impl From<Arc<Mutex<AssetLoader>>> for GameAssetServer {
     fn from(loader: Arc<Mutex<AssetLoader>>) -> Self {
-        Self { loader }
+        Self::from_arc(loader)
     }
 }
 

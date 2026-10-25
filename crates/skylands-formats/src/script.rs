@@ -870,6 +870,25 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Evaluate `rhs` against the current variable store.
+    pub fn eval_rhs(&mut self, rhs: &Rhs) -> Result<Value, VmError> {
+        self.eval(rhs)
+    }
+
+    /// Values written to `global.bld` exports so far, by export name.
+    pub fn global_writes(&self) -> HashMap<String, Value> {
+        let Some(global) = self.global else {
+            return HashMap::new();
+        };
+        self.vars
+            .iter()
+            .filter_map(|(path, v)| match path[..] {
+                [Ref::Handle(h)] => Some((self.set.global_handle(h, global)?.name.clone(), *v)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Seed engine state the scripts read.
     pub fn set_var(&mut self, path: Vec<Ref>, v: Value) {
         self.vars.insert(path, v);
@@ -1278,6 +1297,63 @@ pub fn enemy_stats(
         hp: get("Return_HP")?,
         damage: get("Return_Damage")?,
     })
+}
+
+/// `global.bld` tuning set at boot by `Init_Setup_Minions.ai` "Minion - Tune Minions"
+/// (`global.bld` exports such as `HP_Minion_Medium` are 1.0 placeholders until then).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MinionTuning {
+    pub values: HashMap<String, Value>,
+}
+
+impl MinionTuning {
+    pub fn from_scripts(init_setup: &ScriptSet, global: &ScriptSet) -> Result<Self, VmError> {
+        let mut vm = Vm::new(init_setup, Some(global));
+        vm.call("Minion - Tune Minions", &[])?;
+        Ok(Self {
+            values: vm.global_writes(),
+        })
+    }
+
+    pub fn get(&self, name: &str) -> Option<f32> {
+        self.values.get(name).map(|v| v.as_f32())
+    }
+}
+
+/// Level-1 max HP of a Skylander: the `<id>_HP_local` value its `<id> <Name> Def` macro
+/// passes as `"max hp"` (Spyro: `HP_Minion_Medium + HP_Minion_NudgeAmount` = 270 + 10).
+/// The Eons Elite branch (`* "Elite - HP Mult"`, Gill Grunt) is skipped: a normal toy.
+pub fn hero_max_hp(
+    character: &ScriptSet,
+    global: &ScriptSet,
+    tuning: &MinionTuning,
+) -> Option<f32> {
+    let rhs = character
+        .scripts
+        .iter()
+        .flat_map(|s| &s.ops)
+        .find_map(|i| match &i.op {
+            Op::SetValue { lhs, rhs } => match lhs[..] {
+                [Ref::Obj(v)]
+                    if character.var_name(v).ends_with("_HP_local")
+                        && !character.rhs_str(rhs).contains("Elite") =>
+                {
+                    Some(rhs)
+                }
+                _ => None,
+            },
+            _ => None,
+        })?;
+    let mut vm = Vm::new(character, Some(global));
+    for h in 0..character.handle_ids.len() as u32 {
+        if let Some(v) = character
+            .global_handle(h, global)
+            .and_then(|info| tuning.values.get(&info.name))
+        {
+            vm.set_var(vec![Ref::Handle(h)], *v);
+        }
+    }
+    vm.eval_rhs(rhs).ok().map(|v| v.as_f32())
 }
 
 /// `Init_Setup_SaveGame_Portal.ai` "Portal - Define Levelup Table" defaults.
@@ -1704,6 +1780,25 @@ mod tests {
     /// RE aid: `cargo test -p skylands-formats dump_scripts -- --ignored`.
     /// `SKY_BLD=dir/name` (default `level/Level_302_Chompywurm`); writes one listing per
     /// script to `/tmp/skylands-re/<name>/` (local only, never committed).
+    #[test]
+    fn rom_hero_max_hp_from_minion_tuning() {
+        let (Some(g), Some(init), Some(spyro), Some(gill)) = (
+            read_bld("permanent", "global").and_then(|b| ScriptSet::parse(&b)),
+            read_bld("character", "Init_Setup").and_then(|b| ScriptSet::parse(&b)),
+            read_bld("character", "016_Spyro").and_then(|b| ScriptSet::parse(&b)),
+            read_bld("character", "014_GillGrunt").and_then(|b| ScriptSet::parse(&b)),
+        ) else {
+            return;
+        };
+        let tuning = MinionTuning::from_scripts(&init, &g).unwrap();
+        assert_eq!(tuning.get("HP_Minion_Medium"), Some(270.0));
+        assert_eq!(tuning.get("HP_Minion_VeryLow"), Some(200.0));
+        assert_eq!(tuning.get("HP_Minion_NudgeAmount"), Some(10.0));
+        assert_eq!(hero_max_hp(&spyro, &g, &tuning), Some(280.0));
+        // Eons Elite branch (x3) is not taken.
+        assert_eq!(hero_max_hp(&gill, &g, &tuning), Some(270.0));
+    }
+
     #[test]
     #[ignore]
     fn dump_scripts() {

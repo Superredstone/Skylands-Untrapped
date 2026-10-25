@@ -44,6 +44,13 @@ pub fn spawn_hero_actor(
         .as_deref()
         .map(ModelParameters::from_model)
         .unwrap_or_default();
+    let health = asset_server
+        .and_then(|s| s.hero_max_hp(model_path))
+        .map(|hp| Health {
+            current: hp,
+            max: hp,
+        })
+        .unwrap_or_default();
 
     commands
         .spawn((
@@ -61,7 +68,7 @@ pub fn spawn_hero_actor(
             Velocity(vel),
             MovementSpeed(model_params.ground_max_speed),
             model_params,
-            Health::default(),
+            health,
             AttackCombo::default(),
             damage,
             projectile,
@@ -3243,6 +3250,39 @@ mod tests {
             EnemyTuning::default().near.health,
             "hostile projectile passes through enemies"
         );
+    }
+
+    #[test]
+    fn test_hero_max_health_from_character_script() {
+        let mut app = App::new();
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("character/Init_Setup.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("permanent/global.bld")).unwrap();
+        loader.mount(dir.join("character/Init_Setup.bld")).unwrap();
+        loader.mount(dir.join("character/016_Spyro.bld")).unwrap();
+        let server = GameAssetServer::new(loader);
+        let hero = spawn_hero_actor(
+            &mut app.world_mut().commands(),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            16,
+            Some(&server),
+        );
+        app.world_mut().flush();
+        // `HP_Minion_Medium` 270 + `HP_Minion_NudgeAmount` 10, not the 500 default.
+        assert_eq!(
+            app.world().get::<Health>(hero),
+            Some(&Health {
+                current: 280,
+                max: 280
+            })
+        );
+        assert_eq!(server.hero_max_hp("missing.bld"), None);
     }
 
     #[test]

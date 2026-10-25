@@ -27,7 +27,9 @@ pub use igb::{
     Keyframe, LevelMarker, MarkerKind, SceneInstance, ScriptValue, Skeleton, AUTO_TRANSITION,
 };
 pub use loader::{AssetError, AssetLoader};
-pub use script::{enemy_stats, EnemyStats, LevelupTable, ScriptSet, Vm, VmError};
+pub use script::{
+    enemy_stats, hero_max_hp, EnemyStats, LevelupTable, MinionTuning, ScriptSet, Vm, VmError,
+};
 pub use script_runtime::{ActorScriptState, ScriptProgram};
 pub use sprite::{SpriteDef, SpriteLibrary};
 pub use text::{
