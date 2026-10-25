@@ -171,6 +171,36 @@ pub struct ScriptSet {
     pub roots: Vec<usize>,
     /// Export ids start after the file's `EXNM` handles.
     pub export_base: usize,
+    /// Operands of ops the decoder has no variant for (`OpSpawn`, `OpStartSequence`,
+    /// `OpControl`...), keyed by op offset: (field offset, operand). Listing only.
+    pub opaque_operands: HashMap<usize, Vec<(usize, OpaqueOperand)>>,
+}
+
+/// Ops whose operands `ScriptSet::opaque_operands` records.
+const OPAQUE_LISTED: &[&str] = &[
+    "OpSpawn",
+    "OpStartSequence",
+    "OpControl",
+    "OpChangeMembership",
+    "OpForEach",
+    "OpFindVariable",
+];
+
+/// Field of an op without an `Op` variant, for listings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OpaqueOperand {
+    /// `ValueStack` / `ReferenceStack` / `ScriptGroupStack` ... path.
+    Path {
+        stack: String,
+        path: Vec<Ref>,
+    },
+    Rhs(Rhs),
+    /// Any other object (`tfbActorInfo` template, sequence data...): type and `+0x08` name.
+    Object {
+        ty: String,
+        name: String,
+        offset: usize,
+    },
 }
 
 /// FNV-1a over the lower-cased name, as used by `EXID` entries.
@@ -276,6 +306,55 @@ impl Reader<'_> {
         }
     }
     /// `_RHS` target: a `ValueRHSVariant` or a bare `RHSValueStack`.
+    /// Fields of an op from `+0x1c` up to the next object (at most `0x60` bytes).
+    fn opaque_operands(&self, o: usize) -> Vec<(usize, OpaqueOperand)> {
+        let mut out = Vec::new();
+        for f in (0x1c..0x7c).step_by(4) {
+            if f > 0x1c && self.types.contains_key(&(o + f)) {
+                break;
+            }
+            let Some(p) = self.ptr(o + f) else { continue };
+            let ty = self.ty(p);
+            let operand = match ty {
+                "" => continue,
+                "ValueRHSVariant" => match self.rhs(p, 0) {
+                    Some(r) => OpaqueOperand::Rhs(r),
+                    None => continue,
+                },
+                t if t.ends_with("Stack") => OpaqueOperand::Path {
+                    stack: t.into(),
+                    path: self.path(p),
+                },
+                // Spawn templates: `tfbActorInfo` name and `AbstractPlacement._ID` (`+0x20`,
+                // the attach node index when parented to a rig).
+                "AbstractPlacementList" => OpaqueOperand::Object {
+                    ty: "AbstractPlacementList".into(),
+                    name: self
+                        .list(p)
+                        .into_iter()
+                        .filter_map(|w| self.decode_ptr(w))
+                        .map(|a| {
+                            format!(
+                                "{}#{}",
+                                self.cstr(a + 0x08),
+                                self.u32(a + 0x20).unwrap_or(0)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    offset: p,
+                },
+                t => OpaqueOperand::Object {
+                    ty: t.into(),
+                    name: self.cstr(p + 0x08),
+                    offset: p,
+                },
+            };
+            out.push((f, operand));
+        }
+        out
+    }
+
     fn rhs_at(&self, field: usize) -> Option<Rhs> {
         let o = self.ptr(field)?;
         match self.ty(o) {
@@ -439,6 +518,7 @@ impl ScriptSet {
             };
             vars.insert(o.offset, info);
         }
+        let mut opaque_operands = HashMap::new();
         let scripts = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbScriptInfo"))
@@ -448,11 +528,19 @@ impl ScriptSet {
                     .list(list)
                     .into_iter()
                     .filter_map(|w| r.decode_ptr(w))
-                    .map(|o| Instr {
-                        offset: o,
-                        flags: r.u16(o + 0x18),
-                        br: r.u16(o + 0x1a),
-                        op: r.op(o),
+                    .map(|o| {
+                        let op = r.op(o);
+                        if matches!(&op, Op::Other(t) if OPAQUE_LISTED.contains(&t.as_str())) {
+                            opaque_operands
+                                .entry(o)
+                                .or_insert_with(|| r.opaque_operands(o));
+                        }
+                        Instr {
+                            offset: o,
+                            flags: r.u16(o + 0x18),
+                            br: r.u16(o + 0x1a),
+                            op,
+                        }
                     })
                     .collect();
                 Some(Script {
@@ -468,6 +556,7 @@ impl ScriptSet {
             handle_ns: file.exid_namespaces.clone(),
             roots: file.roots.clone(),
             export_base: file.external_types.len(),
+            opaque_operands,
         })
     }
 
@@ -633,7 +722,23 @@ impl ScriptSet {
                 Op::PreScript => "PRESCRIPT".into(),
                 Op::StartUp => "STARTUP".into(),
                 Op::ShutDown => "SHUTDOWN".into(),
-                Op::Other(t) => t.clone(),
+                Op::Other(t) => {
+                    let mut s = t.clone();
+                    for (f, operand) in self.opaque_operands.get(&ins.offset).into_iter().flatten()
+                    {
+                        let v = match operand {
+                            OpaqueOperand::Path { stack, path } => {
+                                format!("{stack}[{}]", self.path_str(path))
+                            }
+                            OpaqueOperand::Rhs(r) => self.rhs_str(r),
+                            OpaqueOperand::Object { ty, name, offset } => {
+                                format!("{ty}@{offset:x} {name:?}")
+                            }
+                        };
+                        let _ = write!(s, " +{f:#x}={v}");
+                    }
+                    s
+                }
             };
             let _ = writeln!(
                 out,

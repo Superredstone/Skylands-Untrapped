@@ -152,6 +152,7 @@ pub fn portal_gameplay_system(
     mut capture_progress: ResMut<CaptureProgress>,
     mut audio_streaming: ResMut<PortalAudioStreaming>,
     mut trapped_state: ResMut<TrappedVillainState>,
+    mut magic_moment: ResMut<MagicMoment>,
     actors: Query<(Entity, &ActorIdentity, Has<Hero>)>,
     env: Option<Res<EnvironmentCollision>>,
     asset_server: Option<Res<GameAssetServer>>,
@@ -268,6 +269,11 @@ pub fn portal_gameplay_system(
                         asset_server.as_deref(),
                     );
                     commands.entity(hero).insert(PortalSpawn::default());
+                    magic_moment.start(
+                        char_id,
+                        name,
+                        toy_alive_duration(char_id, asset_server.as_deref()),
+                    );
                 }
 
                 let tag = SkylanderTag {
@@ -575,12 +581,14 @@ pub fn hero_movement_system(
         With<Hero>,
     >,
     spawning: Query<&PortalSpawn, With<Hero>>,
+    magic_moment: Option<Res<MagicMoment>>,
 ) {
     // The hero stands still while talking or entering through the portal.
     let idle = WiiInputState::default();
     let input = match dialogue {
         Some(d) if d.is_active() => &idle,
         _ if spawning.iter().any(|s| s.remaining > 0.0) => &idle,
+        _ if magic_moment.is_some_and(|m| m.is_active()) => &idle,
         _ => &*input,
     };
     let dt = time
@@ -783,8 +791,12 @@ pub fn hero_combat_system(
         Without<Hero>,
     >,
     spawning: Query<&PortalSpawn, With<Hero>>,
+    magic_moment: Option<Res<MagicMoment>>,
 ) {
-    if dialogue.is_some_and(|d| d.is_active()) || spawning.iter().any(|s| s.remaining > 0.0) {
+    if dialogue.is_some_and(|d| d.is_active())
+        || spawning.iter().any(|s| s.remaining > 0.0)
+        || magic_moment.is_some_and(|m| m.is_active())
+    {
         return;
     }
     let dt = if time.delta_secs() > 0.0 {
@@ -1370,7 +1382,10 @@ pub fn animation_state_system(
         Option<&CharacterCollider>,
         Option<&mut PortalSpawn>,
     )>,
+    magic_moment: Option<Res<MagicMoment>>,
 ) {
+    // The in-world entrance plays when the Magic Moment hands back to the world.
+    let in_portal_space = magic_moment.is_some_and(|m| m.is_active());
     let dt = if time.delta_secs() > 0.0 {
         time.delta_secs()
     } else {
@@ -1382,7 +1397,9 @@ pub fn animation_state_system(
 
         let next_clip = match spawn {
             Some(mut s) if s.remaining > 0.0 => {
-                s.remaining -= dt;
+                if !in_portal_space {
+                    s.remaining -= dt;
+                }
                 "spawn".to_string()
             }
             _ => animation_state_name(combo, enemy, vel, collider),
@@ -1392,6 +1409,30 @@ pub fn animation_state_system(
             anim.time = 0.0;
         }
     }
+}
+
+/// Length of the character's `ToyAlive` clip (animation state 80, the Magic Moment reveal).
+pub fn toy_alive_duration(char_id: u16, asset_server: Option<&GameAssetServer>) -> Option<f32> {
+    let (model_path, _) = get_character_asset_paths(char_id);
+    let model = asset_server?
+        .loader
+        .lock()
+        .ok()?
+        .load_igb(model_path)
+        .ok()?;
+    model.animation_for_state(80).map(|clip| clip.duration)
+}
+
+pub fn magic_moment_system(time: Res<Time<Fixed>>, mut magic_moment: ResMut<MagicMoment>) {
+    if !magic_moment.is_active() {
+        return;
+    }
+    let dt = if time.delta_secs() > 0.0 {
+        time.delta_secs()
+    } else {
+        time.timestep().as_secs_f32()
+    };
+    magic_moment.elapsed += dt;
 }
 
 pub fn portal_audio_stream_system(
@@ -2571,7 +2612,20 @@ mod tests {
         assert_eq!(app.world().get::<Velocity>(hero).unwrap().0.x, 0.0);
         assert_eq!(app.world().get::<Velocity>(hero).unwrap().0.z, 0.0);
 
-        let ticks = (PortalSpawn::DURATION * 60.0).ceil() as usize + 1;
+        // The in-world entrance waits for the Magic Moment to hand back to the world.
+        while app.world().resource::<MagicMoment>().is_active() {
+            step_fixed(&mut app);
+        }
+        let spawn = |app: &App| app.world().get::<PortalSpawn>(hero).unwrap().remaining;
+        // At most the tick that ends the Magic Moment has counted.
+        assert!(
+            spawn(&app) >= PortalSpawn::DURATION - 1.5 / 60.0,
+            "{}",
+            spawn(&app)
+        );
+
+        // One tick to run out (float rounding), one to switch clip.
+        let ticks = (PortalSpawn::DURATION * 60.0).ceil() as usize + 2;
         for _ in 0..ticks {
             step_fixed(&mut app);
         }
@@ -2583,6 +2637,55 @@ mod tests {
                 .as_deref(),
             Some("spawn")
         );
+    }
+
+    #[test]
+    fn test_portal_tag_starts_magic_moment() {
+        let mut app = build_test_app();
+        app.world_mut()
+            .resource_mut::<Events<PortalEvent>>()
+            .send(PortalEvent::TagArrived {
+                tag_index: 1,
+                zone: PortalZone::LeftRing,
+            });
+        step_fixed(&mut app);
+
+        let mm = app.world().resource::<MagicMoment>().clone();
+        assert!(mm.is_active());
+        assert_eq!(mm.character_id, Some(16));
+        assert_eq!(mm.name, "Spyro");
+        assert_eq!(mm.serial, 1);
+        // No asset server: the default `ToyAlive` length.
+        assert_eq!(mm.toy_alive, MM_DEFAULT_TOY_ALIVE);
+        assert!((mm.duration() - (MM_ALIVE + MM_DEFAULT_TOY_ALIVE + MM_HYPER_JUMP)).abs() < 1e-5);
+
+        // Hero input stays locked until the Magic Moment is over.
+        let hero = app
+            .world_mut()
+            .query_filtered::<Entity, With<Hero>>()
+            .single(app.world());
+        app.world_mut().resource_mut::<WiiInputState>().stick = [0.0, 1.0];
+        for _ in 0..(MM_ALIVE * 60.0) as usize {
+            step_fixed(&mut app);
+        }
+        assert_eq!(app.world().get::<Velocity>(hero).unwrap().0.z, 0.0);
+
+        let ticks = (mm.duration() * 60.0).ceil() as usize;
+        for _ in 0..ticks {
+            step_fixed(&mut app);
+        }
+        assert!(!app.world().resource::<MagicMoment>().is_active());
+    }
+
+    #[test]
+    fn test_magic_moment_stage_times_follow_controller_script() {
+        // mmsky4_controller.ai stage timers: 0.5, 1.2, 1.0, 0.42, 0.25 + 0.15, 0.3.
+        assert_eq!(MM_PORTAL_SPACE, 0.5);
+        assert!((MM_SHOW_MINION - 1.7).abs() < 1e-5);
+        assert!((MM_REVEAL - 2.7).abs() < 1e-5);
+        assert!((MM_TUNNEL_TINT - 3.12).abs() < 1e-5);
+        assert!((MM_BACKGROUND - 3.52).abs() < 1e-5);
+        assert!((MM_ALIVE - 3.82).abs() < 1e-5);
     }
 
     #[test]

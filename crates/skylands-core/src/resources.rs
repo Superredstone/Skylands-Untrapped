@@ -447,3 +447,62 @@ pub struct PortalAudioStreaming {
 /// The active level's scripts, shared by every `ActorScript`.
 #[derive(Resource, Clone)]
 pub struct LevelScripts(pub std::sync::Arc<skylands_formats::ScriptProgram>);
+
+/// Magic Moment: the portal-space sequence of a Skylander put on the portal
+/// (`character/sky4_mm_streaming.bld` `mmsky4_controller.ai`, modes "world to portal",
+/// "toy on", "show minion", "minion to world"). Times are seconds from placement; the
+/// script's stage timers are the `MM_*` constants. `serial` changes on every placement so
+/// the renderer rebuilds the scene even when the same character is placed again.
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct MagicMoment {
+    pub character_id: Option<u16>,
+    pub name: String,
+    pub elapsed: f32,
+    /// Length of the hero's `ToyAlive` clip (animation state 80): the "show minion" stage 6
+    /// timer.
+    pub toy_alive: f32,
+    pub serial: u32,
+}
+
+/// "world to portal": portal space appears after the stage 0 timer.
+pub const MM_PORTAL_SPACE: f32 = 0.5;
+/// "toy on" (rig "New Toy", neutral icon) lasts 1.2 s.
+pub const MM_SHOW_MINION: f32 = MM_PORTAL_SPACE + 1.2;
+/// "show minion" stage 1, after 1.0 s: the Skylander appears as a black silhouette in its
+/// toy pose (`ToyAlive` at playback rate 0) fading to white over 0.8 s, with its 3D name;
+/// rig "Magic Moment".
+pub const MM_REVEAL: f32 = MM_SHOW_MINION + 1.0;
+/// Stage 2 (+0.42 s): the cloud tunnel tint slides to the element colour over 0.4 s.
+pub const MM_TUNNEL_TINT: f32 = MM_REVEAL + 0.42;
+/// Stage 4 (+0.25 +0.15 s): element background and platform fade in over 0.3 s.
+pub const MM_BACKGROUND: f32 = MM_TUNNEL_TINT + 0.25 + 0.15;
+/// Stage 5 (+0.3 s): the white flash fades over 0.12 s and `ToyAlive` plays.
+pub const MM_ALIVE: f32 = MM_BACKGROUND + 0.3;
+/// "minion to world": rig "Hyper Jump (alt C)" (`uberModel_HyperJump_altC.ma`, 1.43 s),
+/// back to the world when it ends.
+pub const MM_HYPER_JUMP: f32 = 1.43;
+/// `ToyAlive` length when the model has none (Gill Grunt 2.17 s, Spyro 3.33 s).
+pub const MM_DEFAULT_TOY_ALIVE: f32 = 2.5;
+
+impl MagicMoment {
+    pub fn start(&mut self, character_id: u16, name: &str, toy_alive: Option<f32>) {
+        self.character_id = Some(character_id);
+        self.name = name.to_string();
+        self.elapsed = 0.0;
+        self.toy_alive = toy_alive.unwrap_or(MM_DEFAULT_TOY_ALIVE);
+        self.serial = self.serial.wrapping_add(1);
+    }
+
+    /// "minion to world" start.
+    pub fn to_world(&self) -> f32 {
+        MM_ALIVE + self.toy_alive
+    }
+
+    pub fn duration(&self) -> f32 {
+        self.to_world() + MM_HYPER_JUMP
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.character_id.is_some() && self.elapsed < self.duration()
+    }
+}

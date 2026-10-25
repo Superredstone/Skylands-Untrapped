@@ -1142,6 +1142,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         };
 
         let bevy_mesh = igb_mesh_to_bevy(&igb);
@@ -1169,6 +1170,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         };
 
         let normalized = normalize_model_mesh(&igb, 1.8);
@@ -1278,6 +1280,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         };
         let sub2 = IgbMesh {
             name: "hat".to_string(),
@@ -1303,6 +1306,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         };
 
         let combined = combine_or_normalize_model_meshes(&[sub1, sub2], Some(2.0));

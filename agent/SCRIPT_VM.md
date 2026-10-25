@@ -3,7 +3,9 @@
 Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluator,
 `enemy_stats`, `LevelupTable`). RE aid: `cargo test -p skylands-formats dump_scripts -- --ignored`
 (`SKY_BLD=level/Level_302_Chompywurm`, `permanent/global`, `character/Init_Setup`), listings go to
-`/tmp/skylands-re/<name>/` and stay local.
+`/tmp/skylands-re/<name>/` and stay local. Ops without an `Op` variant (`OpSpawn`, `OpStartSequence`,
+`OpControl`, `OpChangeMembership`, ...) list their operands from `ScriptSet::opaque_operands`
+(spawn templates as `tfbActorInfo name#AbstractPlacement._ID`).
 
 ## Layout (IGZ v6, big endian, 32-bit pointers)
 - `tfbScriptInfo`: `_name` +0x08, `_opList` +0x14 (`OpCodeList`), `_masterVarList` +0x18.

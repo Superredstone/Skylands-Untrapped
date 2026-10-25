@@ -879,6 +879,7 @@ pub fn resolve_clip<'a>(
         "jump" => &["jumpstanding", "flyup", "falling"],
         "fall" => &["falling", "flightfalling"],
         "spawn" => &["spawn02", "spawn01"],
+        "toyalive" => &["toy", "spawn02", "spawn"],
         "attack_sweep" => &["spinattack", "smashattack", "attack"],
         s if s.starts_with("attack") => &["attack"],
         _ => &[],
@@ -899,13 +900,17 @@ pub fn resolve_clip<'a>(
 /// Attacks, jump take-offs and the portal entrance play once and hold their last frame;
 /// everything else loops.
 fn is_one_shot(state: &str) -> bool {
-    state.starts_with("attack") || state == "jump" || state == "spawn"
+    state.starts_with("attack") || matches!(state, "jump" | "spawn" | "toyalive")
 }
 
 pub fn character_animation_system(
     time: Res<Time>,
     viewer_settings: Option<Res<crate::ViewerSettings>>,
-    mut anim_query: Query<(&mut CharacterAnimator, Option<&ActorAnimation>)>,
+    mut anim_query: Query<(
+        &mut CharacterAnimator,
+        Option<&ActorAnimation>,
+        Option<&crate::magic_moment::MagicMomentPose>,
+    )>,
     mut transform_query: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs();
@@ -914,22 +919,29 @@ pub fn character_animation_system(
         .filter(|v| v.viewer_mode)
         .map(|v| v.clip_name.clone());
 
-    for (mut anim, actor_anim) in &mut anim_query {
-        let requested = viewer_clip
-            .as_deref()
-            .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
-            .unwrap_or("idle");
+    for (mut anim, actor_anim, mm_pose) in &mut anim_query {
+        let requested = match mm_pose {
+            Some(pose) => pose.clip.as_str(),
+            None => viewer_clip
+                .as_deref()
+                .or_else(|| actor_anim.and_then(|a| a.current_clip.as_deref()))
+                .unwrap_or("idle"),
+        };
         if anim.current_clip != requested {
             anim.current_clip = requested.to_string();
             anim.elapsed = 0.0;
         } else {
             anim.elapsed += dt;
         }
+        // The Magic Moment drives its Skylander's clip time (`ToyAlive` held at rate 0).
+        if let Some(pose) = mm_pose {
+            anim.elapsed = pose.time;
+        }
 
         let Some(clip) = resolve_clip(&anim.animations, requested) else {
             continue;
         };
-        let t = if is_one_shot(requested) {
+        let t = if mm_pose.is_some() || is_one_shot(requested) {
             anim.elapsed.min(clip.duration * 0.999)
         } else {
             anim.elapsed
@@ -969,6 +981,7 @@ pub fn actor_visual_sync_system(
             Option<&Prop>,
             Has<Enemy>,
             Has<LevelDrawnModel>,
+            Has<crate::magic_moment::MagicMomentModel>,
         ),
         Or<(Without<ActorVisual>, Changed<ActorIdentity>)>,
     >,
@@ -980,11 +993,12 @@ pub fn actor_visual_sync_system(
         return;
     };
 
-    for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy, level_drawn) in
+    for (entity, ident, maybe_hero, maybe_villain, maybe_prop, is_enemy, level_drawn, is_intro) in
         &actor_query
     {
         commands.entity(entity).insert(ActorVisual);
-        let is_hero = maybe_hero.is_some();
+        // The portal intro copy is drawn like the hero it shows.
+        let is_hero = maybe_hero.is_some() || is_intro;
         let is_villain = maybe_villain.is_some() || is_enemy;
 
         if is_hero || is_villain {
@@ -1258,6 +1272,7 @@ mod tests {
         assert_ne!(grass, LevelMaterialKey::of(&mesh(Some(4), None)));
         let clamped = IgbMesh {
             texture_wrap: [TextureWrap::Clamp; 2],
+            uv_scroll: None,
             ..mesh(Some(3), None)
         };
         assert_ne!(grass, LevelMaterialKey::of(&clamped));
@@ -1715,6 +1730,7 @@ mod tests {
             clip("falling"),
             clip("smashattack"),
             clip("spawn02"),
+            clip("toy"),
         ];
         let name = |s: &str| resolve_clip(&clips, s).map(|c| c.name.as_str());
         assert_eq!(name("idle"), Some("combatidle"));
@@ -1724,6 +1740,7 @@ mod tests {
         assert_eq!(name("attack_sweep"), Some("smashattack"));
         assert_eq!(name("attack_combo_2"), Some("smashattack"));
         assert_eq!(name("spawn"), Some("spawn02"));
+        assert_eq!(name("toyalive"), Some("toy"));
         assert_eq!(name("unknown"), Some("combatidle"));
         assert!(resolve_clip(&[], "idle").is_none());
     }

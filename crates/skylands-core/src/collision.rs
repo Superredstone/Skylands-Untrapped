@@ -668,6 +668,9 @@ mod tests {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         };
 
         let make_mesh = |name: &str| -> IgbMesh {
@@ -693,6 +696,7 @@ mod tests {
                 image_index: None,
                 base_color: None,
                 texture_wrap: Default::default(),
+                uv_scroll: None,
             }
         };
 

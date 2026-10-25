@@ -370,6 +370,8 @@ pub struct IgbMesh {
     pub base_color: Option<[f32; 4]>,
     /// `igTextureAttr2._wrapS` / `_wrapT` of the diffuse texture.
     pub texture_wrap: [TextureWrap; 2],
+    /// `tfbScrollUVAnimData` `UVanimVelocityU/V` (UV units per second) of the material.
+    pub uv_scroll: Option<[f32; 2]>,
 }
 
 /// `IG_GFX_TEXTURE_WRAP_*` (enum order from the `main.dol` string table:
@@ -398,6 +400,10 @@ pub struct DrawableMaterial {
     pub color: Option<[f32; 4]>,
     pub name: Option<String>,
     pub wrap: [TextureWrap; 2],
+    /// `tfbRuntimeMaterial._transforms` (`+0x28`) -> `igCustomMaterialAnimation` `+0x08`
+    /// -> `tfbFxMaterialUvAnimationTransform._track` (`+0x50`) -> `tfbScrollUVAnimTrack`
+    /// `+0x10` -> `tfbScrollUVAnimData` velocity (`+0x10`, `+0x14`).
+    pub uv_scroll: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1434,6 +1440,8 @@ pub struct AnimationClip {
     pub tracks: Vec<BoneTrack>,
     /// Index into `IgbModel.skeletons` of the rig the tracks drive (`None` = unknown).
     pub skeleton: Option<usize>,
+    /// `tfbPhysicsAnimation` `.ma` path (empty for synthetic clips).
+    pub source: String,
 }
 
 pub fn lerp_vec3(a: &[f32; 3], b: &[f32; 3], t: f32) -> [f32; 3] {
@@ -1726,6 +1734,7 @@ impl AnimationClip {
             duration,
             tracks,
             skeleton: None,
+            source: String::new(),
         }
     }
 
@@ -1914,6 +1923,48 @@ pub struct IgbModel {
     pub node_owner: std::collections::HashMap<usize, usize>,
     /// Marker node -> `.ai` script path.
     pub marker_scripts: std::collections::HashMap<usize, String>,
+    /// `tfbActorInfo` templates with a model (what scripts `OpSpawn`).
+    pub actor_models: Vec<ActorModel>,
+    /// `tfbAnimationState`s: the ids `OpStartSequence` on the `animation palette` plays.
+    pub animation_states: Vec<AnimationStateInfo>,
+    /// `ScriptColorInfo` (`+0x08` name, `_value` `+0x18`, `0xAABBGGRR`): script colour
+    /// constants such as `MM_element_00_magic_color`.
+    pub script_colors: Vec<(String, u32)>,
+}
+
+/// `tfbActorInfo` (`+0x08` name, `+0xec` `tfbPhysicsModel`) and its model.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ActorModel {
+    pub actor: String,
+    /// `tfbPhysicsModel` `.mdl` path.
+    pub model: String,
+    /// Indices into `IgbModel.meshes`.
+    pub meshes: Vec<usize>,
+    /// Index into `IgbModel.skeletons` of a rigged model (`tfbPhysicsCombinerLink`).
+    pub skeleton: Option<usize>,
+    /// Per `meshes` entry: the joint (`skeleton` bone index) an articulated drawable follows
+    /// (`Drawable._entity` -> `tfbBodyEntityInfo._entities` -> `Entity._parentIndex`).
+    /// Vertices stay in model (bind) space.
+    pub mesh_bones: Vec<Option<usize>>,
+    /// `BoneAttachInfoList` (`+0x28`): the model's `attach nodes`, in order.
+    pub attach_nodes: Vec<AttachNode>,
+}
+
+/// `BoneAttachInfo`: `+0x08` node name, `_boneName` `+0x1c`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AttachNode {
+    pub name: String,
+    pub bone: String,
+}
+
+/// `tfbAnimationState`: `+0x08` name, `_id` `+0x0c`, `_animations` `+0x14`
+/// (`AnimationClipList` -> `AnimationClip` `+0x38` -> `tfbPhysicsAnimation`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnimationStateInfo {
+    pub id: i32,
+    pub name: String,
+    /// Index into `IgbModel.animations` of the state's first clip.
+    pub clip: Option<usize>,
 }
 
 /// Rigid model mounted on a bone of the primary rig (Gill Grunt's harpoon gun on `J_gun`).
@@ -1997,6 +2048,9 @@ impl Default for IgbModel {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         }
     }
 }
@@ -2156,6 +2210,9 @@ impl IgbModel {
                 animated_markers: Default::default(),
                 node_owner: Default::default(),
                 marker_scripts: Default::default(),
+                actor_models: Vec::new(),
+                animation_states: Vec::new(),
+                script_colors: Vec::new(),
             });
         }
 
@@ -2195,6 +2252,9 @@ impl IgbModel {
                 animated_markers: Default::default(),
                 node_owner: Default::default(),
                 marker_scripts: Default::default(),
+                actor_models: Vec::new(),
+                animation_states: Vec::new(),
+                script_colors: Vec::new(),
             });
         }
 
@@ -2342,6 +2402,7 @@ impl IgbModel {
                     image_index: None,
                     base_color: None,
                     texture_wrap: Default::default(),
+                    uv_scroll: None,
                 };
                 geo.mesh = Some(mesh.clone());
                 meshes.push(mesh);
@@ -2381,6 +2442,9 @@ impl IgbModel {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         })
     }
 
@@ -3110,6 +3174,7 @@ impl IgbModel {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         })
     }
 
@@ -3498,6 +3563,165 @@ impl IgbModel {
                 })
             })
             .collect()
+    }
+
+    /// Every `tfbActorInfo` template with a `tfbPhysicsModel` (`+0xec`): meshes, rig
+    /// (`+0x60` `tfbPhysicsCombinerLink` `+0x0c` -> `igSkeleton2`) and attach nodes
+    /// (`+0x28` `BoneAttachInfoList`). Magic Moment: `MMRig` (camera, Skylander, name...
+    /// nodes), `MM_dualEndedTunnelTube`, `MM_fastStars`, element backgrounds.
+    fn decode_actor_models(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        mesh_by_geo: &std::collections::HashMap<usize, usize>,
+        skeleton_by_offset: &std::collections::HashMap<usize, (usize, Vec<u32>)>,
+    ) -> Vec<ActorModel> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        let list_items = |list: usize| -> Vec<usize> {
+            let (Some(n), Some(arr)) = (rd(list + 0x08), ptr(list + 0x14)) else {
+                return Vec::new();
+            };
+            (0..n.min(4096) as usize)
+                .filter_map(|i| ptr(arr + i * 4))
+                .collect()
+        };
+        let types: std::collections::HashMap<usize, &str> = objects
+            .iter()
+            .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
+            .collect();
+
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
+            .filter_map(|actor| {
+                let model = ptr(actor.offset + 0xec)
+                    .filter(|m| types.get(m) == Some(&"tfbPhysicsModel"))?;
+                let skeleton = ptr(model + 0x60)
+                    .and_then(|link| ptr(link + 0x0c))
+                    .and_then(|s| skeleton_by_offset.get(&s))
+                    .map(|&(idx, _)| idx);
+                let attach_nodes = ptr(model + 0x28)
+                    .map(list_items)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|n| AttachNode {
+                        name: cstr(n + 0x08),
+                        bone: cstr(n + 0x1c),
+                    })
+                    .collect();
+                // Drawables in mesh order, with the joint of their entity.
+                let body = ptr(model + 0x68);
+                let entities = body
+                    .and_then(|b| ptr(b + 0x18))
+                    .map(list_items)
+                    .unwrap_or_default();
+                let read_u16 = |o: usize| -> Option<u16> {
+                    data.get(o..o + 2).map(|b| match endian {
+                        IgbEndian::Big => u16::from_be_bytes([b[0], b[1]]),
+                        IgbEndian::Little => u16::from_le_bytes([b[0], b[1]]),
+                    })
+                };
+                let (meshes, mesh_bones) = body
+                    .and_then(|b| ptr(b + 0x14))
+                    .map(list_items)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|d| {
+                        let g = ptr(d + 0x0c)?;
+                        let g = match types.get(&g) {
+                            Some(&"igWiiGeometryAttr") => ptr(g + 0x10)?,
+                            _ => g,
+                        };
+                        let mesh = *mesh_by_geo.get(&g)?;
+                        let bone = skeleton.and(read_u16(d + 0x14)).and_then(|e| {
+                            let entity = *entities.get(e as usize)?;
+                            read_u16(entity + 0x10).map(usize::from)
+                        });
+                        Some((mesh, bone))
+                    })
+                    .unzip();
+                Some(ActorModel {
+                    actor: cstr(actor.offset + 0x08),
+                    model: cstr(model + 0x08),
+                    meshes,
+                    skeleton,
+                    mesh_bones,
+                    attach_nodes,
+                })
+            })
+            .collect()
+    }
+
+    /// `tfbAnimationState`s, with the clip of their first `AnimationClip` matched by
+    /// `tfbPhysicsAnimation` path.
+    fn decode_animation_states(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        animations: &[AnimationClip],
+    ) -> Vec<AnimationStateInfo> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbAnimationState"))
+            .map(|state| {
+                let path = ptr(state.offset + 0x14)
+                    .filter(|&list| rd(list + 0x08).unwrap_or(0) > 0)
+                    .and_then(|list| ptr(list + 0x14))
+                    .and_then(&ptr)
+                    .and_then(|clip| ptr(clip + 0x38))
+                    .map(|anim| cstr(anim + 0x08));
+                AnimationStateInfo {
+                    id: rd(state.offset + 0x0c).unwrap_or(0) as i32,
+                    name: cstr(state.offset + 0x08),
+                    clip: path.and_then(|p| animations.iter().position(|a| a.source == p)),
+                }
+            })
+            .collect()
+    }
+
+    /// Clip of the `tfbAnimationState` with `_id` `id` (`OpStartSequence` on the
+    /// `animation palette`: Magic Moment rig 3 = "New Toy", hero 80 = `ToyAlive`).
+    pub fn animation_for_state(&self, id: i32) -> Option<&AnimationClip> {
+        self.animation_states
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.clip)
+            .and_then(|c| self.animations.get(c))
     }
 
     /// Meshes of a rigid `tfbPhysicsModel`: `+0x68` `tfbBodyEntityInfo` `+0x14` ->
@@ -4001,11 +4225,23 @@ impl IgbModel {
                     }
                 }
 
+                let uv_scroll = ptr(mat + 0x28)
+                    .and_then(|list| {
+                        let n = rd(list + 0x08)?.min(64) as usize;
+                        let arr = ptr(list + 0x14)?;
+                        (0..n).find_map(|i| {
+                            let track = ptr(ptr(ptr(arr + i * 4)? + 0x08)? + 0x50)?;
+                            let scroll = ptr(track + 0x10)?;
+                            Some([rd_f32(scroll + 0x10)?, rd_f32(scroll + 0x14)?])
+                        })
+                    })
+                    .filter(|v| v.iter().all(|c| c.is_finite() && c.abs() < 100.0));
                 let material = DrawableMaterial {
                     image: found_image,
                     color: found_color,
                     name: mat_name,
                     wrap: found_wrap,
+                    uv_scroll,
                 };
                 if let Some(inner_geo) = ptr(geo + 0x10) {
                     out.insert(inner_geo, material.clone());
@@ -5033,6 +5269,7 @@ impl IgbModel {
                             .and_then(|off| image_index_by_offset.get(&off).copied());
                         m.base_color = mat.color;
                         m.texture_wrap = mat.wrap;
+                        m.uv_scroll = mat.uv_scroll;
                         if let Some(name) = &mat.name {
                             m.material_name = Some(name.clone());
                         }
@@ -5257,6 +5494,7 @@ impl IgbModel {
                         image_index: None,
                         base_color: None,
                         texture_wrap: Default::default(),
+                        uv_scroll: None,
                     };
                     let geo_node = IgbGeometryNode {
                         name: format!("geo_{}", mesh_name),
@@ -5328,12 +5566,13 @@ impl IgbModel {
                 };
                 let norm_name = name.to_ascii_lowercase();
 
-                if let Some(clip) = crate::havok::parse_havok_animation(
+                if let Some(mut clip) = crate::havok::parse_havok_animation(
                     hk_data,
                     &norm_name,
                     &skeletons,
                     &havok_rigs,
                 ) {
+                    clip.source = raw_name.clone();
                     animations.push(clip);
                 }
             }
@@ -5412,6 +5651,39 @@ impl IgbModel {
             animations = vec![idle_clip, walk_clip, attack_clip];
         }
 
+        let (actor_models, animation_states) = match &igz_objects {
+            Some(list) => (
+                Self::decode_actor_models(
+                    data,
+                    sections,
+                    &list.objects,
+                    endian,
+                    &mesh_by_geo,
+                    &skeleton_by_offset,
+                ),
+                Self::decode_animation_states(data, sections, &list.objects, endian, &animations),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let script_colors = igz_objects
+            .as_ref()
+            .map(|list| {
+                list.objects
+                    .iter()
+                    .filter(|o| o.type_name.as_deref() == Some("ScriptColorInfo"))
+                    .filter_map(|o| {
+                        let w = Self::read_u32(data, o.offset + 0x08, endian);
+                        let s = sections.get(((w >> 27) + 1) as usize)?;
+                        let p = s.offset + (w & 0x07FF_FFFF) as usize;
+                        let bytes = data.get(p..)?;
+                        let end = bytes.iter().position(|&b| b == 0)?;
+                        let name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+                        Some((name, Self::read_u32(data, o.offset + 0x18, endian)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let header = IgbHeader {
             magic: [b'I', b'G', b'Z', 1],
             version,
@@ -5444,6 +5716,9 @@ impl IgbModel {
             animated_markers,
             node_owner,
             marker_scripts,
+            actor_models,
+            animation_states,
+            script_colors,
         })
     }
 
@@ -5652,6 +5927,7 @@ impl IgbModel {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         })
     }
 
@@ -5918,6 +6194,7 @@ impl IgbModel {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         })
     }
 }
@@ -6423,6 +6700,9 @@ mod tests {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         };
 
         let instances = model.evaluate_scene_graph();
@@ -6503,6 +6783,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         };
 
         let geo = IgbGeometryNode {
@@ -6544,6 +6825,9 @@ mod tests {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         };
 
         let markers = model.extract_level_markers();
@@ -6820,6 +7104,9 @@ mod tests {
             animated_markers: Default::default(),
             node_owner: Default::default(),
             marker_scripts: Default::default(),
+            actor_models: Vec::new(),
+            animation_states: Vec::new(),
+            script_colors: Vec::new(),
         };
 
         let anim_instances = anim_model.evaluate_animated_scene_graph(&clip, 1.0);
@@ -6908,6 +7195,92 @@ mod tests {
         assert!(model.animations.iter().any(|a| a.name == "idle"));
         let empty = Skeleton::default();
         assert!(model.animations[0].sample_pose(0.5, &empty).is_empty());
+    }
+
+    #[test]
+    fn test_magic_moment_stream_rig_states_and_scroll() {
+        let Some(bytes) = read_character_bld("sky4_mm_streaming") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse mm stream");
+        let rig = model
+            .actor_models
+            .iter()
+            .find(|a| a.actor == "MMRig")
+            .expect("MMRig");
+        assert!(rig.model.ends_with("MMsky4_uberModel.mdl"), "{}", rig.model);
+        let node = |n: &str| {
+            rig.attach_nodes
+                .iter()
+                .find(|a| a.name == n)
+                .map(|a| a.bone.as_str())
+        };
+        assert_eq!(node("camera"), Some("J_camera"));
+        assert_eq!(node("Skylander"), Some("J_skylander"));
+        assert_eq!(node("name"), Some("J_skylanderName"));
+        assert_eq!(node("icon"), Some("J_elementalIcon"));
+        let skel = rig.skeleton.expect("rigged");
+        assert!(model.skeletons[skel]
+            .bones
+            .iter()
+            .any(|b| b.name == "J_camera"));
+
+        let state = |id| {
+            model
+                .animation_for_state(id)
+                .map(|c| (c.source.rsplit('/').next().unwrap().to_string(), c.duration))
+        };
+        let (new_toy, d) = state(3).expect("New Toy");
+        assert_eq!(new_toy, "uberModel_NewToy.ma");
+        assert!((d - 1.17).abs() < 0.01, "{d}");
+        assert_eq!(state(5).unwrap().0, "uberModel_MM.ma");
+        let (alt_c, d) = state(9).expect("Hyper Jump (alt C)");
+        assert_eq!(alt_c, "uberModel_HyperJump_altC.ma");
+        assert!((d - 1.43).abs() < 0.01, "{d}");
+
+        for actor in ["MM_dualEndedTunnelTube", "MM_fastStars", "MM_slowStars"] {
+            let a = model
+                .actor_models
+                .iter()
+                .find(|a| a.actor == actor)
+                .expect(actor);
+            assert!(!a.meshes.is_empty(), "{actor}");
+        }
+        // The tunnel walls and star tubes scroll their textures.
+        let scrolling = |actor: &str| {
+            model
+                .actor_models
+                .iter()
+                .find(|a| a.actor == actor)
+                .is_some_and(|a| {
+                    a.meshes
+                        .iter()
+                        .any(|&m| model.meshes[m].uv_scroll.is_some())
+                })
+        };
+        assert!(scrolling("MM_dualEndedTunnelTube") || scrolling("MM_fastStars"));
+
+        let color = |n: &str| {
+            model
+                .script_colors
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|&(_, v)| v)
+        };
+        assert_eq!(color("MM_element_00_magic_color"), Some(0xffa5335d));
+        assert_eq!(color("MM_element_neutral_color"), Some(0xffdd822c));
+    }
+
+    #[test]
+    fn test_hero_toy_alive_state() {
+        let Some(bytes) = read_character_bld("016_Spyro") else {
+            return;
+        };
+        let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse spyro");
+        let toy_alive = model.animation_for_state(80).expect("state 80");
+        assert_eq!(toy_alive.name, "toyalive");
+        assert!((toy_alive.duration - 3.33).abs() < 0.01);
+        assert_eq!(model.animation_for_state(81).unwrap().name, "toy");
     }
 
     #[test]
@@ -8038,6 +8411,7 @@ mod tests {
             image_index: None,
             base_color: None,
             texture_wrap: Default::default(),
+            uv_scroll: None,
         }
     }
 

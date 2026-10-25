@@ -55,6 +55,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<TrappedVillainState>()
             .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
+            .init_resource::<MagicMoment>()
             .add_systems(Startup, systems::setup_default_scene)
             .add_systems(FixedFirst, interpolation::restore_tick_transform)
             .add_systems(FixedPostUpdate, interpolation::record_tick_transform)
@@ -91,6 +92,7 @@ impl Plugin for SkylandsCorePlugin {
                     systems::zone_trigger_system,
                     systems::npc_interaction_system,
                     systems::animation_state_system,
+                    systems::magic_moment_system,
                     systems::portal_audio_stream_system,
                     systems::villain_capture_system,
                     systems::state_transition_update_system,

@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod debug_menu;
 pub mod hud;
+pub mod magic_moment;
 pub mod mesh_conversion;
 pub mod sky4_hud;
 pub mod texture_conversion;
@@ -18,6 +19,10 @@ pub use debug_menu::{
 pub use hud::{
     damage_popup_ui_system, dialogue_box_system, hud_update_system, setup_dialogue_box,
     setup_hud_ui,
+};
+pub use magic_moment::{
+    magic_moment_layer_system, magic_moment_system, setup_magic_moment, MagicMomentAssets,
+    MagicMomentModel, MagicMomentPose, MM_LAYER,
 };
 pub use mesh_conversion::{
     combine_or_normalize_model_meshes, combine_scene_instances_to_bevy, igb_character_submeshes,
@@ -71,6 +76,7 @@ impl Plugin for SkylandsRenderPlugin {
                     setup_dialogue_box,
                     setup_sky4_hud,
                     setup_debug_menu_ui,
+                    setup_magic_moment,
                 ),
             )
             .add_systems(
@@ -101,6 +107,10 @@ impl Plugin for SkylandsRenderPlugin {
                     debug_menu_toggle_system,
                     debug_menu_interaction_system,
                     debug_menu_telemetry_system,
+                    (magic_moment_system, magic_moment_layer_system)
+                        .chain()
+                        .before(actor_visual_sync_system)
+                        .before(character_animation_system),
                 ),
             );
     }

@@ -2,8 +2,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use skylands_core::{
     ActiveLevel, ActivePortal, ActorAnimation, ActorIdentity, EnvironmentCollision, GameState,
-    GameStats, Health, Hero, PortalGameplayState, Velocity, ZoneTransitionEvent,
-    ZoneTransitionProgress,
+    GameStats, Health, Hero, MagicMoment, PortalGameplayState, PortalSpawn, Velocity,
+    ZoneTransitionEvent, ZoneTransitionProgress,
 };
 
 use crate::camera::{free_cam_cursor, FreeCamState, MainCamera};
@@ -597,6 +597,8 @@ pub fn debug_menu_interaction_system(
     mut transition_events: EventWriter<ZoneTransitionEvent>,
     mut next_state: Option<ResMut<NextState<GameState>>>,
     mut viewer_settings: Option<ResMut<ViewerSettings>>,
+    mut magic_moment: Option<ResMut<MagicMoment>>,
+    asset_server: Option<Res<crate::visual_sync::CharacterAssetServer>>,
     mut hero_query: Query<(Entity, &mut ActorIdentity, Option<&mut ActorAnimation>), With<Hero>>,
     mut animator_query: Query<&mut CharacterAnimator>,
     mut button_query: Query<
@@ -646,12 +648,25 @@ pub fn debug_menu_interaction_system(
                             ident.model_path = Some(model_path.to_string());
                             ident.texture_path = tex_path.map(|s| s.to_string());
 
-                            // Reset animator current clip
-                            commands.entity(entity).insert(ActorAnimation {
-                                current_clip: Some(menu_state.active_animation.clone()),
-                                time: 0.0,
-                                speed: 1.0,
-                            });
+                            // Swapping Skylanders plays the portal entrance.
+                            commands.entity(entity).insert((
+                                ActorAnimation {
+                                    current_clip: Some("spawn".to_string()),
+                                    time: 0.0,
+                                    speed: 1.0,
+                                },
+                                PortalSpawn::default(),
+                            ));
+                            if let Some(ref mut mm) = magic_moment {
+                                mm.start(
+                                    char_id,
+                                    name,
+                                    skylands_core::toy_alive_duration(
+                                        char_id,
+                                        asset_server.as_deref(),
+                                    ),
+                                );
+                            }
                         }
 
                         if let Some(ref mut vs) = viewer_settings {
@@ -913,6 +928,7 @@ mod tests {
         app.init_resource::<DebugMenuState>()
             .init_resource::<FreeCamState>()
             .init_resource::<ZoneTransitionProgress>()
+            .init_resource::<MagicMoment>()
             .add_event::<ZoneTransitionEvent>()
             .add_systems(Update, debug_menu_interaction_system);
 
@@ -949,6 +965,19 @@ mod tests {
         let ident = app.world().get::<ActorIdentity>(hero).unwrap();
         assert_eq!(ident.character_id, 400);
         assert_eq!(ident.name, "Snap Shot");
+        assert!(app.world().get::<PortalSpawn>(hero).is_some());
+        assert_eq!(
+            app.world().resource::<MagicMoment>().character_id,
+            Some(400)
+        );
+        assert_eq!(
+            app.world()
+                .get::<ActorAnimation>(hero)
+                .unwrap()
+                .current_clip
+                .as_deref(),
+            Some("spawn")
+        );
     }
 
     #[test]
