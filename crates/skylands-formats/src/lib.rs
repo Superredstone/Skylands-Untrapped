@@ -5,6 +5,7 @@ pub mod fsb;
 pub mod havok;
 pub mod igb;
 pub mod loader;
+pub mod save;
 pub mod script;
 pub mod script_runtime;
 pub mod sprite;
@@ -27,6 +28,7 @@ pub use igb::{
     Keyframe, LevelMarker, MarkerKind, SceneInstance, ScriptValue, Skeleton, AUTO_TRANSITION,
 };
 pub use loader::{AssetError, AssetLoader};
+pub use save::{SaveCount, SaveParamDef, SaveSchema};
 pub use script::{
     enemy_stats, hero_max_hp, hero_movement, EnemyStats, HeroMovement, LevelupTable, MinionTuning,
     ScriptSet, Vm, VmError,

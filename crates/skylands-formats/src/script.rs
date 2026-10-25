@@ -530,7 +530,10 @@ impl ScriptSet {
                     .filter_map(|w| r.decode_ptr(w))
                     .map(|o| {
                         let op = r.op(o);
-                        if matches!(&op, Op::Other(t) if OPAQUE_LISTED.contains(&t.as_str())) {
+                        // Reference arguments (`"save param" = -`) live in a param's opaque fields.
+                        if matches!(&op, Op::Other(t) if OPAQUE_LISTED.contains(&t.as_str()))
+                            || matches!(op, Op::Param { rhs: None, .. })
+                        {
                             opaque_operands
                                 .entry(o)
                                 .or_insert_with(|| r.opaque_operands(o));
@@ -615,7 +618,7 @@ impl ScriptSet {
             ),
         }
     }
-    fn path_str(&self, p: &[Ref]) -> String {
+    pub(crate) fn path_str(&self, p: &[Ref]) -> String {
         p.iter()
             .map(|r| self.ref_name(r))
             .collect::<Vec<_>>()
