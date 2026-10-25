@@ -342,7 +342,7 @@ impl HavokSplineTrack {
             s
         } else if let Some(ref ch) = self.spline_scale {
             let span = find_knot_span(ch.degree, frame, ch.cpoints.len(), &ch.knots);
-            let mut s = [1.0f32; 3];
+            let mut s = [0.0f32; 3];
             let mut n = [1.0f32, 0.0, 0.0, 0.0, 0.0];
             for i in 1..=ch.degree {
                 for j in (0..i).rev() {

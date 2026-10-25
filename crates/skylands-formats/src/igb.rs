@@ -7431,6 +7431,19 @@ mod tests {
         assert_eq!(toy_alive.name, "toyalive");
         assert!((toy_alive.duration - 3.33).abs() < 0.01);
         assert_eq!(model.animation_for_state(81).unwrap().name, "toy");
+
+        let skel = &model.skeletons[0];
+        let jaw_idx = skel.get_bone_index("J_jaw").unwrap();
+        let toy_alive_track = toy_alive
+            .tracks
+            .iter()
+            .find(|t| t.bone_index == jaw_idx)
+            .expect("jaw track");
+        let s0 = toy_alive_track.scales[0].value;
+        assert!(
+            (s0[0] - 1.0).abs() < 0.05 && (s0[1] - 1.0).abs() < 0.05 && (s0[2] - 1.0).abs() < 0.05,
+            "jaw scale at t=0 must be ~1.0, got {s0:?}"
+        );
     }
 
     #[test]
