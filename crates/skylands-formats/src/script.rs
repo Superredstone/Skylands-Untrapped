@@ -904,6 +904,8 @@ pub struct Vm<'a> {
     pub engine: HashMap<Vec<u32>, Value>,
     /// Engine actions the scripts asked for, in execution order.
     pub effects: Vec<Effect>,
+    /// Global variables shared across actor scripts (e.g. "Levels_Completed").
+    pub globals: HashMap<String, Value>,
     /// Engine state read before any write (spawned objects, save data, other files),
     /// in first-read order. Such reads yield 0.
     pub unbound: Vec<String>,
@@ -1005,6 +1007,7 @@ impl<'a> Vm<'a> {
             depth: 0,
             engine: HashMap::new(),
             effects: Vec::new(),
+            globals: HashMap::new(),
             unbound: Vec::new(),
             rng: 0,
             behavior: None,
@@ -1463,12 +1466,16 @@ impl<'a> Vm<'a> {
         }
         let init = match path[..] {
             [Ref::Obj(o)] => {
+                let name = self.set.var_name(o);
+                if let Some(v) = self.globals.get(name) {
+                    return *v;
+                }
                 return self
                     .set
                     .vars
                     .get(&o)
                     .and_then(|v| v.init)
-                    .unwrap_or(Value::Int(0))
+                    .unwrap_or(Value::Int(0));
             }
             [Ref::Handle(h)] => self
                 .global
@@ -1492,6 +1499,12 @@ impl<'a> Vm<'a> {
                     self.engine.insert(k, v);
                 }
                 None => {
+                    if let [Ref::Obj(o)] = p[..] {
+                        let name = self.set.var_name(o);
+                        if self.globals.contains_key(name) {
+                            self.globals.insert(name.to_string(), v);
+                        }
+                    }
                     self.vars.insert(p, v);
                 }
             }

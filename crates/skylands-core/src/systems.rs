@@ -1942,6 +1942,7 @@ pub fn actor_script_system(
     time: Res<Time>,
     scripts: Option<Res<LevelScripts>>,
     dialogue: Option<Res<ActiveDialogue>>,
+    campaign: Option<Res<CampaignProgress>>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -1954,8 +1955,16 @@ pub fn actor_script_system(
     let Some(scripts) = scripts else { return };
     let dt = time.delta_secs();
     let talking_npc = dialogue.as_ref().and_then(|d| d.npc);
+    let levels_completed = campaign
+        .as_ref()
+        .map(|c| c.completed_chapters.len() as i32)
+        .unwrap_or(0);
     for (entity, mut actor, mut transform, mut anim, npc) in &mut actors {
         let actor = &mut *actor;
+        actor.state.globals.insert(
+            "Levels_Completed".to_string(),
+            skylands_formats::script::Value::Int(levels_completed),
+        );
         scripts.0.tick(actor.script, &mut actor.state, dt);
         let st = &actor.state;
         if st.removed {
@@ -3792,6 +3801,93 @@ mod tests {
             None,
         )));
         let prop = spawn_scripted(&mut app, scripts, Transform::IDENTITY);
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(prop).is_err());
+    }
+
+    #[test]
+    fn test_actor_script_progression_gating() {
+        use skylands_formats::script::{
+            name_hash, Instr, Op, Operand, Ref, Rhs, Script, ScriptSet, Value, VarInfo,
+        };
+
+        let check = Op::CheckValue {
+            lhs: vec![Ref::Obj(0)], // "Levels_Completed"
+            rel: 2,                 // >= 5
+            rhs: Rhs {
+                a: Operand::Lit(Value::Int(5)),
+                arith: -1,
+                b: None,
+                func: 0,
+            },
+        };
+        let remove = Op::Remove {
+            target: vec![Ref::Handle(0)], // my
+        };
+        let ops = vec![
+            Instr {
+                offset: 0,
+                flags: 0,
+                br: 3,
+                op: Op::PreScript,
+            },
+            Instr {
+                offset: 1,
+                flags: 0,
+                br: 0,
+                op: Op::StartUp,
+            },
+            Instr {
+                offset: 2,
+                flags: 0,
+                br: 1,
+                op: check,
+            },
+            Instr {
+                offset: 3,
+                flags: 0,
+                br: 0,
+                op: remove,
+            },
+        ];
+        let mut vars = std::collections::HashMap::new();
+        vars.insert(
+            0,
+            VarInfo {
+                name: "Levels_Completed".into(),
+                type_name: "ValueInfo".into(),
+                init: None,
+            },
+        );
+        use skylands_formats::script_runtime::field;
+        let set = ScriptSet {
+            scripts: vec![Script {
+                name: "gate.ai".into(),
+                ops,
+            }],
+            handle_ids: vec![field::MY],
+            handle_ns: vec![name_hash("my")],
+            export_base: 0,
+            roots: Vec::new(),
+            vars,
+            sets: Default::default(),
+            opaque_operands: Default::default(),
+        };
+        let scripts = LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
+            set, None,
+        )));
+        let mut app = build_test_app();
+        let prop = spawn_scripted(&mut app, scripts, Transform::IDENTITY);
+
+        // Initially 0 chapters completed: check fails, prop is NOT removed
+        step_fixed(&mut app);
+        assert!(app.world().get_entity(prop).is_ok());
+
+        // Complete 5 chapters: check passes, prop IS removed
+        {
+            let mut camp = app.world_mut().resource_mut::<CampaignProgress>();
+            camp.completed_chapters = vec![1, 2, 3, 4, 5];
+        }
         step_fixed(&mut app);
         assert!(app.world().get_entity(prop).is_err());
     }

@@ -28,6 +28,7 @@ pub mod field {
     pub const PLAYBACK_MODE: u32 = 0x056c_6ca7;
     /// Sequence group of `my`'s `tfbAnimationState`s (`OpStartSequence` index = state id).
     pub const ANIMATION_PALETTE: u32 = 0x8d18_097e;
+    pub const VISIBLE: u32 = 0x54fa_99a1;
 }
 
 /// `my` fields that move, turn, scale or remove the actor.
@@ -76,6 +77,8 @@ pub struct ActorScriptState {
     started: bool,
     /// Seconds since the actor started (`Script Timer`).
     pub time: f32,
+    /// Shared story/engine globals for this actor's scripts (e.g. "Levels_Completed").
+    pub globals: HashMap<String, Value>,
     /// Sum of `OpDisplace` moves of `my`, world units (heading 0 = +Z, pitch 90 = up).
     pub displacement: [f32; 3],
     /// `OpRemove my` ran.
@@ -163,6 +166,7 @@ impl ScriptProgram {
         let mut vm = Vm::with_index(&self.set, self.global.as_ref(), Cow::Borrowed(&self.index));
         vm.vars = std::mem::take(&mut st.vars);
         vm.engine = std::mem::take(&mut st.engine);
+        vm.globals = st.globals.clone();
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
@@ -194,6 +198,7 @@ impl ScriptProgram {
             result = vm.run_range(si, at + 1, end);
         }
         st.behavior = vm.behavior;
+        st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
         if let Err(e) = result {
             st.error = Some(e);
@@ -528,6 +533,78 @@ mod tests {
         }
         assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), Some(&Value::Int(1)));
         assert_eq!(engine_handle(&p.set, "tilt"), Some(8));
+    }
+
+    #[test]
+    fn behavior_switch_and_execution() {
+        // PreScript (br=3):
+        //   [1] StartUp (br=1):
+        //     [2] SetBehavior(target=40)
+        //   [3] PreScript body empty
+        // [40] Behavior "StateA" (br=1):
+        //   [41] SetBehavior(target=50)
+        // [50] Behavior "StateB" (br=1):
+        //   [51] IncValue(LOCAL)
+        let ops = vec![
+            ins(0, 3, Op::PreScript),
+            ins(10, 1, Op::StartUp),
+            ins(20, 0, Op::SetBehavior { target: Some(40) }),
+            ins(30, 0, Op::Jump), // empty prescript body dummy
+            ins(
+                40,
+                1,
+                Op::Behavior {
+                    name: "StateA".into(),
+                },
+            ),
+            ins(41, 0, Op::SetBehavior { target: Some(50) }),
+            ins(
+                50,
+                1,
+                Op::Behavior {
+                    name: "StateB".into(),
+                },
+            ),
+            ins(
+                51,
+                0,
+                Op::IncValue {
+                    lhs: vec![Ref::Obj(LOCAL)],
+                },
+            ),
+        ];
+        let mut vars = HashMap::new();
+        vars.insert(
+            LOCAL,
+            VarInfo {
+                name: "Counter".into(),
+                type_name: "OpCreateVariable".into(),
+                init: None,
+            },
+        );
+        let set = ScriptSet {
+            scripts: vec![Script {
+                name: "BehaviorTest.ai".into(),
+                ops,
+            }],
+            vars,
+            ..Default::default()
+        };
+        let p = ScriptProgram::new(set, None);
+        let mut st = ActorScriptState::default();
+
+        // Tick 1: StartUp sets behavior to 40 (StateA). Behavior 40 executes and sets behavior to 50 (StateB).
+        p.tick(0, &mut st, 0.1);
+        assert_eq!(st.behavior, Some(50));
+        assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), None);
+
+        // Tick 2: Behavior 50 (StateB) executes, incrementing LOCAL.
+        p.tick(0, &mut st, 0.1);
+        assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), Some(&Value::Int(1)));
+
+        // Tick 3: Behavior 50 executes again.
+        p.tick(0, &mut st, 0.1);
+        assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), Some(&Value::Int(2)));
     }
 
     fn read_level(name: &str) -> Option<Vec<u8>> {
