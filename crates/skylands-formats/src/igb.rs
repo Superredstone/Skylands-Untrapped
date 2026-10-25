@@ -8424,6 +8424,52 @@ mod tests {
     }
 
     #[test]
+    fn rom_dump_world_names() {
+        use crate::archive::ArchiveMount;
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("assets/files/level/Level_Hub_2014_01.bld");
+        if !p.exists() {
+            return;
+        }
+        let mut mount = ArchiveMount::new();
+        mount.mount(&p).expect("mount hub");
+        let data = mount.read_file("level.bld").expect("read level.bld");
+        let file = IgbModel::scan_igz(&data).expect("parse igz");
+        let sections = &file.sections[..];
+        let endian = file.endian;
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4)
+                .map(|_| IgbModel::read_u32(&data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> Option<String> {
+            let p = ptr(o)?;
+            let s = data.get(p..)?;
+            let len = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+            std::str::from_utf8(&s[..len]).ok().map(str::to_string)
+        };
+
+        if let Some(ref obj_list) = file.objects {
+            let mut worlds = Vec::new();
+            for obj in &obj_list.objects {
+                if obj.type_name.as_deref() == Some("tfbPhysicsWorld") {
+                    let name = cstr(obj.offset + meta_fields::named_object::NAME);
+                    worlds.push((obj.offset, name));
+                }
+            }
+            assert_eq!(worlds.len(), 4);
+        }
+    }
+
+    #[test]
     fn test_level_model_drawn_only_for_active_static_actors() {
         let actor = |script: Option<&str>, active: bool, model: Option<usize>| ActorPlacement {
             name: "Statue".into(),
