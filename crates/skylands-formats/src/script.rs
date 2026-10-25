@@ -1323,13 +1323,31 @@ impl MinionTuning {
 /// Level-1 max HP of a Skylander: the `<id>_HP_local` value its `<id> <Name> Def` macro
 /// passes as `"max hp"` (Spyro: `HP_Minion_Medium + HP_Minion_NudgeAmount` = 270 + 10).
 /// The Eons Elite branch (`* "Elite - HP Mult"`, Gill Grunt) is skipped: a normal toy.
+/// Villains without an `_HP_local` pass `"max hp"` directly (Chompy Mage: 1000). `None`
+/// when that reads a dangling `^` field (Dr. Krankcase `"^Ally - HP High"`, no value).
 pub fn hero_max_hp(
     character: &ScriptSet,
     global: &ScriptSet,
     tuning: &MinionTuning,
 ) -> Option<f32> {
-    let (_, rhs) =
-        local_stat_sets(character).find(|&(v, _)| character.var_name(v).ends_with("_HP_local"))?;
+    let rhs = local_stat_sets(character)
+        .find(|&(v, _)| character.var_name(v).ends_with("_HP_local"))
+        .map(|(_, rhs)| rhs)
+        .or_else(|| {
+            character
+                .scripts
+                .iter()
+                .flat_map(|s| &s.ops)
+                .find_map(|i| match &i.op {
+                    Op::Param {
+                        var,
+                        rhs: Some(rhs),
+                        ..
+                    } if character.var_name(*var) == "max hp" => Some(rhs),
+                    _ => None,
+                })
+                .filter(|rhs| !character.rhs_str(rhs).contains('^'))
+        })?;
     tuned_vm(character, global, tuning)
         .eval_rhs(rhs)
         .ok()
@@ -1872,6 +1890,19 @@ mod tests {
                 air_turn_rate: 1440.0,
             })
         );
+        // Villains: `"max hp"` passed directly; a dangling `^` field gives nothing.
+        let parse = |n| {
+            read_bld("character", n)
+                .and_then(|b| ScriptSet::parse(&b))
+                .unwrap()
+        };
+        let mage = parse("1001_ChompyMage");
+        assert_eq!(hero_max_hp(&mage, &g, &tuning), Some(1000.0));
+        assert_eq!(
+            hero_movement(&mage, &g, &tuning).unwrap().ground_max_speed,
+            24.0
+        );
+        assert_eq!(hero_max_hp(&parse("1002_Crankcase"), &g, &tuning), None);
         // `014_Movement_Speed_local` = `Speed_Slow`, not its stale initial 18.
         let gill_move = hero_movement(&gill, &g, &tuning).unwrap();
         assert_eq!(gill_move.ground_max_speed, 23.0);

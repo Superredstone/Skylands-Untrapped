@@ -17,6 +17,34 @@ pub fn poll_portal_system(
     }
 }
 
+/// DOL `ModelParameters` with the speed and turn rates the character's script passes to
+/// "Minion - setup pre descriptions" (`hero_movement`).
+fn character_model_params(
+    model: Option<&skylands_formats::IgbModel>,
+    asset_server: Option<&GameAssetServer>,
+    model_path: &str,
+) -> ModelParameters {
+    let mut params = model.map(ModelParameters::from_model).unwrap_or_default();
+    if let Some(m) = asset_server.and_then(|s| s.hero_movement(model_path)) {
+        params.ground_max_speed = m.ground_max_speed * FEET_TO_UNITS;
+        params.air_max_speed = m.air_max_speed * FEET_TO_UNITS;
+        params.ground_turn_rate = m.ground_turn_rate;
+        params.air_turn_rate = m.air_turn_rate;
+    }
+    params
+}
+
+/// Script max HP (`hero_max_hp`), else the 500 default.
+fn character_health(asset_server: Option<&GameAssetServer>, model_path: &str) -> Health {
+    asset_server
+        .and_then(|s| s.hero_max_hp(model_path))
+        .map(|hp| Health {
+            current: hp,
+            max: hp,
+        })
+        .unwrap_or_default()
+}
+
 pub fn spawn_hero_actor(
     commands: &mut Commands,
     pos: Vec3,
@@ -40,23 +68,8 @@ pub fn spawn_hero_actor(
         .as_deref()
         .map(CharacterCollider::from_model)
         .unwrap_or_default();
-    let mut model_params = model
-        .as_deref()
-        .map(ModelParameters::from_model)
-        .unwrap_or_default();
-    if let Some(m) = asset_server.and_then(|s| s.hero_movement(model_path)) {
-        model_params.ground_max_speed = m.ground_max_speed * FEET_TO_UNITS;
-        model_params.air_max_speed = m.air_max_speed * FEET_TO_UNITS;
-        model_params.ground_turn_rate = m.ground_turn_rate;
-        model_params.air_turn_rate = m.air_turn_rate;
-    }
-    let health = asset_server
-        .and_then(|s| s.hero_max_hp(model_path))
-        .map(|hp| Health {
-            current: hp,
-            max: hp,
-        })
-        .unwrap_or_default();
+    let model_params = character_model_params(model.as_deref(), asset_server, model_path);
+    let health = character_health(asset_server, model_path);
 
     commands
         .spawn((
@@ -120,10 +133,7 @@ pub fn spawn_controlled_villain_actor(
             step_height: 0.35,
             grounded: true,
         });
-    let model_params = model
-        .as_deref()
-        .map(ModelParameters::from_model)
-        .unwrap_or_default();
+    let model_params = character_model_params(model.as_deref(), asset_server, model_path);
 
     commands
         .spawn((
@@ -230,10 +240,12 @@ pub fn portal_gameplay_system(
                             step_height: 0.35,
                             grounded: true,
                         });
-                    let model_params = model
-                        .as_deref()
-                        .map(ModelParameters::from_model)
-                        .unwrap_or_default();
+                    let model_params = character_model_params(
+                        model.as_deref(),
+                        asset_server.as_deref(),
+                        model_path,
+                    );
+                    let health = character_health(asset_server.as_deref(), model_path);
 
                     // Spawn villain entity
                     let villain_pos = spawn_origin + Vec3::new(2.5, 0.2, 0.0);
@@ -252,7 +264,7 @@ pub fn portal_gameplay_system(
                         Velocity::default(),
                         MovementSpeed(model_params.ground_max_speed),
                         model_params,
-                        Health::default(),
+                        health,
                         ActorAnimation::default(),
                     ));
                 } else if gameplay_state.defeated_heroes.contains(&char_id) {
@@ -3270,6 +3282,9 @@ mod tests {
         loader.mount(dir.join("permanent/global.bld")).unwrap();
         loader.mount(dir.join("character/Init_Setup.bld")).unwrap();
         loader.mount(dir.join("character/016_Spyro.bld")).unwrap();
+        loader
+            .mount(dir.join("character/1001_ChompyMage.bld"))
+            .unwrap();
         let server = GameAssetServer::new(loader);
         let hero = spawn_hero_actor(
             &mut app.world_mut().commands(),
@@ -3296,6 +3311,27 @@ mod tests {
         assert_eq!(params.ground_turn_rate, 1440.0);
         let speed = app.world().get::<MovementSpeed>(hero).unwrap().0;
         assert!((speed - params.ground_max_speed).abs() < 1e-4);
+
+        // Villains: Chompy Mage passes "max hp" 1000 and `Speed_Med`.
+        assert_eq!(
+            character_health(Some(&server), "1001_ChompyMage.bld"),
+            Health {
+                current: 1000,
+                max: 1000
+            }
+        );
+        let villain = spawn_controlled_villain_actor(
+            &mut app.world_mut().commands(),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            1001,
+            VillainEnergy::default(),
+            Some(&server),
+        );
+        app.world_mut().flush();
+        let params = app.world().get::<ModelParameters>(villain).unwrap();
+        assert!((params.ground_max_speed - 24.0 * FEET_TO_UNITS).abs() < 1e-4);
     }
 
     #[test]
