@@ -46,6 +46,9 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Character archive name resolution (`resolve_character_model_archive`): canonical mappings for standard Skylander IDs (0..=32, 400..=407, 1001..=1010) and filtering out minigame/auxiliary archives (`musicmini`, `outro`, `stream`, `card`, `ally_icon`, `_alt`, `legendary`).
 - [x] Hero spawn on ring tag, villain on trap tag. gilrs + keyboard input.
 - [x] Movement, gravity, jump, ground raycast; combo/sweep/projectile combat; coins/gems.
+- [x] Character projectiles (`IgbModel.projectile`, `decode_projectile`): `tfbActorInfo` templates (`+0x08` name, `+0xec` rigid `tfbPhysicsModel`), spawned by `OpSpawn` (`+0x48` -> template, or a variable). Picked by name tier, direct spawns first; upgrade / Wow Pow / prop / `inviso` actors skipped. Gill Grunt `014_HarpoonSpear_Projectile`, Spyro `016_Fire`, Eruptor `009_LavaProjectile`, Gusto `450_Boomerang`, Trigger Happy `019_GoldBullet`; Stealth Elf none.
+  - Characters with one fire it on Attack 1 (`ProjectileParams.ranged_primary`, primary damage); rendered with the model via `Projectile.owner`. Speed literals are ft/s (`HarpoonVelocity` 150).
+  - [ ] Projectile particles (`tfbParticleInfo` trails), lobbed arcs (Eruptor), boomerang return, upgrade variants, enemy projectile models.
 - [x] `ActiveLevel` from VFS, `--level <NAME>`; `CollisionMesh::from_igb` with 2D XZ spatial grid.
 - [x] Tick interpolation (`interpolation.rs`): `TickTransform` restored in `FixedFirst`, recorded in `FixedPostUpdate`, blended by `overstep_fraction()` after the fixed loop. Auto-added to `Velocity` entities; snap above `SNAP_DISTANCE` (5 units).
 - [x] Marker spawning (spawn, doorways, triggers, props, collectibles); ground raycast fallback from `(0,50,0)`; kill plane `-350`.

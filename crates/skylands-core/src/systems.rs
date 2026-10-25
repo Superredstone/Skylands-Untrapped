@@ -96,6 +96,7 @@ pub fn spawn_controlled_villain_actor(
         .unwrap_or(ProjectileParams {
             speed: 30.0,
             lifetime: 1.0,
+            ranged_primary: false,
         });
     let collider = model
         .as_deref()
@@ -788,7 +789,7 @@ pub fn hero_combat_system(
         time.timestep().as_secs_f32()
     };
 
-    for (_hero_entity, hero_tf, mut combo, attack_damage, projectile) in &mut hero_query {
+    for (hero_entity, hero_tf, mut combo, attack_damage, projectile) in &mut hero_query {
         let attack_damage = attack_damage.copied().unwrap_or_default();
         let projectile = projectile.copied().unwrap_or_default();
         if combo.cooldown > 0.0 {
@@ -845,22 +846,29 @@ pub fn hero_combat_system(
         if let Some(kind) = triggered_attack {
             audio_events.send(WorldAudioCueEvent(WorldAudioCue::HeroAttack(kind)));
 
-            let forward = hero_tf.rotation * Vec3::NEG_Z;
+            let forward = hero_tf.rotation * Vec3::Z; // movement turns +Z toward the stick
             let fwd_norm = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
 
+            let mut fire = |damage: f32| {
+                commands.spawn((
+                    Projectile {
+                        lifetime: 0.0,
+                        max_lifetime: projectile.lifetime,
+                        damage: damage.round() as u32,
+                        radius: 0.5,
+                        hostile: false,
+                        owner: Some(hero_entity),
+                    },
+                    Velocity(fwd_norm * projectile.speed),
+                    Transform::from_translation(hero_tf.translation + Vec3::new(0.0, 0.8, 0.0))
+                        .with_rotation(hero_tf.rotation),
+                ));
+            };
             match kind {
-                AttackKind::SpecialProjectile => {
-                    commands.spawn((
-                        Projectile {
-                            lifetime: 0.0,
-                            max_lifetime: projectile.lifetime,
-                            damage: attack_damage.special.round() as u32,
-                            radius: 0.5,
-                            hostile: false,
-                        },
-                        Velocity(fwd_norm * projectile.speed),
-                        Transform::from_translation(hero_tf.translation + Vec3::new(0.0, 0.8, 0.0)),
-                    ));
+                AttackKind::SpecialProjectile => fire(attack_damage.special),
+                // Ranged characters (Gill Grunt's harpoon, Spyro's fireball) shoot on Attack 1.
+                AttackKind::PrimaryMelee if projectile.ranged_primary => {
+                    fire(attack_damage.primary)
                 }
                 AttackKind::PrimaryMelee | AttackKind::SecondarySweep => {
                     let (range, cos_half_angle, damage) = if kind == AttackKind::PrimaryMelee {
@@ -1958,6 +1966,7 @@ pub fn enemy_ai_system(
                                 damage: enemy.damage,
                                 radius: 0.5,
                                 hostile: true,
+                                owner: None,
                             },
                             Velocity(Vec3::new(dir.x, 0.0, dir.y) * Enemy::PROJECTILE_SPEED),
                             Transform::from_translation(pos + Vec3::new(0.0, 0.8, 0.0)),
@@ -2282,7 +2291,7 @@ mod tests {
                     current: 50,
                     max: 50,
                 },
-                Transform::from_xyz(0.0, 0.0, -1.6),
+                Transform::from_xyz(0.0, 0.0, 1.6),
                 CharacterCollider {
                     radius: 0.5,
                     height: 1.0,
@@ -2317,7 +2326,7 @@ mod tests {
             .world_mut()
             .query_filtered::<&mut Transform, With<Hero>>();
         for mut tf in hero_query.iter_mut(app.world_mut()) {
-            tf.translation = Vec3::new(0.0, 0.0, -1.6);
+            tf.translation = Vec3::new(0.0, 0.0, 1.6);
         }
 
         step_fixed(&mut app);
@@ -2350,7 +2359,7 @@ mod tests {
                     current: 100,
                     max: 100,
                 },
-                Transform::from_xyz(0.0, 0.0, -1.0),
+                Transform::from_xyz(0.0, 0.0, 1.0),
                 CharacterCollider::default(),
             ))
             .id();
@@ -2381,6 +2390,7 @@ mod tests {
             ProjectileParams {
                 speed: 40.0,
                 lifetime: 0.35,
+                ranged_primary: false,
             },
             ActorAnimation::default(),
         ));
@@ -2402,10 +2412,51 @@ mod tests {
     }
 
     #[test]
+    fn test_ranged_primary_fires_projectile() {
+        let mut app = build_test_app();
+        let hero = app
+            .world_mut()
+            .spawn((
+                Hero,
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                CharacterCollider::default(),
+                Velocity::default(),
+                MovementSpeed(5.0),
+                AttackCombo::default(),
+                AttackDamage {
+                    primary: 20.0,
+                    secondary: 7.0,
+                    special: 12.0,
+                },
+                ProjectileParams {
+                    speed: 45.0,
+                    lifetime: 1.0,
+                    ranged_primary: true,
+                },
+                ActorAnimation::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<WiiInputState>()
+            .press(WiiButton::B);
+        step_fixed(&mut app);
+
+        let mut q = app.world_mut().query::<(&Projectile, &Velocity)>();
+        let spawned: Vec<(u32, Option<Entity>, Vec3)> = q
+            .iter(app.world())
+            .map(|(p, v)| (p.damage, p.owner, v.0))
+            .collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!((spawned[0].0, spawned[0].1), (20, Some(hero)));
+        // Facing = rotated +Z (hero_movement_system turns +Z toward the stick).
+        assert!(spawned[0].2.z > 44.0, "fired backwards: {:?}", spawned[0].2);
+    }
+
+    #[test]
     fn test_projectile_spawn_and_hit() {
         let mut app = build_test_app();
 
-        // Spawn Hero facing forward (-Z)
+        // Spawn Hero facing forward (+Z)
         app.world_mut().spawn((
             Hero,
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -2425,7 +2476,7 @@ mod tests {
                     current: 100,
                     max: 100,
                 },
-                Transform::from_xyz(0.0, 0.0, -3.0),
+                Transform::from_xyz(0.0, 0.0, 3.0),
                 CharacterCollider {
                     radius: 0.6,
                     height: 1.8,

@@ -1898,6 +1898,8 @@ pub struct IgbModel {
     pub script_constants: Vec<(String, ScriptValue)>,
     /// Rigid models (weapons, backpacks) mounted on the primary rig's bones.
     pub attachments: Vec<CharacterAttachment>,
+    /// The character's ranged attack actor (Gill Grunt's harpoon, Spyro's fireball).
+    pub projectile: Option<CharacterProjectile>,
     /// The level's sky layer. Drawn around the camera, so it is kept out of the
     /// scene graph (and collision); transforms are in sky layer space.
     pub sky_instances: Vec<SceneInstance>,
@@ -1925,6 +1927,17 @@ pub struct CharacterAttachment {
     pub meshes: Vec<usize>,
     /// `.mdl` path of the attached model.
     pub model: String,
+}
+
+/// Projectile actor template (`tfbActorInfo` with a rigid model) the character script spawns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterProjectile {
+    /// `tfbActorInfo` name, e.g. `014_HarpoonSpear_Projectile`.
+    pub actor: String,
+    /// `.mdl` path of the projectile model.
+    pub model: String,
+    /// Indices into `IgbModel.meshes`.
+    pub meshes: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1977,6 +1990,7 @@ impl Default for IgbModel {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
@@ -2135,6 +2149,7 @@ impl IgbModel {
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
+                projectile: None,
                 sky_instances: Vec::new(),
                 non_colliding_nodes: Default::default(),
                 level_drawn_markers: Default::default(),
@@ -2173,6 +2188,7 @@ impl IgbModel {
                 collision_primitives: Vec::new(),
                 script_constants: Vec::new(),
                 attachments: Vec::new(),
+                projectile: None,
                 sky_instances: Vec::new(),
                 non_colliding_nodes: Default::default(),
                 level_drawn_markers: Default::default(),
@@ -2358,6 +2374,7 @@ impl IgbModel {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
@@ -3467,18 +3484,8 @@ impl IgbModel {
         chosen
             .into_iter()
             .filter_map(|(node, (_, model, rot))| {
-                let meshes: Vec<usize> = ptr(model + 0x68)
-                    .and_then(|info| ptr(info + 0x14))
-                    .map(list_items)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|d| ptr(d + 0x0c))
-                    .filter_map(|g| match types.get(&g) {
-                        Some(&"igWiiGeometryAttr") => ptr(g + 0x10),
-                        _ => Some(g),
-                    })
-                    .filter_map(|g| mesh_by_geo.get(&g).copied())
-                    .collect();
+                let meshes =
+                    Self::rigid_model_meshes(model, &ptr, &list_items, &types, mesh_by_geo);
                 if meshes.is_empty() {
                     return None;
                 }
@@ -3491,6 +3498,148 @@ impl IgbModel {
                 })
             })
             .collect()
+    }
+
+    /// Meshes of a rigid `tfbPhysicsModel`: `+0x68` `tfbBodyEntityInfo` `+0x14` ->
+    /// `DrawableList` -> `Drawable` `+0x0c` -> geometry attr.
+    fn rigid_model_meshes(
+        model: usize,
+        ptr: &dyn Fn(usize) -> Option<usize>,
+        list_items: &dyn Fn(usize) -> Vec<usize>,
+        types: &std::collections::HashMap<usize, &str>,
+        mesh_by_geo: &std::collections::HashMap<usize, usize>,
+    ) -> Vec<usize> {
+        ptr(model + 0x68)
+            .and_then(|info| ptr(info + 0x14))
+            .map(list_items)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|d| ptr(d + 0x0c))
+            .filter_map(|g| match types.get(&g) {
+                Some(&"igWiiGeometryAttr") => ptr(g + 0x10),
+                _ => Some(g),
+            })
+            .filter_map(|g| mesh_by_geo.get(&g).copied())
+            .collect()
+    }
+
+    /// The character's main projectile. Projectiles are `tfbActorInfo` templates (`+0x08`
+    /// name, `+0xec` rigid `tfbPhysicsModel`) spawned by the script's `OpSpawn` (`+0x48` ->
+    /// the template when spawned directly, else a variable holding it). Gill Grunt
+    /// `014_HarpoonSpear_Projectile`, Spyro `016_Fire`, Eruptor `009_LavaProjectile`,
+    /// Gusto `450_Boomerang`, Trigger Happy `019_GoldBullet`.
+    // ponytail: picked by name (`PROJECTILE_NAME_TIERS`), preferring direct spawns, since
+    // which macro fires which actor needs the VM to run spawn ops. Upgrade / Wow Pow
+    // variants are skipped.
+    fn decode_projectile(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        objects: &[IgzObject],
+        endian: IgbEndian,
+        mesh_by_geo: &std::collections::HashMap<usize, usize>,
+    ) -> Option<CharacterProjectile> {
+        const PROJECTILE_NAME_TIERS: [&[&str]; 3] = [
+            &["bullet", "arrow", "harpoon", "boomerang", "missile"],
+            &["projectile", "proj_"],
+            &[
+                "fire", "lava", "magma", "ball", "spit", "shot", "laser", "beam", "disc",
+            ],
+        ];
+        const SKIP: [&str; 13] = [
+            "prop",
+            "attach",
+            "upgrade",
+            "wowpow",
+            "_v2",
+            "_v3",
+            "(",
+            "collider",
+            "collision",
+            "portal",
+            "shield",
+            "glow",
+            "daybringer",
+        ];
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let cstr = |o: usize| -> String {
+            ptr(o)
+                .and_then(|p| data.get(p..))
+                .map(|s| {
+                    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                    String::from_utf8_lossy(&s[..end]).into_owned()
+                })
+                .unwrap_or_default()
+        };
+        let list_items = |list: usize| -> Vec<usize> {
+            let (Some(n), Some(arr)) = (rd(list + 0x08), ptr(list + 0x14)) else {
+                return Vec::new();
+            };
+            (0..n as usize).filter_map(|i| ptr(arr + i * 4)).collect()
+        };
+        let types: std::collections::HashMap<usize, &str> = objects
+            .iter()
+            .filter_map(|o| Some((o.offset, o.type_name.as_deref()?)))
+            .collect();
+        let of_type = |t: &str| {
+            objects
+                .iter()
+                .filter(|o| o.type_name.as_deref() == Some(t))
+                .map(|o| o.offset)
+                .collect::<Vec<_>>()
+        };
+        let spawned: std::collections::HashSet<usize> = of_type("OpSpawn")
+            .into_iter()
+            .filter_map(|op| ptr(op + 0x48))
+            .collect();
+
+        // (tier, not spawned directly, file order) -> lowest wins.
+        let mut best: Option<((usize, bool, usize), CharacterProjectile)> = None;
+        for (order, actor) in of_type("tfbActorInfo").into_iter().enumerate() {
+            let Some(model) = ptr(actor + 0xec)
+                .filter(|m| types.get(m) == Some(&"tfbPhysicsModel"))
+                .filter(|&m| ptr(m + 0x60).is_none())
+            else {
+                continue;
+            };
+            let name = cstr(actor + 0x08);
+            let path = cstr(model + 0x08);
+            let lname = name.to_ascii_lowercase();
+            if SKIP.iter().any(|k| lname.contains(k))
+                || path.to_ascii_lowercase().contains("inviso")
+            {
+                continue;
+            }
+            let Some(tier) = PROJECTILE_NAME_TIERS
+                .iter()
+                .position(|keys| keys.iter().any(|k| lname.contains(k)))
+            else {
+                continue;
+            };
+            let key = (tier, !spawned.contains(&actor), order);
+            if best.as_ref().is_some_and(|(k, _)| *k <= key) {
+                continue;
+            }
+            let meshes = Self::rigid_model_meshes(model, &ptr, &list_items, &types, mesh_by_geo);
+            if meshes.is_empty() {
+                continue;
+            }
+            best = Some((
+                key,
+                CharacterProjectile {
+                    actor: name,
+                    model: path,
+                    meshes,
+                },
+            ));
+        }
+        best.map(|(_, p)| p)
     }
 
     /// Maps each `igGeometryAttr` offset to the `igSkeleton2` offset that skins it:
@@ -4951,6 +5100,12 @@ impl IgbModel {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
+        let projectile = match (&igz_objects, primary_skeleton_of(&skeletons, &meshes)) {
+            (Some(list), Some(_)) => {
+                Self::decode_projectile(data, sections, &list.objects, endian, &mesh_by_geo)
+            }
+            _ => None,
+        };
 
         if meshes.is_empty() {
             // Check for raw vertex streams with standard strides (0x10, 0x14, 0x18, 0x20, 0x24, 0x30)
@@ -5282,6 +5437,7 @@ impl IgbModel {
             collision_primitives,
             script_constants,
             attachments,
+            projectile,
             sky_instances,
             non_colliding_nodes,
             level_drawn_markers,
@@ -6260,6 +6416,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
@@ -6380,6 +6537,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
@@ -6655,6 +6813,7 @@ mod tests {
             collision_primitives: vec![],
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
@@ -6855,6 +7014,41 @@ mod tests {
             n += 1;
         }
         Some((sum / n.max(1) as f32, idle.tracks.len(), n))
+    }
+
+    #[test]
+    fn test_character_projectile_actor() {
+        let cases = [
+            (
+                "014_GillGrunt",
+                "014_HarpoonSpear_Projectile",
+                "GillGrunt_HarpoonSpear.mdl",
+            ),
+            ("016_Spyro", "016_Fire", ""),
+            ("009_Eruptor", "009_LavaProjectile", ""),
+            (
+                "450_Typhoon",
+                "450_Boomerang",
+                "450_Trap_AirMale_Boomerang.mdl",
+            ),
+            ("019_GoldenCheat", "019_GoldBullet", ""),
+        ];
+        for (file, actor, mdl) in cases {
+            let Some(bytes) = read_character_bld(file) else {
+                return;
+            };
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+            let p = model.projectile.as_ref().expect(file);
+            assert_eq!(p.actor, actor, "{file}");
+            assert!(p.model.ends_with(mdl), "{file}: {}", p.model);
+            assert!(!p.meshes.is_empty());
+            assert!(p.meshes.iter().all(|&i| model.meshes[i].skeleton.is_none()));
+        }
+        // Melee-only: Stealth Elf has no projectile actor.
+        if let Some(bytes) = read_character_bld("026_StealthElf") {
+            let model = IgbModel::parse(Cursor::new(&bytes)).expect("parse");
+            assert_eq!(model.projectile, None);
+        }
     }
 
     #[test]

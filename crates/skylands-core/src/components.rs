@@ -331,6 +331,9 @@ impl AttackDamage {
 pub struct ProjectileParams {
     pub speed: f32,
     pub lifetime: f32,
+    /// The primary attack fires the character's projectile actor
+    /// (`IgbModel.projectile`) instead of a melee swing.
+    pub ranged_primary: bool,
 }
 
 impl Default for ProjectileParams {
@@ -338,18 +341,22 @@ impl Default for ProjectileParams {
         Self {
             speed: 12.0,
             lifetime: 1.5,
+            ranged_primary: false,
         }
     }
 }
 
 impl ProjectileParams {
     pub fn from_model(model: &skylands_formats::IgbModel) -> Self {
-        Self::from_constants(&model.script_constants)
+        Self {
+            ranged_primary: model.projectile.is_some(),
+            ..Self::from_constants(&model.script_constants)
+        }
     }
 
-    /// First positive literal on a projectile/missile variable whose name has
-    /// speed|velocity (speed) or lifetime|lifespan (lifetime). Zeros are runtime
-    /// resets, skipped. Missing fields keep the default.
+    /// First positive literal on a projectile/missile/harpoon variable whose name has
+    /// speed|velocity (speed, ft/s like all script speeds) or lifetime|lifespan
+    /// (lifetime, s). Zeros are runtime resets, skipped. Missing fields keep the default.
     // ponytail: ignores per-attack variants (e.g. Eruptor lava ball vs fire shot);
     // add attack-specific lookup when more than one ranged attack is wired.
     pub fn from_constants(constants: &[(String, skylands_formats::ScriptValue)]) -> Self {
@@ -357,7 +364,9 @@ impl ProjectileParams {
             constants.iter().find_map(|(name, value)| {
                 let l = name.to_ascii_lowercase();
                 let v = value.as_f32();
-                let hit = (l.contains("projectile") || l.contains("missile"))
+                let hit = ["projectile", "missile", "harpoon"]
+                    .iter()
+                    .any(|k| l.contains(k))
                     && !l.contains("difference")
                     && keys.iter().any(|k| l.contains(k));
                 (hit && v > 0.0 && v.is_finite()).then_some(v)
@@ -365,8 +374,9 @@ impl ProjectileParams {
         };
         let d = Self::default();
         Self {
-            speed: find(&["speed", "velocity"]).unwrap_or(d.speed),
+            speed: find(&["speed", "velocity"]).map_or(d.speed, |v| v * FEET_TO_UNITS),
             lifetime: find(&["lifetime", "lifespan"]).unwrap_or(d.lifetime),
+            ranged_primary: false,
         }
     }
 }
@@ -535,7 +545,19 @@ mod tests {
             ("Action 2 displace speed", 5.0),
         ]);
         let p = ProjectileParams::from_constants(&spyro);
-        assert_eq!((p.speed, p.lifetime), (40.0, 0.35));
+        assert_eq!((p.speed, p.lifetime), (40.0 * FEET_TO_UNITS, 0.35));
+
+        // Gill Grunt `HarpoonVelocity` (ft/s).
+        let gill = consts(&[
+            ("water hose max velocity", 60.0),
+            ("HarpoonVelocity", 150.0),
+        ]);
+        let p = ProjectileParams::from_constants(&gill);
+        assert!(
+            (p.speed - 150.0 * FEET_TO_UNITS).abs() < 1e-4,
+            "{}",
+            p.speed
+        );
 
         let king = consts(&[("differenceBetweenProjectileLifetimeAndTotalLifeTime", 8.5)]);
         assert_eq!(
@@ -644,6 +666,8 @@ pub struct Projectile {
     pub radius: f32,
     /// Fired by an enemy: hits heroes only.
     pub hostile: bool,
+    /// Actor that fired it; its character's projectile model is drawn.
+    pub owner: Option<Entity>,
 }
 
 #[derive(Component, Debug, Clone, PartialEq)]

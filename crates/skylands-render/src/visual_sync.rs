@@ -127,6 +127,10 @@ pub struct AttachmentVisual {
     pub parts: Vec<SubmeshVisual>,
 }
 
+/// Projectile drawn with its character's model (children hold the meshes).
+#[derive(Component)]
+pub struct ProjectileVisual;
+
 /// Spawned under a joint entity; despawned with the joints.
 #[derive(Component)]
 pub struct CharacterAttachmentEntity;
@@ -136,6 +140,8 @@ pub struct CharacterVisualRegistry {
     pub cache: HashMap<String, SubmeshVisual>,
     pub submeshes: HashMap<String, Vec<SubmeshVisual>>,
     pub attachments: HashMap<String, Vec<AttachmentVisual>>,
+    /// The character's projectile model (`IgbModel.projectile`).
+    pub projectiles: HashMap<String, Vec<SubmeshVisual>>,
     pub models: HashMap<String, std::sync::Arc<skylands_formats::igb::IgbModel>>,
 }
 
@@ -180,6 +186,18 @@ impl CharacterVisualRegistry {
             .get(&cache_key)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub fn get_projectile(
+        &self,
+        character_id: u16,
+        model_path: Option<&str>,
+    ) -> Option<Vec<SubmeshVisual>> {
+        let bld_name = model_path
+            .map(|s| s.to_string())
+            .or_else(|| resolve_character_model_archive(character_id))?;
+        let cache_key = format!("{}:{}", character_id, bld_name.to_ascii_lowercase());
+        self.projectiles.get(&cache_key).cloned()
     }
 
     pub fn get_or_load(
@@ -281,45 +299,15 @@ impl CharacterVisualRegistry {
             }) else {
                 continue;
             };
-            let parts = att
-                .meshes
-                .iter()
-                .filter_map(|&i| model.meshes.get(i))
-                .map(|m| {
-                    let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
-                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
-                    mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
-                    let mut alpha_mode = AlphaMode::Opaque;
-                    let texture = m
-                        .image_index
-                        .and_then(|i| loader.load_image_rgba(&bld_name, i).ok())
-                        .map(|(w, h, rgba)| {
-                            alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
-                            images.add(crate::texture_conversion::rgba8_to_model_texture(
-                                w,
-                                h,
-                                rgba,
-                                m.texture_wrap,
-                            ))
-                        });
-                    let color = match (&texture, m.base_color) {
-                        (Some(_), _) => Color::WHITE,
-                        (None, Some(c)) => Color::srgb(c[0], c[1], c[2]),
-                        (None, None) => Color::srgb(0.6, 0.6, 0.6),
-                    };
-                    let material = materials.add(StandardMaterial {
-                        base_color: color,
-                        base_color_texture: texture,
-                        alpha_mode,
-                        perceptual_roughness: 0.8,
-                        reflectance: 0.2,
-                        cull_mode: None,
-                        double_sided: true,
-                        ..default()
-                    });
-                    (meshes.add(mesh), material)
-                })
-                .collect();
+            let parts = rigid_parts(
+                &model,
+                &att.meshes,
+                &loader,
+                &bld_name,
+                meshes,
+                materials,
+                images,
+            );
             loaded_attachments.push(AttachmentVisual {
                 bone,
                 transform: Transform::from_matrix(Mat4::from_cols_array(&att.transform)),
@@ -327,6 +315,12 @@ impl CharacterVisualRegistry {
             });
         }
 
+        if let Some(p) = &model.projectile {
+            let parts = rigid_parts(
+                &model, &p.meshes, &loader, &bld_name, meshes, materials, images,
+            );
+            self.projectiles.insert(cache_key.clone(), parts);
+        }
         self.attachments
             .insert(cache_key.clone(), loaded_attachments);
         self.submeshes.insert(cache_key.clone(), loaded_submeshes);
@@ -334,6 +328,56 @@ impl CharacterVisualRegistry {
         self.models.insert(cache_key, model);
         Some(first_pair)
     }
+}
+
+/// Unskinned meshes of a rigid model (weapon, projectile) with their own textures.
+fn rigid_parts(
+    model: &skylands_formats::igb::IgbModel,
+    mesh_indices: &[usize],
+    loader: &skylands_formats::AssetLoader,
+    bld_name: &str,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> Vec<SubmeshVisual> {
+    mesh_indices
+        .iter()
+        .filter_map(|&i| model.meshes.get(i))
+        .map(|m| {
+            let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
+            mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+            mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+            let mut alpha_mode = AlphaMode::Opaque;
+            let texture = m
+                .image_index
+                .and_then(|i| loader.load_image_rgba(bld_name, i).ok())
+                .map(|(w, h, rgba)| {
+                    alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
+                    images.add(crate::texture_conversion::rgba8_to_model_texture(
+                        w,
+                        h,
+                        rgba,
+                        m.texture_wrap,
+                    ))
+                });
+            let color = match (&texture, m.base_color) {
+                (Some(_), _) => Color::WHITE,
+                (None, Some(c)) => Color::srgb(c[0], c[1], c[2]),
+                (None, None) => Color::srgb(0.6, 0.6, 0.6),
+            };
+            let material = materials.add(StandardMaterial {
+                base_color: color,
+                base_color_texture: texture,
+                alpha_mode,
+                perceptual_roughness: 0.8,
+                reflectance: 0.2,
+                cull_mode: None,
+                double_sided: true,
+                ..default()
+            });
+            (meshes.add(mesh), material)
+        })
+        .collect()
 }
 
 #[derive(Resource, Clone)]
@@ -927,7 +971,8 @@ pub fn actor_visual_sync_system(
         Or<(Without<ActorVisual>, Changed<ActorIdentity>)>,
     >,
     collectible_query: Query<(Entity, &Collectible), Without<Mesh3d>>,
-    projectile_query: Query<Entity, (With<Projectile>, Without<Mesh3d>)>,
+    projectile_query: Query<(Entity, &Projectile), (Without<Mesh3d>, Without<ProjectileVisual>)>,
+    owner_query: Query<&ActorIdentity>,
 ) {
     let Some(assets) = assets else {
         return;
@@ -1166,11 +1211,31 @@ pub fn actor_visual_sync_system(
             .insert((Mesh3d(mesh), MeshMaterial3d(mat)));
     }
 
-    for entity in &projectile_query {
-        commands.entity(entity).insert((
-            Mesh3d(assets.projectile_mesh.clone()),
-            MeshMaterial3d(assets.projectile_material.clone()),
-        ));
+    for (entity, projectile) in &projectile_query {
+        // The firing character's projectile actor model (harpoon, fireball, boomerang).
+        let parts = projectile
+            .owner
+            .and_then(|o| owner_query.get(o).ok())
+            .zip(visual_registry.as_ref())
+            .and_then(|(ident, reg)| {
+                reg.get_projectile(ident.character_id, ident.model_path.as_deref())
+            })
+            .filter(|parts| !parts.is_empty());
+        let Some(parts) = parts else {
+            commands.entity(entity).insert((
+                Mesh3d(assets.projectile_mesh.clone()),
+                MeshMaterial3d(assets.projectile_material.clone()),
+            ));
+            continue;
+        };
+        commands
+            .entity(entity)
+            .insert((ProjectileVisual, Visibility::default()))
+            .with_children(|p| {
+                for (mesh, mat) in parts {
+                    p.spawn((Mesh3d(mesh), MeshMaterial3d(mat)));
+                }
+            });
     }
 }
 

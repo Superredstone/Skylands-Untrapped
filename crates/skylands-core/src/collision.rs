@@ -661,6 +661,7 @@ mod tests {
             collision_primitives: Vec::new(),
             script_constants: Vec::new(),
             attachments: Vec::new(),
+            projectile: None,
             sky_instances: Vec::new(),
             non_colliding_nodes: Default::default(),
             level_drawn_markers: Default::default(),
