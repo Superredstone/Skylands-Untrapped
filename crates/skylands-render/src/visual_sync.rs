@@ -11,7 +11,7 @@ pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
     ActorAnimation, ActorIdentity, ActorScript, Collectible, Element, Enemy, Hero, LevelDrawnModel,
-    Projectile, Prop, Villain,
+    Projectile, Prop, SpawnedActor, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -412,6 +412,22 @@ pub struct ScriptedActorMesh {
     pub seen: bool,
 }
 
+/// Geometry index and the matrix it is drawn with.
+type GeometryPart = (usize, [f32; 16]);
+/// One drawn part: mesh and material.
+pub type MeshPart = (Handle<Mesh>, Handle<StandardMaterial>);
+/// Level image per (image index, wrap), with its alpha mode.
+type TextureHandles =
+    HashMap<(usize, [skylands_formats::igb::TextureWrap; 2]), (Handle<Image>, AlphaMode)>;
+
+/// Meshes of the level's `OpSpawn` templates by `tfbActorInfo` offset, in model space.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct TemplateMeshes(pub HashMap<usize, Vec<MeshPart>>);
+
+/// A `SpawnedActor` that has been given its template's model.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpawnedActorVisual;
+
 /// Part of the level's sky layer, seen only by `SkyCamera`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LevelSkyMesh;
@@ -497,9 +513,23 @@ pub fn spawn_level_render_mesh(
             }
         }
     }
+    let mut template_groups: HashMap<(usize, LevelMaterialKey), Vec<GeometryPart>> = HashMap::new();
+    for (&actor, parts) in &model.template_geometries {
+        for &(geo, xf) in parts {
+            if let Some(m) = model.geometries.get(geo).and_then(|g| g.mesh.as_ref()) {
+                template_groups
+                    .entry((actor, LevelMaterialKey::of(m)))
+                    .or_default()
+                    .push((geo, xf));
+            }
+        }
+    }
     let level_textures = loader.load_images_rgba(
         &path,
-        material_groups.keys().filter_map(|(_, _, k)| k.image),
+        material_groups
+            .keys()
+            .filter_map(|(_, _, k)| k.image)
+            .chain(template_groups.keys().filter_map(|(_, k)| k.image)),
     );
     // Parts sharing an image (sky and world, or several tints) share one `Image`.
     let mut texture_handles = HashMap::new();
@@ -556,103 +586,28 @@ pub fn spawn_level_render_mesh(
             let to_local = owner_world
                 .map(|w| skylands_formats::igb::mat4_affine_inverse(&w))
                 .unwrap_or_else(skylands_formats::igb::mat4_identity);
-            let mut total_verts = 0;
-            let mut total_idxs = 0;
-            for inst in &group_instances {
-                if let Some(geo) = model.geometries.get(inst.geometry_index) {
-                    if let Some(ref m) = geo.mesh {
-                        total_verts += m.vertices.len();
-                        total_idxs += m.indices.len();
-                    }
-                }
-            }
-
-            if total_verts == 0 || total_idxs == 0 {
+            let parts: Vec<_> = group_instances
+                .iter()
+                .map(|inst| {
+                    (
+                        inst.geometry_index,
+                        skylands_formats::igb::mat4_mul(&to_local, &inst.world_transform),
+                    )
+                })
+                .collect();
+            let Some((mesh_handle, submesh_mat)) = build_level_part(
+                &model,
+                &parts,
+                &key,
+                sky,
+                &level_textures,
+                &mut texture_handles,
+                meshes,
+                materials,
+                images,
+            ) else {
                 continue;
-            }
-
-            let mut positions = Vec::with_capacity(total_verts);
-            let mut normals = Vec::with_capacity(total_verts);
-            let mut uvs = Vec::with_capacity(total_verts);
-            let mut colors = Vec::with_capacity(total_verts);
-            let mut indices = Vec::with_capacity(total_idxs);
-            let mut vert_offset = 0u32;
-
-            for inst in &group_instances {
-                if let Some(geo) = model.geometries.get(inst.geometry_index) {
-                    if let Some(ref m) = geo.mesh {
-                        if m.vertices.is_empty() || m.indices.is_empty() {
-                            continue;
-                        }
-                        let xf = skylands_formats::igb::mat4_mul(&to_local, &inst.world_transform);
-                        for v in &m.vertices {
-                            positions.push(skylands_formats::igb::transform_point(&xf, v.position));
-                            normals.push(skylands_formats::igb::transform_dir(&xf, v.normal));
-                            uvs.push(v.uv);
-                            colors.push(v.color);
-                        }
-                        for &idx in &m.indices {
-                            indices.push(vert_offset + idx);
-                        }
-                        vert_offset += m.vertices.len() as u32;
-                    }
-                }
-            }
-
-            if indices.is_empty() {
-                continue;
-            }
-
-            let mut bevy_mesh = Mesh::new(
-                bevy::render::mesh::PrimitiveTopology::TriangleList,
-                bevy::render::render_asset::RenderAssetUsages::default(),
-            );
-            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-            bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-            bevy_mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
-
-            let texture = key.image.and_then(|i| {
-                let (w, h, rgba) = level_textures.get(&i)?;
-                let entry = texture_handles.entry((i, key.wrap)).or_insert_with(|| {
-                    let alpha = crate::texture_conversion::alpha_mode_for_rgba(rgba);
-                    let image = crate::texture_conversion::rgba8_to_model_texture(
-                        *w,
-                        *h,
-                        rgba.clone(),
-                        key.wrap,
-                    );
-                    (images.add(image), alpha)
-                });
-                Some(entry.clone())
-            });
-            let alpha_mode = texture.as_ref().map_or(AlphaMode::Opaque, |t| t.1);
-            let base_color_texture = texture.map(|t| t.0);
-
-            let mat_color = match (&base_color_texture, key.color) {
-                (Some(_), _) => Color::WHITE,
-                (None, Some(c)) => Color::srgb(
-                    f32::from_bits(c[0]),
-                    f32::from_bits(c[1]),
-                    f32::from_bits(c[2]),
-                ),
-                (None, None) => Color::srgb(0.72, 0.70, 0.65),
             };
-
-            let submesh_mat = materials.add(StandardMaterial {
-                base_color: mat_color,
-                base_color_texture,
-                alpha_mode,
-                perceptual_roughness: 0.85,
-                reflectance: 0.20,
-                cull_mode: None,
-                double_sided: true,
-                unlit: sky,
-                ..default()
-            });
-
-            let mesh_handle = meshes.add(bevy_mesh);
             let transform = owner_world.map_or(Transform::IDENTITY, |w| {
                 Transform::from_matrix(Mat4::from_cols_array(&w))
             });
@@ -680,7 +635,112 @@ pub fn spawn_level_render_mesh(
         }
     }
 
+    // Models of `OpSpawn` templates, in the template's model space, for `SpawnedActor`s.
+    let mut template_meshes: HashMap<usize, Vec<MeshPart>> = HashMap::new();
+    for ((actor, key), parts) in template_groups {
+        if let Some(part) = build_level_part(
+            &model,
+            &parts,
+            &key,
+            false,
+            &level_textures,
+            &mut texture_handles,
+            meshes,
+            materials,
+            images,
+        ) {
+            template_meshes.entry(actor).or_default().push(part);
+        }
+    }
+    commands.insert_resource(TemplateMeshes(template_meshes));
+
     spawned_any
+}
+
+/// One mesh and material for level geometry `parts` (geometry index, matrix) sharing `key`.
+#[allow(clippy::too_many_arguments)]
+fn build_level_part(
+    model: &skylands_formats::IgbModel,
+    parts: &[GeometryPart],
+    key: &LevelMaterialKey,
+    sky: bool,
+    level_textures: &std::collections::HashMap<usize, (u32, u32, Vec<u8>)>,
+    texture_handles: &mut TextureHandles,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> Option<MeshPart> {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut colors = Vec::new();
+    let mut indices = Vec::new();
+    let mut vert_offset = 0u32;
+    for (geo, xf) in parts {
+        let Some(m) = model.geometries.get(*geo).and_then(|g| g.mesh.as_ref()) else {
+            continue;
+        };
+        if m.vertices.is_empty() || m.indices.is_empty() {
+            continue;
+        }
+        for v in &m.vertices {
+            positions.push(skylands_formats::igb::transform_point(xf, v.position));
+            normals.push(skylands_formats::igb::transform_dir(xf, v.normal));
+            uvs.push(v.uv);
+            colors.push(v.color);
+        }
+        indices.extend(m.indices.iter().map(|&idx| vert_offset + idx));
+        vert_offset += m.vertices.len() as u32;
+    }
+    if indices.is_empty() {
+        return None;
+    }
+
+    let mut bevy_mesh = Mesh::new(
+        bevy::render::mesh::PrimitiveTopology::TriangleList,
+        bevy::render::render_asset::RenderAssetUsages::default(),
+    );
+    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    bevy_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    bevy_mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
+
+    let texture = key.image.and_then(|i| {
+        let (w, h, rgba) = level_textures.get(&i)?;
+        let entry = texture_handles.entry((i, key.wrap)).or_insert_with(|| {
+            let alpha = crate::texture_conversion::alpha_mode_for_rgba(rgba);
+            let image =
+                crate::texture_conversion::rgba8_to_model_texture(*w, *h, rgba.clone(), key.wrap);
+            (images.add(image), alpha)
+        });
+        Some(entry.clone())
+    });
+    let alpha_mode = texture.as_ref().map_or(AlphaMode::Opaque, |t| t.1);
+    let base_color_texture = texture.map(|t| t.0);
+
+    let mat_color = match (&base_color_texture, key.color) {
+        (Some(_), _) => Color::WHITE,
+        (None, Some(c)) => Color::srgb(
+            f32::from_bits(c[0]),
+            f32::from_bits(c[1]),
+            f32::from_bits(c[2]),
+        ),
+        (None, None) => Color::srgb(0.72, 0.70, 0.65),
+    };
+
+    let material = materials.add(StandardMaterial {
+        base_color: mat_color,
+        base_color_texture,
+        alpha_mode,
+        perceptual_roughness: 0.85,
+        reflectance: 0.20,
+        cull_mode: None,
+        double_sided: true,
+        unlit: sky,
+        ..default()
+    });
+    Some((meshes.add(bevy_mesh), material))
 }
 
 /// Moves script-animated actor models with their core entity; hides them once the
@@ -699,6 +759,31 @@ pub fn scripted_actor_mesh_follow_system(
             }
             None if part.seen => *visibility = Visibility::Hidden,
             None => {}
+        }
+    }
+}
+
+/// Draws each new `SpawnedActor` with its template's model: one child part per
+/// material, so it moves, turns and scales with the clone and despawns with it.
+pub fn spawned_actor_mesh_system(
+    mut commands: Commands,
+    templates: Option<Res<TemplateMeshes>>,
+    clones: Query<(Entity, &SpawnedActor), Without<SpawnedActorVisual>>,
+) {
+    let Some(templates) = templates else { return };
+    for (entity, clone) in &clones {
+        let mut e = commands.entity(entity);
+        e.insert((SpawnedActorVisual, Visibility::default()));
+        if let Some(parts) = templates.0.get(&clone.template_offset) {
+            e.with_children(|c| {
+                for (mesh, material) in parts {
+                    c.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::IDENTITY,
+                    ));
+                }
+            });
         }
     }
 }
@@ -2509,6 +2594,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_spawned_actor_gets_template_model() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(TemplateMeshes(HashMap::from_iter([(
+            0x60,
+            vec![(
+                Handle::<Mesh>::default(),
+                Handle::<StandardMaterial>::default(),
+            )],
+        )])));
+        app.add_systems(Update, spawned_actor_mesh_system);
+        let spawner = app.world_mut().spawn_empty().id();
+        let clone = |offset| SpawnedActor {
+            parent: spawner,
+            serial: 0,
+            template: "Mill".into(),
+            template_offset: offset,
+        };
+        let mill = app
+            .world_mut()
+            .spawn((clone(0x60), Transform::IDENTITY))
+            .id();
+        let bare = app
+            .world_mut()
+            .spawn((clone(0x70), Transform::IDENTITY))
+            .id();
+        app.update();
+        app.update();
+
+        let children = app.world().get::<Children>(mill).expect("model part");
+        assert_eq!(children.len(), 1, "added once");
+        assert!(app.world().get::<Mesh3d>(children[0]).is_some());
+        // A template without a model gets no parts.
+        assert!(app.world().get::<SpawnedActorVisual>(bare).is_some());
+        assert!(app.world().get::<Children>(bare).is_none());
     }
 
     #[test]

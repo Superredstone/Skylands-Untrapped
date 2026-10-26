@@ -125,8 +125,10 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   transform, yaw = `facing` when given, scale = template `_scaleVec` / 100, its engine state
   seeded and its setup effects applied (`ActorScriptState::apply`), and runs the template's
   script (`SpawnTemplate.script`, `Placement._script` +0xa8) from the next tick. Clones of
-  script-less templates are static. Not done: models of clones (templates are not in the level
-  render list), clones at other objects, particle/sprite templates (`tfbParticleInfo` x64),
+  script-less templates are static. Clones draw their template's model: `IgbModel::template_geometries`
+  (inactive `tfbActorInfo` -> `tfbPhysicsModel` geometry, keyed by the object offset `OpSpawn`
+  points at) is built into `TemplateMeshes` with the level; `spawned_actor_mesh_system` adds one
+  child part per material to each `SpawnedActor`. Not done: clones at other objects, particle/sprite templates (`tfbParticleInfo` x64),
   parenting (clones do not follow the parent).
 - Hub templates: 185 `tfbActorInfo` (82 with a script: level up tokens, baubles, `Hub_Coins.ai`,
   `2D_Coin.ai`, ...), 64 `tfbParticleInfo`, 1 `tfbSpriteInfo`.

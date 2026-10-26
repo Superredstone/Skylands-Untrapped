@@ -189,6 +189,8 @@ pub struct SpawnedActor {
     pub serial: u32,
     /// `tfbActorInfo` name of the template.
     pub template: String,
+    /// Template object offset in the level file (`IgbModel::template_geometries` key).
+    pub template_offset: usize,
 }
 
 /// Actor whose model is already part of the level render mesh; it needs no visual

@@ -678,6 +678,8 @@ impl CollisionPrimitive {
 /// One `tfbActorInfo` level placement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorPlacement {
+    /// `tfbActorInfo` object offset in the file (what script paths and `OpSpawn` point at).
+    pub offset: usize,
     pub name: String,
     pub position: [f32; 3],
     pub rotation_deg: [f32; 3],
@@ -1923,6 +1925,9 @@ pub struct IgbModel {
     pub animated_markers: std::collections::HashSet<usize>,
     /// Geometry node -> marker node of the animated actor that draws it.
     pub node_owner: std::collections::HashMap<usize, usize>,
+    /// Model of each inactive actor (`OpSpawn` template), by `tfbActorInfo` offset:
+    /// (geometry index, transform in the actor's model space, unscaled).
+    pub template_geometries: std::collections::HashMap<usize, Vec<(usize, [f32; 16])>>,
     /// Marker node -> `.ai` script path.
     pub marker_scripts: std::collections::HashMap<usize, String>,
     /// `tfbActorInfo` templates with a model (what scripts `OpSpawn`).
@@ -2113,6 +2118,7 @@ impl Default for IgbModel {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
@@ -2276,6 +2282,7 @@ impl IgbModel {
                 level_drawn_markers: Default::default(),
                 animated_markers: Default::default(),
                 node_owner: Default::default(),
+                template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
@@ -2319,6 +2326,7 @@ impl IgbModel {
                 level_drawn_markers: Default::default(),
                 animated_markers: Default::default(),
                 node_owner: Default::default(),
+                template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
@@ -2510,6 +2518,7 @@ impl IgbModel {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
@@ -4187,14 +4196,6 @@ impl IgbModel {
         endian: IgbEndian,
         placements: &[ActorPlacement],
     ) -> std::collections::HashMap<usize, Vec<([f32; 16], bool, usize)>> {
-        let rd = |o: usize| -> Option<u32> {
-            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
-        };
-        let ptr = |o: usize| -> Option<usize> {
-            let w = rd(o).filter(|&w| w != 0)?;
-            let s = sections.get(((w >> 27) + 1) as usize)?;
-            Some(s.offset + (w & 0x07FF_FFFF) as usize)
-        };
         let mut by_model: std::collections::HashMap<usize, Vec<([f32; 16], bool, usize)>> = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbPhysicsModel"))
@@ -4217,23 +4218,58 @@ impl IgbModel {
 
         let mut out = std::collections::HashMap::new();
         for (model, xforms) in by_model {
-            let Some(drawables) =
-                ptr(model + meta_fields::physics_model::ENTITY_INFO).and_then(|e| ptr(e + 0x14))
-            else {
-                continue;
-            };
-            let (Some(n), Some(arr)) = (rd(drawables + 0x08), ptr(drawables + 0x14)) else {
-                continue;
-            };
-            for i in 0..n as usize {
-                let Some(geo) = ptr(arr + i * 4).and_then(|d| ptr(d + 0x0c)) else {
-                    continue;
-                };
-                for g in std::iter::once(geo).chain(ptr(geo + 0x10)) {
-                    out.entry(g)
-                        .or_insert_with(Vec::new)
-                        .extend_from_slice(&xforms);
-                }
+            for g in Self::model_geometry_offsets(data, sections, endian, model) {
+                out.entry(g)
+                    .or_insert_with(Vec::new)
+                    .extend_from_slice(&xforms);
+            }
+        }
+        out
+    }
+
+    /// Geometry offsets of a `tfbPhysicsModel` (+0x68 entity info -> +0x14 drawables,
+    /// each `+0x0c` -> `igWiiGeometryAttr` and its `+0x10` `igWiiGeometry`).
+    fn model_geometry_offsets(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        endian: IgbEndian,
+        model: usize,
+    ) -> Vec<usize> {
+        let rd = |o: usize| -> Option<u32> {
+            data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
+        };
+        let ptr = |o: usize| -> Option<usize> {
+            let w = rd(o).filter(|&w| w != 0)?;
+            let s = sections.get(((w >> 27) + 1) as usize)?;
+            Some(s.offset + (w & 0x07FF_FFFF) as usize)
+        };
+        let Some(drawables) =
+            ptr(model + meta_fields::physics_model::ENTITY_INFO).and_then(|e| ptr(e + 0x14))
+        else {
+            return Vec::new();
+        };
+        let (Some(n), Some(arr)) = (rd(drawables + 0x08), ptr(drawables + 0x14)) else {
+            return Vec::new();
+        };
+        (0..n as usize)
+            .filter_map(|i| ptr(arr + i * 4).and_then(|d| ptr(d + 0x0c)))
+            .flat_map(|geo| std::iter::once(geo).chain(ptr(geo + 0x10)))
+            .collect()
+    }
+
+    /// Geometry offset -> offsets of inactive actors (templates `OpSpawn` clones) whose
+    /// `tfbPhysicsModel` draws it.
+    pub fn decode_template_models(
+        data: &[u8],
+        sections: &[IgzChunkDescriptor],
+        endian: IgbEndian,
+        placements: &[ActorPlacement],
+    ) -> std::collections::HashMap<usize, Vec<usize>> {
+        let mut out: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+        for actor in placements.iter().filter(|a| !a.active) {
+            let Some(model) = actor.model else { continue };
+            for g in Self::model_geometry_offsets(data, sections, endian, model) {
+                out.entry(g).or_default().push(actor.offset);
             }
         }
         out
@@ -4562,6 +4598,7 @@ impl IgbModel {
                     });
                 (position.iter().chain(&rotation_deg).all(|v| v.is_finite())).then_some(
                     ActorPlacement {
+                        offset: o.offset,
                         name,
                         position,
                         rotation_deg,
@@ -5050,6 +5087,7 @@ impl IgbModel {
         let mut actor_placements = Vec::new();
         let mut geo_materials = std::collections::HashMap::new();
         let mut model_placements = std::collections::HashMap::new();
+        let mut template_models = std::collections::HashMap::new();
         let mut sky_geos = std::collections::HashSet::new();
         let mut collision_primitives = Vec::new();
         let mut script_constants = Vec::new();
@@ -5065,6 +5103,8 @@ impl IgbModel {
                 endian,
                 &actor_placements,
             );
+            template_models =
+                Self::decode_template_models(data, sections, endian, &actor_placements);
             sky_geos = Self::decode_sky_geometries(data, sections, &list.objects, endian);
             collision_primitives = Self::decode_collision_primitives(&actor_placements);
             script_constants = Self::decode_script_constants(
@@ -5368,6 +5408,7 @@ impl IgbModel {
         let mut non_colliding_nodes = std::collections::HashSet::new();
         let mut animated_markers = std::collections::HashSet::new();
         let mut node_owner = std::collections::HashMap::new();
+        let mut template_geometries = std::collections::HashMap::new();
         let mut marker_scripts = std::collections::HashMap::new();
         let mut animated_actor_marker = std::collections::HashMap::new();
         if !actor_placements.is_empty() {
@@ -5466,6 +5507,16 @@ impl IgbModel {
                     .and_then(|off| geo_transforms.get(off))
                     .copied()
                     .unwrap_or_else(mat4_identity);
+                for &actor in geo_off
+                    .and_then(|off| template_models.get(off))
+                    .into_iter()
+                    .flatten()
+                {
+                    template_geometries
+                        .entry(actor)
+                        .or_insert_with(Vec::new)
+                        .push((geo_idx, transform));
+                }
                 // Model geometry is drawn once per placing actor (none when unplaced);
                 // only in files with actors, character files place their model directly.
                 let placements = geo_off
@@ -5905,6 +5956,7 @@ impl IgbModel {
             level_drawn_markers,
             animated_markers,
             node_owner,
+            template_geometries,
             marker_scripts,
             actor_models,
             animation_states,
@@ -6397,6 +6449,7 @@ mod tests {
     #[test]
     fn test_actor_placement_kind_and_transform() {
         let actor = |name: &str, script: Option<&str>| ActorPlacement {
+            offset: 0,
             name: name.into(),
             position: [1.0, 2.0, 3.0],
             rotation_deg: [0.0, 90.0, 0.0],
@@ -6890,6 +6943,7 @@ mod tests {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
@@ -7016,6 +7070,7 @@ mod tests {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
@@ -7296,6 +7351,7 @@ mod tests {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
@@ -8472,6 +8528,7 @@ mod tests {
     #[test]
     fn test_level_model_drawn_only_for_active_static_actors() {
         let actor = |script: Option<&str>, active: bool, model: Option<usize>| ActorPlacement {
+            offset: 0,
             name: "Statue".into(),
             position: [0.0; 3],
             rotation_deg: [0.0; 3],
@@ -8574,6 +8631,28 @@ mod tests {
         let data = mount.read_file("level.bld").expect("read level.bld");
         let model = IgbModel::parse(Cursor::new(&data)).expect("parse hub");
         let instances = model.evaluate_scene_graph();
+
+        // `OpSpawn` templates keep their model, found by the offset scripts point at.
+        let scripts = crate::script::ScriptSet::parse(&data).expect("hub scripts");
+        let coin = scripts
+            .script("2D_Coin.ai")
+            .and_then(|s| {
+                s.ops.iter().find_map(|i| match &i.op {
+                    crate::script::Op::Spawn { actor, .. } => actor.clone(),
+                    _ => None,
+                })
+            })
+            .expect("coin spawn");
+        assert_eq!(coin.name, "Coin_Art_01");
+        let parts = model
+            .template_geometries
+            .get(&coin.offset)
+            .expect("coin model");
+        assert!(
+            parts.iter().all(|&(g, _)| g < model.geometries.len()),
+            "{parts:?}"
+        );
+        assert!(!parts.is_empty());
 
         // Model-space prop geometry used to sit at the origin (13 placed instances).
         let placed = instances

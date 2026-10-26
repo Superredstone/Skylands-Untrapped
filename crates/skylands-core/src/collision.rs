@@ -667,6 +667,7 @@ mod tests {
             level_drawn_markers: Default::default(),
             animated_markers: Default::default(),
             node_owner: Default::default(),
+            template_geometries: Default::default(),
             marker_scripts: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),

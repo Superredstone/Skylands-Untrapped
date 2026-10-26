@@ -2062,6 +2062,7 @@ fn spawn_script_clone(
             parent,
             serial,
             template: template.name,
+            template_offset: template.offset,
         },
         base,
         ActorAnimation::default(),
@@ -3961,7 +3962,8 @@ mod tests {
             &SpawnedActor {
                 parent: spawner,
                 serial: 0,
-                template: "Mill".into()
+                template: "Mill".into(),
+                template_offset: 0x60,
             }
         );
         assert_eq!(script.script, 1);
