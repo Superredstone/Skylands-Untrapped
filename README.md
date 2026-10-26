@@ -2,7 +2,7 @@
 
 [![AI Ready](https://img.shields.io/badge/AI--Ready-yes-brightgreen?style=flat)](https://github.com/johnpapa/ai-ready)
 
-Skylanders Trap Team PC reimplementation (AI assisted)
+Skylanders Trap Team (Wii version) PC reimplementation (AI assisted)
 
 ## Objectives
 - [ ] Support EU (en) version of the game
@@ -11,6 +11,7 @@ Skylanders Trap Team PC reimplementation (AI assisted)
 - [ ] Reach a playable state from start to finish
 - [ ] Modern controls and graphics
 - [ ] Higher refresh rate (144hz)
+- [ ] Original game compatible save files
 
 ## Disclaimer
 

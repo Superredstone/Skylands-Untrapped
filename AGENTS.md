@@ -24,6 +24,7 @@ Host runs NixOS. Standard tools require `devenv` (configured in `devenv.nix` wit
 - igArchive format is described here "https://skylanderswiki.miraheze.org/wiki/IgArchive".
 - Write down progress inside of markdown files in the agent/ folder.
 - The game must be as accurate as possible to the original, don't make up anything when not explicitly asked. Reverse original code whenever possible to match.
+- Save files MUST be compatible with the original game.
 
 ## Architecture
 - `./crates/skylands-formats`: Alchemy v8.1.0 file formats (`igArchive` `.arc`/`.bld`, `igIGBFile`, Big/Little Endian serialization).

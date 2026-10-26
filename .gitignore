@@ -14,3 +14,5 @@ ghidra_project/
 devenv.local.*
 .direnv
 
+# Save files
+Save_*
