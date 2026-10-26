@@ -29,7 +29,10 @@ pub use igb::{
     ScriptValue, Skeleton, AUTO_TRANSITION,
 };
 pub use loader::{AssetError, AssetLoader};
-pub use save::{SaveCount, SaveParamDef, SaveSchema};
+pub use save::{
+    fnv1a32, SaveCount, SaveError, SaveField, SaveFile, SaveParamDef, SaveSchema, HEADER_WORDS,
+    SLOT_WORDS,
+};
 pub use script::{
     enemy_stats, hero_max_hp, hero_movement, EnemyStats, HeroMovement, LevelupTable, MinionTuning,
     ScriptSet, Vm, VmError,

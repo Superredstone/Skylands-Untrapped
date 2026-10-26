@@ -7,6 +7,7 @@ pub mod input;
 pub mod interpolation;
 pub mod portal_gameplay;
 pub mod resources;
+pub mod save_game;
 pub mod states;
 pub mod systems;
 
@@ -22,6 +23,7 @@ pub use portal_gameplay::{
     CharacterEntry, Element, CHARACTERS,
 };
 pub use resources::*;
+pub use save_game::{SaveGame, SAVE_SLOTS};
 pub use states::GameState;
 pub use systems::*;
 
@@ -78,6 +80,7 @@ impl Plugin for SkylandsCorePlugin {
                     systems::hero_combat_system,
                     systems::enemy_ai_system,
                     systems::actor_script_system,
+                    save_game::save_progress_system,
                 )
                     .chain(),
             )

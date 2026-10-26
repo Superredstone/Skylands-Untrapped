@@ -7,8 +7,8 @@ use bevy::prelude::*;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::render::RenderPlugin;
 use skylands_core::{
-    resolve_character_id_by_name, ActiveLevel, ActivePortal, ActorIdentity, GameState,
-    PortalGameplayState, SkylandsCorePlugin,
+    resolve_character_id_by_name, ActiveLevel, ActivePortal, ActorIdentity, CampaignProgress,
+    GameAssetServer, GameState, PortalGameplayState, SaveGame, SkylandsCorePlugin,
 };
 use skylands_extractor::Extractor;
 use skylands_formats::AssetLoader;
@@ -65,6 +65,31 @@ struct Args {
         help = "Run in showcase pedestal mode with auto-turntable rotation, orbit camera, and animation cycling"
     )]
     viewer: bool,
+
+    #[arg(
+        long,
+        help = "Directory with original-format saves (Save_Header, Save_Slot_1..4); loaded at start and written as progress changes"
+    )]
+    save_dir: Option<PathBuf>,
+}
+
+/// Loads the saves in `dir` into the app and its campaign progress.
+fn insert_save_game(app: &mut App, asset_server: &GameAssetServer, dir: Option<&PathBuf>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    let Some(schema) = asset_server.save_schema() else {
+        warn!("Save layout scripts missing; saves disabled");
+        return;
+    };
+    let save = SaveGame::load(schema, Some(dir));
+    info!(
+        "Save slot 1 from {}: chapters completed {:?}",
+        dir.display(),
+        save.completed_chapters()
+    );
+    save.apply_to(&mut app.world_mut().resource_mut::<CampaignProgress>());
+    app.insert_resource(save);
 }
 
 pub fn create_mock_portal(char_id: Option<u16>, include_trap: bool) -> ActivePortal {
@@ -191,6 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.insert_resource(asset_server.clone());
         app.insert_resource(active_level.clone());
         app.insert_resource(portal);
+        insert_save_game(&mut app, &asset_server, args.save_dir.as_ref());
 
         let mut gameplay = app.world_mut().resource_mut::<PortalGameplayState>();
         gameplay.active_hero_character_id = Some(resolved_char_id);
@@ -241,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.add_plugins(SkylandsRenderPlugin {
         viewer_mode: args.viewer,
     });
+    insert_save_game(&mut app, &asset_server, args.save_dir.as_ref());
     app.insert_resource(asset_server);
     app.insert_resource(active_level);
     app.insert_resource(portal);
