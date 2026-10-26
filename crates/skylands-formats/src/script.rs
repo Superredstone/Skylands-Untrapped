@@ -164,8 +164,29 @@ pub enum Op {
         name: String,
         target: Vec<Ref>,
     },
-    /// Anything else (spawn, movement, sound...): skipped by the evaluator.
+    /// `OpSpawn` (execute `0x8007c6bc`): clone the `AbstractPlacement` that the path
+    /// `template` (+0x20) resolves to, at the current transform of the object at `at`
+    /// (`_RHS` +0x28; it becomes the clone's parent), turned to `facing` (`_facingRHS` +0x2c)
+    /// when that evaluates. Owns a setup block of `br` ops in which the op object means the
+    /// clone. `actor`: the placement itself when the path is just one. Notes: `agent/SCRIPT_VM.md`.
+    Spawn {
+        template: Vec<Ref>,
+        actor: Option<SpawnTemplate>,
+        at: Vec<Ref>,
+        facing: Option<Rhs>,
+    },
+    /// Anything else (movement, sound...): skipped by the evaluator.
     Other(String),
+}
+
+/// Placement an `OpSpawn` clones: object offset, type, `+0x08` name and
+/// `AbstractPlacement._ID` (+0x20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnTemplate {
+    pub offset: usize,
+    pub ty: String,
+    pub name: String,
+    pub id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,7 +237,6 @@ pub struct ScriptSet {
 
 /// Ops whose operands `ScriptSet::opaque_operands` records.
 const OPAQUE_LISTED: &[&str] = &[
-    "OpSpawn",
     "OpControl",
     "OpChangeMembership",
     "OpForEach",
@@ -514,6 +534,25 @@ impl Reader<'_> {
                     })
                 }),
             },
+            "OpSpawn" => {
+                let template = self.lhs(o + 0x20);
+                // Ops and variables in the path hold references; resolved at run time.
+                let actor = match template[..] {
+                    [Ref::Obj(a)] if !self.ty(a).starts_with("Op") => Some(SpawnTemplate {
+                        offset: a,
+                        ty: self.ty(a).into(),
+                        name: self.cstr(a + 0x08),
+                        id: self.u32(a + 0x20).unwrap_or(0),
+                    }),
+                    _ => None,
+                };
+                Op::Spawn {
+                    template,
+                    actor,
+                    at: self.lhs(o + 0x28),
+                    facing: self.rhs_at(o + 0x2c),
+                }
+            }
             "OpPreScript" => Op::PreScript,
             "OpStartUp" => Op::StartUp,
             "OpShutDown" => Op::ShutDown,
@@ -856,6 +895,20 @@ impl ScriptSet {
                     "set behavior {}",
                     target.map_or("?".into(), |t| format!("@{t:x}"))
                 ),
+                Op::Spawn {
+                    template,
+                    actor,
+                    at,
+                    facing,
+                } => format!(
+                    "spawn {} at {} facing {}",
+                    actor.as_ref().map_or_else(
+                        || self.path_str(template),
+                        |a| format!("{}{:?}#{}", a.ty, a.name, a.id)
+                    ),
+                    self.path_str(at),
+                    facing.as_ref().map_or("-".into(), |r| self.rhs_str(r))
+                ),
                 Op::PreScript => "PRESCRIPT".into(),
                 Op::StartUp => "STARTUP".into(),
                 Op::ShutDown => "SHUTDOWN".into(),
@@ -945,6 +998,10 @@ pub struct Vm<'a> {
     /// "Set Save Param" calls, in order: (save param, field index, value). Later reads in
     /// the same run see them.
     pub save_writes: Vec<(String, i32, i64)>,
+    /// `OpSpawn` clones made so far by this actor (next `Effect::Spawn::serial`).
+    pub spawned: u32,
+    /// Setup blocks being run, innermost last.
+    spawning: Vec<Spawning>,
 }
 
 /// Object a script reference points at, as far as the VM can tell.
@@ -953,12 +1010,23 @@ pub enum RefTarget {
     Null,
     /// Engine object by name-hash path (`my`...).
     Engine(Vec<u32>),
-    /// Something only the live engine knows (spawned object, macro output...).
+    /// The actor's `serial`-th `OpSpawn` clone (`Effect::Spawn`).
+    Spawned(u32),
+    /// Something only the live engine knows (macro output...).
     Unknown,
 }
 
 /// Name hash of the engine's `null` reference.
 const NULL_HASH: u32 = 0x7707_4ba4;
+/// Name hash of `my`, the actor running the script.
+const MY_HASH: u32 = 0x4c2d_fe93;
+
+/// Object an effect acts on: an engine object of this actor, or a clone being set up
+/// (index into `Vm::spawning`, key as the clone's own `my` path).
+enum Target {
+    Engine(Vec<u32>),
+    Clone(usize, Vec<u32>),
+}
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
 /// (`param` = save param name, e.g. `"village generic vars"`). `None`: not in the save.
@@ -994,6 +1062,28 @@ pub enum Effect {
     StartSequence { group: Vec<u32>, state: i32 },
     /// `OpTurnTo` of the engine object `target`: face `facing` degrees.
     TurnTo { target: Vec<u32>, facing: f32 },
+    /// `OpSpawn` at op `op`: clone `template` at the engine object `at`, facing `facing`
+    /// degrees. `serial` numbers the actor's spawns (`RefTarget::Spawned`). The setup block's
+    /// writes to the clone are in `seed` (keys as the clone's own `my` paths) and its
+    /// effects on the clone in `setup` (targets `[MY]`, ...).
+    Spawn {
+        op: usize,
+        template: SpawnTemplate,
+        at: Vec<u32>,
+        facing: Option<f32>,
+        serial: u32,
+        seed: HashMap<Vec<u32>, Value>,
+        setup: Vec<Effect>,
+    },
+}
+
+/// A clone whose `OpSpawn` setup block is running.
+#[derive(Debug, Clone)]
+struct Spawning {
+    op: usize,
+    serial: u32,
+    seed: HashMap<Vec<u32>, Value>,
+    setup: Vec<Effect>,
 }
 
 /// Per-set lookup tables, shared by every `Vm` over the set.
@@ -1053,6 +1143,8 @@ impl<'a> Vm<'a> {
             refs: HashMap::new(),
             save: None,
             save_writes: Vec::new(),
+            spawned: 0,
+            spawning: Vec::new(),
         }
     }
 
@@ -1068,6 +1160,11 @@ impl<'a> Vm<'a> {
         let Ok(p) = self.canon(path) else {
             return RefTarget::Unknown;
         };
+        if let Some((i, k)) = self.clone_key(&p) {
+            if k == [MY_HASH] {
+                return RefTarget::Spawned(self.spawning[i].serial);
+            }
+        }
         if let Some(t) = self.refs.get(&p) {
             return t.clone();
         }
@@ -1076,6 +1173,35 @@ impl<'a> Vm<'a> {
                 RefTarget::Null
             }
             _ => RefTarget::Unknown,
+        }
+    }
+
+    /// A path through an `OpSpawn` whose setup block is running means the clone
+    /// (op +0x24, `0x8007c438`): its index in `spawning` and the clone's own `my` path.
+    fn clone_key(&self, p: &[Ref]) -> Option<(usize, Vec<u32>)> {
+        let Some(Ref::Obj(o)) = p.first() else {
+            return None;
+        };
+        let i = self.spawning.iter().rposition(|s| s.op == *o)?;
+        let rest = match &p[1..] {
+            [] => Vec::new(),
+            rest => self.set.engine_key(rest)?,
+        };
+        Some((i, [MY_HASH].into_iter().chain(rest).collect()))
+    }
+
+    fn target(&self, path: &[Ref]) -> Option<Target> {
+        if let Some(k) = self.set.engine_key(path) {
+            return Some(Target::Engine(k));
+        }
+        let p = self.canon(path).ok()?;
+        self.clone_key(&p).map(|(i, k)| Target::Clone(i, k))
+    }
+
+    fn emit(&mut self, t: Target, effect: impl FnOnce(Vec<u32>) -> Effect) {
+        match t {
+            Target::Engine(k) => self.effects.push(effect(k)),
+            Target::Clone(i, k) => self.spawning[i].setup.push(effect(k)),
         }
     }
 
@@ -1387,7 +1513,7 @@ impl<'a> Vm<'a> {
                     pitch,
                     ..
                 } => {
-                    if let Some(target) = self.set.engine_key(target) {
+                    if let Some(target) = self.target(target) {
                         let mut f = |r: &Option<Rhs>| -> Result<f32, VmError> {
                             Ok(match r {
                                 Some(r) => self.eval(r)?.as_f32(),
@@ -1395,7 +1521,7 @@ impl<'a> Vm<'a> {
                             })
                         };
                         let (len, heading, pitch) = (f(len)?, f(heading)?, f(pitch)?);
-                        self.effects.push(Effect::Displace {
+                        self.emit(target, |target| Effect::Displace {
                             target,
                             len,
                             heading,
@@ -1406,9 +1532,9 @@ impl<'a> Vm<'a> {
                 // Only when nothing unresolved (save data, other files) led here:
                 // `Persephone_2014.ai` removes herself on a save flag we cannot read.
                 Op::Remove { target } => {
-                    if let Some(target) = self.set.engine_key(target) {
+                    if let Some(target) = self.target(target) {
                         if self.unbound.is_empty() {
-                            self.effects.push(Effect::Remove { target });
+                            self.emit(target, |target| Effect::Remove { target });
                         }
                     }
                 }
@@ -1425,10 +1551,10 @@ impl<'a> Vm<'a> {
                     None => pc += skip,
                 },
                 // `0x8007d418`: `pc += br` when the target does not resolve.
-                Op::TurnTo { facing, target } => match self.set.engine_key(target) {
+                Op::TurnTo { facing, target } => match self.target(target) {
                     Some(target) => {
                         let facing = self.eval(facing)?.as_f32();
-                        self.effects.push(Effect::TurnTo { target, facing });
+                        self.emit(target, |target| Effect::TurnTo { target, facing });
                     }
                     None => pc += skip,
                 },
@@ -1442,6 +1568,46 @@ impl<'a> Vm<'a> {
                 Op::Behavior { .. } => pc += skip,
                 // Blocks of ops that need live objects (find variable, spawn, for each):
                 // skipped, as if nothing was found.
+                // `0x8007c6bc`: an unresolved template or position skips the setup block.
+                // Templates behind references (variables, macro params, other spawns) and
+                // `global.bld` / engine handles are not known here.
+                Op::Spawn {
+                    actor, at, facing, ..
+                } => {
+                    let (Some(template), Some(at)) = (actor, self.set.engine_key(at)) else {
+                        pc += skip;
+                        continue;
+                    };
+                    // `0x80091790`: a literal facing evaluates too (most spawns pass 0).
+                    let facing = match facing {
+                        Some(r) => Some(self.eval(r)?.as_f32()),
+                        None => None,
+                    };
+                    let serial = self.spawned;
+                    self.spawned += 1;
+                    self.spawning.push(Spawning {
+                        op: ins.offset,
+                        serial,
+                        seed: HashMap::new(),
+                        setup: Vec::new(),
+                    });
+                    let end = (pc + skip).min(to);
+                    let flow = self.run(si, pc, end);
+                    let done = self.spawning.pop().expect("pushed above");
+                    self.effects.push(Effect::Spawn {
+                        op: ins.offset,
+                        template: template.clone(),
+                        at,
+                        facing,
+                        serial,
+                        seed: done.seed,
+                        setup: done.setup,
+                    });
+                    if let Flow::Return = flow? {
+                        return Ok(Flow::Return);
+                    }
+                    pc = end;
+                }
                 Op::FindVariable { .. } | Op::Other(_) => pc += skip,
                 Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::PreScript => {}
             }
@@ -1585,6 +1751,12 @@ impl<'a> Vm<'a> {
         if let Some(v) = self.vars.get(&path) {
             return *v;
         }
+        if let Some(v) = self
+            .clone_key(&path)
+            .and_then(|(i, k)| self.spawning[i].seed.get(&k))
+        {
+            return *v;
+        }
         if let Some(v) = self.set.engine_key(&path).and_then(|k| self.engine.get(&k)) {
             return *v;
         }
@@ -1618,6 +1790,10 @@ impl<'a> Vm<'a> {
 
     fn write(&mut self, path: &[Ref], v: Value) {
         if let Ok(p) = self.canon(path) {
+            if let Some((i, k)) = self.clone_key(&p) {
+                self.spawning[i].seed.insert(k, v);
+                return;
+            }
             match self.set.engine_key(&p) {
                 Some(k) => {
                     self.engine.insert(k, v);
@@ -2400,6 +2576,45 @@ mod tests {
         assert_eq!(name(0xad4), ("Average_Minion_Damage".into(), Some(F(10.0))));
         assert_eq!(name(0xad6), ("Average_Minion_HP".into(), Some(F(100.0))));
         assert_eq!(name(0x5f8).0, "Minion Global Tuning");
+    }
+
+    #[test]
+    fn rom_spawn_ops() {
+        let Some(hub) = read_bld("level", "Level_Hub_2014_01").and_then(|d| ScriptSet::parse(&d))
+        else {
+            return;
+        };
+        let ops = || hub.scripts.iter().flat_map(|s| &s.ops);
+        assert!(!ops().any(|i| i.op == Op::Other("OpSpawn".into())));
+        let spawns: Vec<_> = ops()
+            .filter_map(|i| match &i.op {
+                Op::Spawn {
+                    template, actor, ..
+                } => Some((template, actor)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spawns.len(), 485);
+        let coin = hub.script("2D_Coin.ai").unwrap();
+        let (br, actor, at) = coin
+            .ops
+            .iter()
+            .find_map(|i| match &i.op {
+                Op::Spawn { actor, at, .. } => Some((i.br, actor.clone().unwrap(), at)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(br, 3);
+        assert_eq!(
+            (actor.ty.as_str(), actor.name.as_str(), actor.id),
+            ("tfbActorInfo", "Coin_Art_01", 0)
+        );
+        assert_eq!(hub.engine_key(at), Some(vec![name_hash("my")]));
+        // The template is a reference path: also handles and `object.field` paths.
+        assert!(spawns
+            .iter()
+            .any(|(t, a)| a.is_none() && matches!(t[..], [Ref::Handle(_)])));
+        assert!(spawns.iter().any(|(t, _)| t.len() > 1));
     }
 
     #[test]

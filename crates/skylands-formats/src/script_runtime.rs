@@ -96,6 +96,10 @@ pub struct ActorScriptState {
     pub save: Option<std::sync::Arc<dyn crate::script::SaveParams>>,
     /// "Set Save Param" writes since the engine last drained them.
     pub save_writes: Vec<(String, i32, i64)>,
+    /// `OpSpawn` clones made so far (next `Effect::Spawn::serial`).
+    pub spawned: u32,
+    /// `Effect::Spawn`s since the engine last drained them.
+    pub spawns: Vec<Effect>,
 }
 
 impl ActorScriptState {
@@ -176,6 +180,7 @@ impl ScriptProgram {
         vm.rng = st.rng;
         vm.refs = std::mem::take(&mut st.refs);
         vm.save = st.save.clone();
+        vm.spawned = st.spawned;
         self.advance_sliders(&mut vm, &mut st.sliders, dt);
 
         let ops = &self.set.scripts[si].ops;
@@ -206,6 +211,7 @@ impl ScriptProgram {
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
         st.save_writes.append(&mut vm.save_writes);
+        st.spawned = vm.spawned;
         if let Err(e) = result {
             st.error = Some(e);
         }
@@ -253,6 +259,7 @@ impl ScriptProgram {
                         Value::Float(facing),
                     );
                 }
+                spawn @ Effect::Spawn { .. } => st.spawns.push(spawn),
                 _ => {}
             }
         }
@@ -408,6 +415,129 @@ mod tests {
             ..Default::default()
         };
         ScriptProgram::new(set, None)
+    }
+
+    const SPAWN: usize = 0x300;
+
+    fn coin() -> crate::script::SpawnTemplate {
+        crate::script::SpawnTemplate {
+            offset: 0x400,
+            ty: "tfbActorInfo".into(),
+            name: "Coin_Art_01".into(),
+            id: 0,
+        }
+    }
+
+    #[test]
+    fn spawn_setup_block_seeds_the_clone_not_the_spawner() {
+        // `2D_Block_01.ai`: spawn at `my`, then `@spawn.facing = my.facing`, lift it 3 up,
+        // and keep a reference to it.
+        let clone = |rest: &[Ref]| [Ref::Obj(SPAWN)].iter().chain(rest).copied().collect();
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    3,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![h(MY)],
+                        facing: Some(lit(0.0)),
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetValue {
+                        lhs: clone(&[h(ORIENTATION), h(FACING)]),
+                        rhs: rd(vec![h(MY), h(ORIENTATION), h(FACING)]),
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::Displace {
+                        target: clone(&[]),
+                        mode: 0,
+                        len: Some(lit(3.0)),
+                        heading: Some(lit(0.0)),
+                        pitch: Some(lit(90.0)),
+                    },
+                ),
+                ins(
+                    13,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(LOCAL)],
+                        rhs: clone(&[]),
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        st.set(&[MY, ORIENTATION, FACING], 90.0);
+        p.tick(0, &mut st, 1.0 / 60.0);
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none());
+        assert_eq!(st.spawned, 1);
+        assert_eq!(
+            st.spawns,
+            vec![Effect::Spawn {
+                op: SPAWN,
+                template: coin(),
+                at: vec![MY],
+                facing: Some(0.0),
+                serial: 0,
+                seed: HashMap::from([(vec![MY, ORIENTATION, FACING], Value::Float(90.0))]),
+                setup: vec![Effect::Displace {
+                    target: vec![MY],
+                    len: 3.0,
+                    heading: 0.0,
+                    pitch: 90.0,
+                }],
+            }]
+        );
+        // The spawner keeps its own facing and does not move.
+        assert_eq!(st.get(&[MY, ORIENTATION, FACING]), Some(90.0));
+        assert_eq!(st.displacement, [0.0; 3]);
+        assert_eq!(
+            st.refs.get(&vec![Ref::Obj(LOCAL)]),
+            Some(&RefTarget::Spawned(0))
+        );
+    }
+
+    #[test]
+    fn spawn_of_unresolved_template_skips_its_block() {
+        // Template behind a variable reference: `0x8007c6bc` skips the setup block.
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    1,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(LOCAL)],
+                        actor: None,
+                        at: vec![h(MY)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![h(MY), h(VERTICAL_OFFSET)],
+                        rhs: lit(5.0),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.spawns.is_empty());
+        assert_eq!(st.get(&[MY, VERTICAL_OFFSET]), None);
     }
 
     #[test]

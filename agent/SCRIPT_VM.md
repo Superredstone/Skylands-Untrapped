@@ -3,9 +3,8 @@
 Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluator,
 `enemy_stats`, `LevelupTable`). RE aid: `cargo test -p skylands-formats dump_scripts -- --ignored`
 (`SKY_BLD=level/Level_302_Chompywurm`, `permanent/global`, `character/Init_Setup`), listings go to
-`/tmp/skylands-re/<name>/` and stay local. Ops without an `Op` variant (`OpSpawn`, `OpStartSequence`,
-`OpControl`, `OpChangeMembership`, ...) list their operands from `ScriptSet::opaque_operands`
-(spawn templates as `tfbActorInfo name#AbstractPlacement._ID`).
+`/tmp/skylands-re/<name>/` and stay local. Ops without an `Op` variant (`OpControl`,
+`OpChangeMembership`, `OpForEach`, ...) list their operands from `ScriptSet::opaque_operands`.
 
 ## Layout (IGZ v6, big endian, 32-bit pointers)
 - `tfbScriptInfo`: `_name` +0x08, `_opList` +0x14 (`OpCodeList`), `_masterVarList` +0x18.
@@ -58,7 +57,7 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
 - `OpCheckReference` / `OpCheckMembership` cannot be evaluated without live objects: `NE` is true
   (the reference is set), everything else false.
 - Int op Int stays Int (except DIV), mixed is Float, DIV by 0 = 0. Budget: 1M steps, call depth 32.
-- Not run: spawn/move/sound/reference ops (`OpSetReference`, `OpSpawn`, ...).
+- Not run: move/sound ops.
 
 ## Data found
 - Enemy stats: level `LevelSystems.ai` "Game - Define Enemy Stats" (not `Minion_Tuning.ai`).
@@ -91,3 +90,34 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   `OpRemove`: `_NP` +0x1c.
 - Other ops with a `br` block (find variable, spawn, for each, ...) skip their block in the VM.
 - Engine state lives in `Vm::engine` keyed by name-hash path; script locals stay per actor.
+
+## `OpSpawn` (`Op::Spawn`)
+- Class size 0x30. Fields: template +0x20, a reference path stored as an `AbstractPlacementList`
+  (one placement: `tfbActorInfo` x185, `tfbParticleInfo` x64, `tfbSpriteInfo` x1 in the hub; or
+  an `EXID` handle: `global.bld` export such as `$f2`, engine name such as `$9b61ad43`; or a
+  variable / macro param / other spawn holding a reference, optionally followed by fields such as
+  `"CauldronLoot"#1.$144f0c62`), `_RHS` +0x28 (`PositionStack`, nearly always `my`), `_facingRHS` +0x2c,
+  op +0x1c = saved current object, op +0x24 = spawned object while its block runs.
+- Vtable `0x80507e44` (`getMeta` `0x800949e4` -> meta slot `r13-0x42d8`). Execute (+0x60) `0x8007c6bc`:
+  1. Resolve +0x20 (`0x8008c800`). Failure: `pc += br` (setup block skipped).
+  2. Not an `AbstractPlacement` (meta `r13-0x46e0`): a new instance of the resolved object's
+     class goes into op +0x24 and the block runs with it (data objects, not actors).
+  3. Else resolve +0x28 and clone (`0x8007a158`): new instance of the template's class with the
+     template's fields; `_initMatrix` = the +0x28 object's `_currentMatrix`; `_parent` (+0x5c) =
+     that object; `_activator` (+0x60) = the current object; facing from +0x2c when it evaluates
+     (`0x80091790` -> `0x80098aa0`); then activate (`0x8007a698`).
+  4. `0x8007c438`: no clone or clone `_activityState` >= 3 -> `pc += br`. State 2: activator =
+     current object, activate. Otherwise `_activeTimeLayer` (+0x9c) = current layer. Then push a
+     (script, pc, op) frame, save the current object (`r13-0x3c88`) in op +0x1c and make the clone
+     current, op +0x24 = clone, so the `br` block (`set @op.facing = ...`, `displace @op`,
+     `OpSetReference x = @op`) configures the clone.
+  5. Block end (slot +0x60 `0x8007c3d0`): current object restored from op +0x1c, op +0x24 cleared.
+- Open: whether a literal `facing 0` (`_facingRHS` with an empty path) counts as "evaluates"
+  (most hub spawns); the meaning of the current object `r13-0x3c88` vs `my`.
+- VM (`Op::Spawn`): only a single-placement template (`actor`) at an engine object resolves;
+  everything else skips the block. The block runs at once with the op object meaning the clone:
+  writes go to `Effect::Spawn.seed` (keyed as the clone's `my.*`), `displace` / `turn` / `remove`
+  of it to `setup`, a reference to it is `RefTarget::Spawned(serial)` (per-actor counter,
+  `ActorScriptState.spawned`). `my` stays the spawner. `ActorScriptState.spawns` queues the
+  effects for the engine. A literal `facing` is applied (`Some(0)` for most hub spawns).
+- Hub: 485 spawns. `2D_Coin.ai` spawns `Coin_Art_01#0` at `my`, block = reference + `"Value" = 1`.
