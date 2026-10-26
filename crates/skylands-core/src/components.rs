@@ -173,10 +173,22 @@ pub struct ActorScript {
     /// Index into the level's `ScriptProgram`.
     pub script: usize,
     /// Level marker node; the renderer draws this actor's model apart from the level.
+    /// `usize::MAX` for `SpawnedActor`s, which have no marker.
     pub marker_node: usize,
     pub state: skylands_formats::ActorScriptState,
     /// Placement transform.
     pub base: Transform,
+}
+
+/// Actor cloned at run time by a script's `OpSpawn` (`Effect::Spawn`).
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedActor {
+    /// The actor whose script spawned it (the clone's `_parent`).
+    pub parent: Entity,
+    /// The parent's `serial`-th spawn.
+    pub serial: u32,
+    /// `tfbActorInfo` name of the template.
+    pub template: String,
 }
 
 /// Actor whose model is already part of the level render mesh; it needs no visual

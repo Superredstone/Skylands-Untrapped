@@ -120,4 +120,14 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   of it to `setup`, a reference to it is `RefTarget::Spawned(serial)` (per-actor counter,
   `ActorScriptState.spawned`). `my` stays the spawner. `ActorScriptState.spawns` queues the
   effects for the engine. A literal `facing` is applied (`Some(0)` for most hub spawns).
+- Core (`spawn_script_clone`, `SpawnedActor`): `actor_script_system` drains
+  `ActorScriptState.spawns` after each tick. A clone at `my` starts at the spawner's current
+  transform, yaw = `facing` when given, scale = template `_scaleVec` / 100, its engine state
+  seeded and its setup effects applied (`ActorScriptState::apply`), and runs the template's
+  script (`SpawnTemplate.script`, `Placement._script` +0xa8) from the next tick. Clones of
+  script-less templates are static. Not done: models of clones (templates are not in the level
+  render list), clones at other objects, particle/sprite templates (`tfbParticleInfo` x64),
+  parenting (clones do not follow the parent).
+- Hub templates: 185 `tfbActorInfo` (82 with a script: level up tokens, baubles, `Hub_Coins.ai`,
+  `2D_Coin.ai`, ...), 64 `tfbParticleInfo`, 1 `tfbSpriteInfo`.
 - Hub: 485 spawns. `2D_Coin.ai` spawns `Coin_Art_01#0` at `my`, block = reference + `"Value" = 1`.

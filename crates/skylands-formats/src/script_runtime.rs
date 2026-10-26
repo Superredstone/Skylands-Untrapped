@@ -109,6 +109,37 @@ impl ActorScriptState {
     pub fn set(&mut self, key: &[u32], v: f32) {
         self.engine.insert(key.to_vec(), Value::Float(v));
     }
+
+    /// Apply an engine effect aimed at `my` (others are ignored): `OpDisplace` moves,
+    /// `OpRemove` despawns, `OpStartSequence` on the `animation palette` picks the
+    /// animation state, `OpTurnTo` sets the facing. Also used for the setup effects of
+    /// an `OpSpawn` clone (`Effect::Spawn::setup`).
+    pub fn apply(&mut self, effect: Effect) {
+        match effect {
+            Effect::Displace {
+                target,
+                len,
+                heading,
+                pitch,
+            } if target == [field::MY] => {
+                let (sh, ch) = heading.to_radians().sin_cos();
+                let (sp, cp) = pitch.to_radians().sin_cos();
+                for (d, v) in self.displacement.iter_mut().zip([cp * sh, sp, cp * ch]) {
+                    *d += len * v;
+                }
+            }
+            Effect::Remove { target } if target == [field::MY] => self.removed = true,
+            Effect::StartSequence { group, state } if group == [field::ANIMATION_PALETTE] => {
+                self.anim_state = Some(state)
+            }
+            // ponytail: the turn is applied at once; the engine turns over time (target
+            // vtable +0x90, rate unknown). Add the rate once it is reversed.
+            Effect::TurnTo { target, facing } if target.first() == Some(&field::MY) => {
+                self.set(&[field::MY, field::ORIENTATION, field::FACING], facing);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ScriptProgram {
@@ -216,6 +247,7 @@ impl ScriptProgram {
             st.error = Some(e);
         }
 
+        st.engine = std::mem::take(&mut vm.engine);
         for effect in std::mem::take(&mut vm.effects) {
             match effect {
                 Effect::Slide {
@@ -235,32 +267,8 @@ impl ScriptProgram {
                         t: 0.0,
                     });
                 }
-                Effect::Displace {
-                    target,
-                    len,
-                    heading,
-                    pitch,
-                } if target == [field::MY] => {
-                    let (sh, ch) = heading.to_radians().sin_cos();
-                    let (sp, cp) = pitch.to_radians().sin_cos();
-                    for (d, v) in st.displacement.iter_mut().zip([cp * sh, sp, cp * ch]) {
-                        *d += len * v;
-                    }
-                }
-                Effect::Remove { target } if target == [field::MY] => st.removed = true,
-                Effect::StartSequence { group, state } if group == [field::ANIMATION_PALETTE] => {
-                    st.anim_state = Some(state)
-                }
-                // ponytail: the turn is applied at once; the engine turns over time (target
-                // vtable +0x90, rate unknown). Add the rate once it is reversed.
-                Effect::TurnTo { target, facing } if target.first() == Some(&field::MY) => {
-                    vm.engine.insert(
-                        vec![field::MY, field::ORIENTATION, field::FACING],
-                        Value::Float(facing),
-                    );
-                }
                 spawn @ Effect::Spawn { .. } => st.spawns.push(spawn),
-                _ => {}
+                effect => st.apply(effect),
             }
         }
 
@@ -270,18 +278,13 @@ impl ScriptProgram {
             (RELATIVE_TILT, TILT),
             (RELATIVE_ROLL, ROLL),
         ] {
-            let r = vm
-                .engine
-                .get(&[MY, ORIENTATION, rate][..])
-                .map_or(0.0, |v| v.as_f32());
+            let r = st.get(&[MY, ORIENTATION, rate]).unwrap_or(0.0);
             if r != 0.0 {
-                let k = vec![MY, ORIENTATION, angle];
-                let a = vm.engine.get(&k).map_or(0.0, |v| v.as_f32());
-                vm.engine.insert(k, Value::Float(a + r));
+                let a = st.get(&[MY, ORIENTATION, angle]).unwrap_or(0.0);
+                st.set(&[MY, ORIENTATION, angle], a + r);
             }
         }
         st.vars = std::mem::take(&mut vm.vars);
-        st.engine = std::mem::take(&mut vm.engine);
         st.rng = vm.rng;
         st.time += dt;
     }
@@ -425,6 +428,8 @@ mod tests {
             ty: "tfbActorInfo".into(),
             name: "Coin_Art_01".into(),
             id: 0,
+            script: Some("Coin_Art.ai".into()),
+            scale: [100.0; 3],
         }
     }
 

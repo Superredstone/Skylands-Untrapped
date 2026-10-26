@@ -1935,7 +1935,8 @@ fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Op
 /// One script tick per `ActorScript`, then its engine state is applied to the actor:
 /// `orientation` angles (degrees, relative to the placement; facing = yaw about +Y,
 /// tilt = X, roll = Z, composed `Rz * Ry * Rx` like placements), `vertical offset`,
-/// `OpDisplace` and `scale.uniform`. `OpRemove my` despawns the actor.
+/// `OpDisplace` and `scale.uniform`. `OpRemove my` despawns the actor. `OpSpawn`
+/// clones become `SpawnedActor`s (`spawn_script_clone`).
 #[allow(clippy::type_complexity)]
 pub fn actor_script_system(
     mut commands: Commands,
@@ -1968,6 +1969,7 @@ pub fn actor_script_system(
         );
         actor.state.save = save.as_mut().map(|s| s.view() as _);
         scripts.0.tick(actor.script, &mut actor.state, dt);
+        let spawns = std::mem::take(&mut actor.state.spawns);
         // "Set Save Param" lands in the save; it is written to disk on the next save.
         if let Some(save) = save.as_mut() {
             for (param, index, value) in actor.state.save_writes.drain(..) {
@@ -1979,7 +1981,6 @@ pub fn actor_script_system(
         let st = &actor.state;
         if st.removed {
             commands.entity(entity).despawn_recursive();
-            continue;
         }
         let angle = |f| st.get(&[MY, ORIENTATION, f]).unwrap_or(0.0).to_radians();
         let turn = Quat::from_euler(EulerRot::ZYX, angle(ROLL), angle(FACING), angle(TILT));
@@ -1988,6 +1989,13 @@ pub fn actor_script_system(
         transform.translation = actor.base.translation + lift + Vec3::from(st.displacement);
         transform.rotation = actor.base.rotation * turn;
         transform.scale = actor.base.scale * scale;
+        // Clones are made before a removal in the same tick takes effect.
+        for spawn in spawns {
+            spawn_script_clone(&mut commands, &scripts.0, entity, &transform, spawn);
+        }
+        if st.removed {
+            continue;
+        }
 
         if let Some(ref mut anim) = anim {
             if npc.is_some() && talking_npc == Some(entity) {
@@ -2001,6 +2009,79 @@ pub fn actor_script_system(
                 anim.state = st.anim_state;
             }
         }
+    }
+}
+
+/// Start an `OpSpawn` clone (`0x8007a158`): it takes the spawner's current transform
+/// (only `at = my` is known here), the yaw `facing` when given, and the template's
+/// scale, then runs the template's script with the setup block's writes and effects.
+/// No model is drawn for it yet.
+fn spawn_script_clone(
+    commands: &mut Commands,
+    program: &skylands_formats::ScriptProgram,
+    parent: Entity,
+    parent_tf: &Transform,
+    spawn: skylands_formats::script::Effect,
+) {
+    use skylands_formats::script_runtime::field::*;
+    let skylands_formats::script::Effect::Spawn {
+        template,
+        at,
+        facing,
+        serial,
+        seed,
+        setup,
+        ..
+    } = spawn
+    else {
+        return;
+    };
+    if at != [MY] {
+        debug!("Spawn of {} at another object skipped", template.name);
+        return;
+    }
+    let mut state = skylands_formats::ActorScriptState::default();
+    state.engine = seed;
+    for effect in setup {
+        state.apply(effect);
+    }
+    if state.removed {
+        return;
+    }
+    let base = Transform {
+        translation: parent_tf.translation,
+        rotation: facing.map_or(parent_tf.rotation, |f| {
+            Quat::from_rotation_y(f.to_radians())
+        }),
+        scale: Vec3::from(template.scale) / 100.0,
+    };
+    let script = template.script.as_deref().and_then(|s| program.find(s));
+    let mut clone = commands.spawn((
+        LevelEntity,
+        SpawnedActor {
+            parent,
+            serial,
+            template: template.name,
+        },
+        base,
+        ActorAnimation::default(),
+    ));
+    if let Some(si) = script {
+        if state.get(&[MY, SCALE, UNIFORM]).is_none() {
+            state.set(&[MY, SCALE, UNIFORM], 100.0);
+        }
+        clone.insert(ActorScript {
+            script: si,
+            marker_node: usize::MAX,
+            state,
+            base,
+        });
+    } else {
+        let lift = Vec3::Y * state.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
+        clone.insert(Transform {
+            translation: base.translation + lift + Vec3::from(state.displacement),
+            ..base
+        });
     }
 }
 
@@ -3783,6 +3864,118 @@ mod tests {
             t.rotation
         );
         assert_eq!(t.translation, base.translation);
+    }
+
+    #[test]
+    fn test_script_spawn_creates_seeded_clone() {
+        use skylands_formats::script::{
+            name_hash, Instr, Op, Operand, Ref, Rhs, Script, SpawnTemplate, Value,
+        };
+        use skylands_formats::script_runtime::field::*;
+        let ins = |offset, br, op| Instr {
+            offset,
+            flags: 0,
+            br,
+            op,
+        };
+        let event_blocks = |startup: Vec<Instr>| {
+            let mut ops = vec![
+                ins(1, startup.len() as u16 + 2, Op::PreScript),
+                ins(2, startup.len() as u16, Op::StartUp),
+            ];
+            ops.extend(startup);
+            ops.push(ins(3, 0, Op::ShutDown));
+            ops
+        };
+        // Spawner startup: `spawn "Mill" at my { @spawn.orientation.relative facing = -2 }`.
+        const SPAWN: usize = 0x50;
+        let spawner = event_blocks(vec![
+            ins(
+                SPAWN,
+                1,
+                Op::Spawn {
+                    template: vec![Ref::Obj(0x60)],
+                    actor: Some(SpawnTemplate {
+                        offset: 0x60,
+                        ty: "tfbActorInfo".into(),
+                        name: "Mill".into(),
+                        id: 0,
+                        script: Some("Mill.ai".into()),
+                        scale: [200.0; 3],
+                    }),
+                    at: vec![Ref::Handle(0)],
+                    facing: None,
+                },
+            ),
+            ins(
+                SPAWN + 1,
+                0,
+                Op::SetValue {
+                    lhs: vec![Ref::Obj(SPAWN), Ref::Handle(1), Ref::Handle(2)],
+                    rhs: Rhs {
+                        a: Operand::Lit(Value::Int(-2)),
+                        arith: -1,
+                        b: None,
+                        func: 0,
+                    },
+                },
+            ),
+        ]);
+        let ids = vec![MY, ORIENTATION, RELATIVE_FACING];
+        let set = skylands_formats::ScriptSet {
+            scripts: vec![
+                Script {
+                    name: "Spawner.ai".into(),
+                    ops: spawner,
+                },
+                Script {
+                    name: "Mill.ai".into(),
+                    ops: event_blocks(vec![]),
+                },
+            ],
+            handle_ns: vec![name_hash("level.bld"); ids.len()],
+            handle_ids: ids,
+            ..Default::default()
+        };
+        let mut app = build_test_app();
+        let base = Transform::from_xyz(1.0, 2.0, 3.0);
+        let spawner = spawn_scripted(
+            &mut app,
+            LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
+                set, None,
+            ))),
+            base,
+        );
+        for _ in 0..46 {
+            step_fixed(&mut app);
+        }
+        let world = app.world_mut();
+        let clones: Vec<_> = world
+            .query::<(&SpawnedActor, &ActorScript, &Transform)>()
+            .iter(world)
+            .collect();
+        assert_eq!(clones.len(), 1, "startup spawns once");
+        let (spawned, script, t) = clones[0];
+        assert_eq!(
+            spawned,
+            &SpawnedActor {
+                parent: spawner,
+                serial: 0,
+                template: "Mill".into()
+            }
+        );
+        assert_eq!(script.script, 1);
+        assert_eq!(t.translation, base.translation);
+        assert_eq!(t.scale, Vec3::splat(2.0));
+        // The seeded rate spins the clone 45 ticks x -2 degrees; the spawner stays put.
+        let expected = Quat::from_rotation_y((-90f32).to_radians());
+        assert!(
+            t.rotation.dot(expected).abs() > 1.0 - 1e-6,
+            "{:?}",
+            t.rotation
+        );
+        let parent = world.get::<Transform>(spawner).unwrap();
+        assert_eq!(parent.rotation, Quat::IDENTITY);
     }
 
     #[test]

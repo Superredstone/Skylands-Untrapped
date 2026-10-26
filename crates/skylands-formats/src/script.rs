@@ -180,13 +180,17 @@ pub enum Op {
 }
 
 /// Placement an `OpSpawn` clones: object offset, type, `+0x08` name and
-/// `AbstractPlacement._ID` (+0x20).
+/// `AbstractPlacement._ID` (+0x20). The clone copies the template's fields
+/// (`0x80156328`), so also its `Placement._script` (+0xa8, `.ai` path) and
+/// `_scaleVec` (+0xb8, percent).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnTemplate {
     pub offset: usize,
     pub ty: String,
     pub name: String,
     pub id: u32,
+    pub script: Option<String>,
+    pub scale: [f32; 3],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -543,6 +547,12 @@ impl Reader<'_> {
                         ty: self.ty(a).into(),
                         name: self.cstr(a + 0x08),
                         id: self.u32(a + 0x20).unwrap_or(0),
+                        script: self
+                            .ptr(a + 0xa8)
+                            .filter(|&p| self.ty(p) == "tfbScriptInfo")
+                            .map(|p| self.cstr(p + 0x08)),
+                        scale: [0, 4, 8]
+                            .map(|k| f32::from_bits(self.u32(a + 0xb8 + k).unwrap_or(0x42c8_0000))),
                     }),
                     _ => None,
                 };
@@ -2610,6 +2620,14 @@ mod tests {
             ("tfbActorInfo", "Coin_Art_01", 0)
         );
         assert_eq!(hub.engine_key(at), Some(vec![name_hash("my")]));
+        assert_eq!(actor.script, None);
+        // Clones keep the template's script: `Coin_00` runs `2D_Coin.ai`.
+        assert!(spawns
+            .iter()
+            .any(|(_, a)| a.as_ref().is_some_and(|a| a.name == "Coin_00"
+                && a.script
+                    .as_deref()
+                    .is_some_and(|s| s.ends_with("/2D_Coin.ai")))));
         // The template is a reference path: also handles and `object.field` paths.
         assert!(spawns
             .iter()
