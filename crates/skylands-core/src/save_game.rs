@@ -90,6 +90,45 @@ impl SaveGame {
             .collect()
     }
 
+    /// `global.bld` "System - Save - Portalmaster - Get Stars By Category" over the slot's
+    /// 180 `portalmaster - stars` bits: index > 129 Kaos, > 99 arena, > 87 story complete,
+    /// else story. Returns (story, arena, kaos, story complete).
+    pub fn stars_by_category(&self) -> Option<(u32, u32, u32, u32)> {
+        let field = self.schema.field(false, "portalmaster - stars")?;
+        let file = &self.slots[self.slot];
+        let mut counts = (0, 0, 0, 0);
+        for i in 0..field.fields {
+            if field.get(file, i)? > 0 {
+                match i {
+                    130.. => counts.2 += 1,
+                    100.. => counts.1 += 1,
+                    88.. => counts.3 += 1,
+                    _ => counts.0 += 1,
+                }
+            }
+        }
+        Some(counts)
+    }
+
+    /// "System - Save - Calculate Percent Complete": the slot's `header - slot complete
+    /// pct` = story + story complete stars, `portalmaster - total stars collected` = that
+    /// + Kaos + arena stars. Other header slot fields (level ID, time) are left alone.
+    pub fn update_header_summary(&mut self) {
+        let Some((story, arena, kaos, complete)) = self.stars_by_category() else {
+            return;
+        };
+        let pct = story + complete;
+        let slot = self.slot as u32;
+        for (name, val) in [
+            ("portalmaster - total stars collected", pct + kaos + arena),
+            ("header - slot complete pct", pct),
+        ] {
+            if let Some(field) = self.schema.field(true, name) {
+                field.set(&mut self.header, slot, val as i64);
+            }
+        }
+    }
+
     pub fn apply_to(&self, campaign: &mut CampaignProgress) {
         for chapter in self.completed_chapters() {
             campaign.complete_chapter(chapter);
@@ -138,6 +177,7 @@ pub fn save_progress_system(campaign: Res<CampaignProgress>, save: Option<ResMut
         return;
     };
     if campaign.is_changed() && save.record(&campaign) {
+        save.update_header_summary();
         if let Err(e) = save.write() {
             warn!("Writing save failed: {e}");
         }
@@ -164,6 +204,39 @@ mod tests {
             params: vec![p("savegame version", 1, 8), p("level flags", 22, 20)],
             levels: Vec::new(),
         }
+    }
+
+    #[test]
+    fn test_header_summary_from_star_categories() {
+        let p = |name: &str, header, fields, bits, signed| SaveParamDef {
+            name: name.into(),
+            header,
+            signed,
+            fields: SaveCount::Fixed(fields),
+            bits,
+            limit: 0,
+            defaults: Vec::new(),
+        };
+        let schema = SaveSchema {
+            params: vec![
+                p("portalmaster - total stars collected", true, 4, 8, false),
+                p("header - slot complete pct", true, 4, 8, true),
+                p("portalmaster - stars", false, 180, 1, false),
+            ],
+            levels: Vec::new(),
+        };
+        let mut save = SaveGame::load(schema, None);
+        save.slot = 1;
+        let stars = save.schema.field(false, "portalmaster - stars").unwrap();
+        for i in [0, 87, 88, 99, 100, 129, 130, 179] {
+            stars.set(&mut save.slots[1], i, 1);
+        }
+        assert_eq!(save.stars_by_category(), Some((2, 2, 2, 2)));
+        save.update_header_summary();
+        let get = |n: &str, i| save.schema.field(true, n).unwrap().get(&save.header, i);
+        assert_eq!(get("header - slot complete pct", 1), Some(4));
+        assert_eq!(get("portalmaster - total stars collected", 1), Some(8));
+        assert_eq!(get("header - slot complete pct", 0), Some(0));
     }
 
     #[test]
@@ -223,5 +296,9 @@ mod tests {
         let mut copy = save.clone();
         assert!(!copy.record(&campaign));
         assert_eq!(copy.slots[0], save.slots[0]);
+        // One story star after chapter 1: 1% and 1 star, as the game wrote them.
+        assert_eq!(save.stars_by_category(), Some((1, 0, 0, 0)));
+        copy.update_header_summary();
+        assert_eq!(copy.header, save.header);
     }
 }
