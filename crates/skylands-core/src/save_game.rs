@@ -4,8 +4,9 @@
 
 use crate::resources::{CampaignProgress, GameAssetServer};
 use bevy::prelude::*;
-use skylands_formats::{SaveFile, SaveSchema, ScriptSet};
+use skylands_formats::{SaveFile, SaveParams, SaveSchema, ScriptSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const SAVE_SLOTS: usize = 4;
 pub const HEADER_FILE: &str = "Save_Header";
@@ -36,6 +37,26 @@ pub struct SaveGame {
     pub slot: usize,
     /// Directory written by `write`; `None` keeps the save in memory only.
     pub dir: Option<PathBuf>,
+    /// Snapshot scripts read through "Get Save Param", rebuilt after a change.
+    view: Option<Arc<SaveView>>,
+}
+
+/// Read-only copy of the slot in play and the header for scripts.
+#[derive(Debug)]
+pub struct SaveView {
+    schema: SaveSchema,
+    header: SaveFile,
+    slot: SaveFile,
+}
+
+impl SaveParams for SaveView {
+    fn get(&self, param: &str, index: i32) -> Option<i64> {
+        let index = u32::try_from(index).ok()?;
+        match self.schema.field(false, param) {
+            Some(f) => f.get(&self.slot, index),
+            None => self.schema.field(true, param)?.get(&self.header, index),
+        }
+    }
 }
 
 impl SaveGame {
@@ -62,7 +83,40 @@ impl SaveGame {
             slots,
             slot: 0,
             dir: dir.map(Path::to_path_buf),
+            view: None,
         }
+    }
+
+    /// What scripts see through "Get Save Param".
+    pub fn view(&mut self) -> Arc<SaveView> {
+        self.view
+            .get_or_insert_with(|| {
+                Arc::new(SaveView {
+                    schema: self.schema.clone(),
+                    header: self.header.clone(),
+                    slot: self.slots[self.slot].clone(),
+                })
+            })
+            .clone()
+    }
+
+    /// A script's "Set Save Param": slot param first, else header (per-slot header
+    /// params are indexed by the script). `false` when the field's position is unknown.
+    pub fn set_param(&mut self, param: &str, index: i32, value: i64) -> bool {
+        let Ok(index) = u32::try_from(index) else {
+            return false;
+        };
+        let ok = match self.schema.field(false, param) {
+            Some(f) => f.set(&mut self.slots[self.slot], index, value),
+            None => match self.schema.field(true, param) {
+                Some(f) => f.set(&mut self.header, index, value),
+                None => false,
+            },
+        };
+        if ok {
+            self.view = None;
+        }
+        ok
     }
 
     /// Writes the header and the slot in play to `dir`.
@@ -127,6 +181,7 @@ impl SaveGame {
                 field.set(&mut self.header, slot, val as i64);
             }
         }
+        self.view = None;
     }
 
     pub fn apply_to(&self, campaign: &mut CampaignProgress) {
@@ -155,6 +210,9 @@ impl SaveGame {
                 field.set(file, i, set);
                 changed = true;
             }
+        }
+        if changed {
+            self.view = None;
         }
         changed
     }
@@ -204,6 +262,21 @@ mod tests {
             params: vec![p("savegame version", 1, 8), p("level flags", 22, 20)],
             levels: Vec::new(),
         }
+    }
+
+    #[test]
+    fn test_scripts_read_and_write_save_params() {
+        let mut save = SaveGame::load(schema(), None);
+        let view = save.view();
+        assert_eq!(view.get("level flags", 0), Some(0));
+        assert_eq!(view.get("level flags", 22), None);
+        assert_eq!(view.get("missing", 0), None);
+        assert!(save.set_param("level flags", 2, 5));
+        assert!(!save.set_param("level flags", -1, 5));
+        assert!(!save.set_param("missing", 0, 5));
+        // The old snapshot is unchanged; a new one sees the write.
+        assert_eq!(view.get("level flags", 2), Some(0));
+        assert_eq!(save.view().get("level flags", 2), Some(5));
     }
 
     #[test]
@@ -296,6 +369,12 @@ mod tests {
         let mut copy = save.clone();
         assert!(!copy.record(&campaign));
         assert_eq!(copy.slots[0], save.slots[0]);
+        // Hub progression flags scripts read ("village generic vars").
+        let view = copy.view();
+        for (i, v) in [(0, 1), (33, 1), (38, 1), (40, 1), (1, 0)] {
+            assert_eq!(view.get("village generic vars", i), Some(v));
+        }
+        assert_eq!(view.get("header - options sound vols", 3), Some(50));
         // One story star after chapter 1: 1% and 1 star, as the game wrote them.
         assert_eq!(save.stars_by_category(), Some((1, 0, 0, 0)));
         copy.update_header_summary();

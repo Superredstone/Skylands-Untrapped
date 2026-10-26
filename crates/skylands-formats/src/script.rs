@@ -209,6 +209,9 @@ pub struct ScriptSet {
     /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
     /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
     pub sets: HashMap<usize, Vec<String>>,
+    /// Name of every `OpDefineMacro` object, including stubs of macros defined in other
+    /// files (`global.bld` "System - Save - Get Save Param"), which no script lists.
+    pub macro_names: HashMap<usize, String>,
 }
 
 /// Ops whose operands `ScriptSet::opaque_operands` records.
@@ -615,6 +618,15 @@ impl ScriptSet {
                 (o.offset, names)
             })
             .collect();
+        let macro_names = objects
+            .iter()
+            .filter(|o| {
+                o.type_name
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("OpDefineMacro"))
+            })
+            .map(|o| (o.offset, r.cstr(o.offset + 0x08)))
+            .collect();
         let mut opaque_operands = HashMap::new();
         let scripts = objects
             .iter()
@@ -658,6 +670,7 @@ impl ScriptSet {
             export_base: file.external_types.len(),
             opaque_operands,
             sets,
+            macro_names,
         })
     }
 
@@ -740,7 +753,7 @@ impl ScriptSet {
             Operand::Expr(r) => format!("({})", self.rhs_str(r)),
         }
     }
-    fn rhs_str(&self, r: &Rhs) -> String {
+    pub(crate) fn rhs_str(&self, r: &Rhs) -> String {
         let mut s = self.operand_str(&r.a);
         if let Some(b) = &r.b {
             let op = ["+", "-", "*", "/"]
@@ -927,6 +940,11 @@ pub struct Vm<'a> {
     pub behavior: Option<usize>,
     /// What `OpSetReference` pointed each reference variable at.
     pub(crate) refs: HashMap<Vec<Ref>, RefTarget>,
+    /// Save data for "Get Save Param" calls; `None` leaves their `val` at its literal.
+    pub save: Option<std::sync::Arc<dyn SaveParams>>,
+    /// "Set Save Param" calls, in order: (save param, field index, value). Later reads in
+    /// the same run see them.
+    pub save_writes: Vec<(String, i32, i64)>,
 }
 
 /// Object a script reference points at, as far as the VM can tell.
@@ -941,6 +959,15 @@ pub enum RefTarget {
 
 /// Name hash of the engine's `null` reference.
 const NULL_HASH: u32 = 0x7707_4ba4;
+
+/// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
+/// (`param` = save param name, e.g. `"village generic vars"`). `None`: not in the save.
+pub trait SaveParams: Send + Sync + std::fmt::Debug {
+    fn get(&self, param: &str, index: i32) -> Option<i64>;
+}
+
+const GET_SAVE_PARAM: &str = "System - Save - Get Save Param";
+const SET_SAVE_PARAM: &str = "Set Save Param";
 
 /// Engine action requested by a script op.
 #[derive(Debug, Clone, PartialEq)]
@@ -1024,6 +1051,8 @@ impl<'a> Vm<'a> {
             rng: 0,
             behavior: None,
             refs: HashMap::new(),
+            save: None,
+            save_writes: Vec::new(),
         }
     }
 
@@ -1157,6 +1186,52 @@ impl<'a> Vm<'a> {
 
     /// Macro use at `at`: bind arguments, run the target, copy results into the call
     /// site's own parameter objects, then continue into the use's callback body.
+    /// `global.bld` "System - Save - Get Save Param" / "Set Save Param" (`val`, `field
+    /// index`, `save param` = `$648."<param>"`), with the call-site params already bound.
+    fn save_param_call(&mut self, get: bool, site: &[(usize, u16, Option<&Rhs>)]) {
+        let by_name = |n: &str| {
+            site.iter()
+                .find(|p| self.set.var_name(p.0) == n)
+                .map(|p| p.0)
+        };
+        let (Some(val), Some(index), Some(param)) = (
+            by_name("val"),
+            by_name("field index"),
+            by_name("save param"),
+        ) else {
+            return;
+        };
+        let Some(name) = self.set.opaque_operands.get(&param).and_then(|ops| {
+            ops.iter().find_map(|(_, o)| match o {
+                OpaqueOperand::Path { stack, path } if stack == "RHSReferenceStack" => {
+                    match path.last()? {
+                        Ref::Obj(o) => Some(self.set.var_name(*o).to_string()),
+                        Ref::Handle(_) => None,
+                    }
+                }
+                _ => None,
+            })
+        }) else {
+            return;
+        };
+        let index = self.read(&[Ref::Obj(index)]).as_f32() as i32;
+        if get {
+            let written = self
+                .save_writes
+                .iter()
+                .rev()
+                .find(|w| w.0 == name && w.1 == index)
+                .map(|w| w.2);
+            let v = written.or_else(|| self.save.as_ref()?.get(&name, index));
+            if let Some(v) = v {
+                self.write(&[Ref::Obj(val)], Value::Int(v as i32));
+            }
+        } else {
+            let v = self.read(&[Ref::Obj(val)]).as_f32() as i64;
+            self.save_writes.push((name, index, v));
+        }
+    }
+
     fn use_macro(&mut self, si: usize, at: usize, target: Option<usize>) -> Result<usize, VmError> {
         let (_, after) = self.params(si, at);
         let site = self.param_rhs(si, at);
@@ -1166,7 +1241,7 @@ impl<'a> Vm<'a> {
             if !self.unbound.contains(&what) {
                 self.unbound.push(what);
             }
-            for (var, _, rhs) in site {
+            for &(var, _, rhs) in &site {
                 match rhs {
                     Some(rhs) => {
                         let v = self.eval(rhs)?;
@@ -1178,6 +1253,10 @@ impl<'a> Vm<'a> {
                         self.refs.insert(vec![Ref::Obj(var)], RefTarget::Null);
                     }
                 }
+            }
+            let name = target.and_then(|t| self.set.macro_names.get(&t));
+            if let Some(name @ (GET_SAVE_PARAM | SET_SAVE_PARAM)) = name.map(String::as_str) {
+                self.save_param_call(name == GET_SAVE_PARAM, &site);
             }
             return Ok(after);
         };
@@ -1963,6 +2042,96 @@ mod tests {
             F(4.0)
         );
         assert!(vm.unbound.is_empty());
+    }
+
+    #[test]
+    fn vm_save_param_calls() {
+        #[derive(Debug)]
+        struct Slot;
+        impl SaveParams for Slot {
+            fn get(&self, param: &str, index: i32) -> Option<i64> {
+                (param == "village generic vars" && index == 33).then_some(1)
+            }
+        }
+        let (get, set_m, vars) = (0x900, 0x901, 0x400);
+        // One call site: use <target> (val, field index, save param = $648.vars), then
+        // copy val into `out`.
+        let call = |base: usize, target: usize, val: i32, index: i32, out: usize| {
+            vec![
+                ins(
+                    base,
+                    4,
+                    Op::UseMacro {
+                        target: Some(target),
+                    },
+                ),
+                ins(base + 1, 3, Op::Interface),
+                param(base + 2, 0, Some(lit(I(val)))),
+                param(base + 3, 0, Some(lit(I(index)))),
+                param(base + 4, 0, None),
+                ins(
+                    base + 5,
+                    0,
+                    set(
+                        out,
+                        Rhs {
+                            a: rd(base + 2),
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ]
+        };
+        let mut ops = vec![
+            ins(
+                1,
+                19,
+                Op::DefineMacro {
+                    name: "main".into(),
+                },
+            ),
+            ins(2, 0, Op::Interface),
+        ];
+        ops.extend(call(0x10, get, -1, 33, 0x500));
+        ops.extend(call(0x20, set_m, 7, 2, 0x501));
+        ops.extend(call(0x30, get, -1, 2, 0x502));
+        let mut names = vec![(vars, "village generic vars")];
+        for b in [0x10, 0x20, 0x30] {
+            names.extend([
+                (b + 2, "val"),
+                (b + 3, "field index"),
+                (b + 4, "save param"),
+            ]);
+        }
+        let mut s = script_set(ops, &names);
+        for b in [0x10, 0x20, 0x30] {
+            s.opaque_operands.insert(
+                b + 4,
+                vec![(
+                    0x30,
+                    OpaqueOperand::Path {
+                        stack: "RHSReferenceStack".into(),
+                        path: vec![Ref::Handle(0), Ref::Obj(vars)],
+                    },
+                )],
+            );
+        }
+        s.macro_names.insert(get, GET_SAVE_PARAM.into());
+        s.macro_names.insert(set_m, SET_SAVE_PARAM.into());
+
+        // Without save data `val` keeps its literal (-1).
+        let mut vm = Vm::new(&s, None);
+        vm.call("main", &[]).unwrap();
+        assert_eq!(vm.read(&[Ref::Obj(0x500)]), I(-1));
+        assert_eq!(vm.read(&[Ref::Obj(0x502)]), I(7), "own write is read back");
+
+        let mut vm = Vm::new(&s, None);
+        vm.save = Some(std::sync::Arc::new(Slot));
+        vm.call("main", &[]).unwrap();
+        assert_eq!(vm.read(&[Ref::Obj(0x500)]), I(1));
+        assert_eq!(vm.save_writes, [("village generic vars".to_string(), 2, 7)]);
     }
 
     #[test]

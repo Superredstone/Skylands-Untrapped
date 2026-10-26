@@ -1943,6 +1943,7 @@ pub fn actor_script_system(
     scripts: Option<Res<LevelScripts>>,
     dialogue: Option<Res<ActiveDialogue>>,
     campaign: Option<Res<CampaignProgress>>,
+    mut save: Option<ResMut<crate::save_game::SaveGame>>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -1965,7 +1966,16 @@ pub fn actor_script_system(
             "Levels_Completed".to_string(),
             skylands_formats::script::Value::Int(levels_completed),
         );
+        actor.state.save = save.as_mut().map(|s| s.view() as _);
         scripts.0.tick(actor.script, &mut actor.state, dt);
+        // "Set Save Param" lands in the save; it is written to disk on the next save.
+        if let Some(save) = save.as_mut() {
+            for (param, index, value) in actor.state.save_writes.drain(..) {
+                if !save.set_param(&param, index, value) {
+                    debug!("Script save write to unknown field {param}[{index}]");
+                }
+            }
+        }
         let st = &actor.state;
         if st.removed {
             commands.entity(entity).despawn_recursive();
@@ -3871,6 +3881,7 @@ mod tests {
             roots: Vec::new(),
             vars,
             sets: Default::default(),
+            macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
         let scripts = LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(
@@ -3958,6 +3969,7 @@ mod tests {
             roots: Vec::new(),
             vars: vars2,
             sets: Default::default(),
+            macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
         let scripts2 = LevelScripts(std::sync::Arc::new(skylands_formats::ScriptProgram::new(

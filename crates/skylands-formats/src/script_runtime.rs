@@ -92,6 +92,10 @@ pub struct ActorScriptState {
     refs: HashMap<Vec<Ref>, RefTarget>,
     /// The script hit an op the VM does not model; it no longer runs.
     pub error: Option<VmError>,
+    /// Save slot read by "Get Save Param" (set by the engine each tick).
+    pub save: Option<std::sync::Arc<dyn crate::script::SaveParams>>,
+    /// "Set Save Param" writes since the engine last drained them.
+    pub save_writes: Vec<(String, i32, i64)>,
 }
 
 impl ActorScriptState {
@@ -171,6 +175,7 @@ impl ScriptProgram {
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
         vm.refs = std::mem::take(&mut st.refs);
+        vm.save = st.save.clone();
         self.advance_sliders(&mut vm, &mut st.sliders, dt);
 
         let ops = &self.set.scripts[si].ops;
@@ -200,6 +205,7 @@ impl ScriptProgram {
         st.behavior = vm.behavior;
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
+        st.save_writes.append(&mut vm.save_writes);
         if let Err(e) = result {
             st.error = Some(e);
         }

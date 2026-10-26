@@ -35,7 +35,7 @@ pub use save::{
 };
 pub use script::{
     enemy_stats, hero_max_hp, hero_movement, EnemyStats, HeroMovement, LevelupTable, MinionTuning,
-    ScriptSet, Vm, VmError,
+    SaveParams, ScriptSet, Vm, VmError,
 };
 pub use script_runtime::{ActorScriptState, ScriptProgram};
 pub use sprite::{SpriteDef, SpriteLibrary};
