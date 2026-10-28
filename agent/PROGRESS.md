@@ -222,6 +222,17 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [x] Story gating of conversations (`Levels_Completed`, `OpSetBehavior`), `OpFindVariable` dynamic variable lookup across script op indices, which Flynn variant shows, visible (hash `0x54fa99a1`). Still unhandled: the `$9b61ad43` set handle (most ambient lines use the `vo_<name>_*` fallback), VO playback (`tfbSoundDataInfo`), yes/no questions, collision, Auric store / Persephone upgrade menus.
 - [x] Localization strings (EU en): level `ENGLISH.pak` pools (`text.rs`). Global/UI strings not wired yet.
 - [ ] Encounter arenas / waves (`Arena_Challenge_*`, `_ArenaMaster2.ai`, `BattleMaster.ai`, `Enemy_Setup_00x_Controller.ai`), after the VM.
+  - Layout: `level/Arena_Challenge_<arena>_<nnn>.bld` (4 challenges per arena: 300, 302, 303, 309, 311, 361) holds the scripts and
+    placements; `Arena_Mesh_<arena>` the geometry. `ArenaChallenge_<arena>_<nnn>` runs `ArenaScript_<arena>_<nnn>.ai`, a behavior
+    machine ("Intro IGC", "Warp In", "Start Arena", "Stage N - Begin", "Stage N - NN - Spawn"...) over `_ArenaMaster2.ai` /
+    `BattleMaster.ai` macros ("ArenaMaster - Begin Arena", "BattleMaster - Spawn Dropship" with transport paths and Left/Right
+    payload slots), `OpChangeMembership` sets ("active dropships") and `OpForEach`. Enemies are inactive `Enemy_S4_*` templates.
+  - [x] Script-only controllers (`MarkerKind::Controller`: active, scripted, no other kind, no level model) run as `ScriptController`
+    `ActorScript`s (also in the hub). Arena 300/000 after 2 s: challenge in "Start Arena", `Arena_Rules` "Check Players", camera
+    "init", nests "Nest Pattern", no VM errors (`test_arena_controllers_run_their_scripts`, ROM).
+  - [ ] Next: what "ArenaMaster - Begin Arena" waits on for `done`; sets (`OpChangeMembership`, `OpForEach`, membership checks);
+    `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
 - [ ] Loot rarity from `LootSystem.ai` "Check For Loot Value Based on Drop Rate" (needs `kRHSfuncRandom` + a seeded RNG).

@@ -418,6 +418,9 @@ pub enum MarkerKind {
     Enemy(EnemyClass),
     /// Talkable character (`NPC_<Name>.ai`, shop keepers).
     Npc,
+    /// Active actor whose only role is its script (`_ArenaMaster2`, `Arena_Rules`,
+    /// `Interior_Controller_HUB`): runs it, draws nothing.
+    Controller,
     Other,
 }
 
@@ -5465,6 +5468,10 @@ impl IgbModel {
                 let Some(kind) = actor
                     .kind()
                     .or_else(|| animated.then_some(MarkerKind::Prop))
+                    .or_else(|| {
+                        (actor.active && actor.script.is_some() && !actor.draws_level_model())
+                            .then_some(MarkerKind::Controller)
+                    })
                 else {
                     continue;
                 };

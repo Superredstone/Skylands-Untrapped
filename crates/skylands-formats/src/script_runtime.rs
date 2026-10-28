@@ -134,6 +134,11 @@ pub struct ActorScriptState {
 }
 
 impl ActorScriptState {
+    /// Op offset of the current `OpUserBehavior` (`ScriptProgram::behavior_name`).
+    pub fn behavior(&self) -> Option<usize> {
+        self.behavior
+    }
+
     pub fn get(&self, key: &[u32]) -> Option<f32> {
         self.engine.get(key).map(|v| v.as_f32())
     }
@@ -202,6 +207,19 @@ impl ScriptProgram {
     pub fn new(set: ScriptSet, global: Option<ScriptSet>) -> Self {
         let index = VmIndex::new(&set);
         Self { set, global, index }
+    }
+
+    /// Name of the `OpUserBehavior` at op offset `offset` in script `si`.
+    pub fn behavior_name(&self, si: usize, offset: usize) -> Option<&str> {
+        self.set
+            .scripts
+            .get(si)?
+            .ops
+            .iter()
+            .find_map(|i| match &i.op {
+                Op::Behavior { name } if i.offset == offset => Some(name.as_str()),
+                _ => None,
+            })
     }
 
     /// Script index by `.ai` path (`tfbScriptInfo._name`).

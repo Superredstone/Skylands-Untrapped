@@ -180,6 +180,10 @@ pub struct ActorScript {
     pub base: Transform,
 }
 
+/// Script-only level actor (`MarkerKind::Controller`): runs its `ActorScript`, nothing else.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScriptController;
+
 /// Opacity of a script-driven actor's model: its script's `my.tint.alpha` / 255.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct ActorTint {

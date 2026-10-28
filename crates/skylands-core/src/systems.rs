@@ -1725,6 +1725,29 @@ pub fn spawn_level_content(
                 ));
                 marker_id_counter += 1;
             }
+            // Script-only actors (arena and level controllers): a script runner with
+            // no model, collider or identity.
+            skylands_formats::igb::MarkerKind::Controller => {
+                let script = marker.script.as_deref().and_then(|name| {
+                    let program = scripts.get_or_insert_with(|| level_scripts(loader, &path));
+                    program.as_ref()?.0.find(name)
+                });
+                if let Some(si) = script {
+                    let base =
+                        Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform));
+                    commands.spawn((
+                        LevelEntity,
+                        ScriptController,
+                        ActorScript {
+                            script: si,
+                            marker_node: marker.node_index,
+                            state: placed_script_state(marker.tint),
+                            base,
+                        },
+                        base,
+                    ));
+                }
+            }
             skylands_formats::igb::MarkerKind::Prop => {
                 let script = marker
                     .script
@@ -4581,5 +4604,58 @@ mod tests {
         eprintln!("moved after 2 s: {moved}, errors: {errors}");
         assert!(moved >= 5, "{moved}");
         assert_eq!(errors, 0);
+    }
+
+    #[test]
+    fn test_arena_controllers_run_their_scripts() {
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("level/Arena_Challenge_300_000.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("permanent/global.bld")).unwrap();
+        loader
+            .mount(dir.join("level/Arena_Challenge_300_000.bld"))
+            .unwrap();
+        let mut app = build_test_app();
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        assert!(spawn_level_content(
+            &mut commands,
+            &loader,
+            "Arena_Challenge_300_000.bld",
+            None,
+            &CampaignProgress::default(),
+        ));
+        queue.apply(world);
+        for _ in 0..120 {
+            step_fixed(&mut app);
+        }
+        let world = app.world_mut();
+        let program = world.resource::<LevelScripts>().0.clone();
+        let mut q = world.query_filtered::<&ActorScript, With<ScriptController>>();
+        let controllers: Vec<_> = q
+            .iter(world)
+            .map(|a| {
+                let name = program.set.scripts[a.script]
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap();
+                let behavior = a
+                    .state
+                    .behavior()
+                    .and_then(|o| program.behavior_name(a.script, o));
+                (name, behavior, a.state.error.clone())
+            })
+            .collect();
+        eprintln!("{controllers:#?}");
+        // `_ArenaMaster2`, `Arena_Rules`, the camera, the nests... run without a model.
+        assert!(controllers.len() >= 5, "{controllers:?}");
+        assert!(controllers.iter().all(|(_, _, e)| e.is_none()));
+        // The challenge passed "Intro IGC" and "Warp In" and waits in "Start Arena".
+        assert!(controllers.contains(&("ArenaScript_300_000.ai", Some("Start Arena"), None)));
     }
 }
