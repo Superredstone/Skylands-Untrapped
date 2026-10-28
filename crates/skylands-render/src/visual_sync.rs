@@ -465,7 +465,7 @@ pub struct TemplateRig {
     pub skeleton: skylands_formats::Skeleton,
     /// Clips of the template's states, named uniquely.
     pub clips: Vec<skylands_formats::AnimationClip>,
-    /// State id -> clip name. No transitions: a request switches clips directly.
+    /// State id -> clip name, and the template's own transitions.
     pub graph: skylands_formats::AnimationGraph,
     pub parts: Vec<TemplateRigPart>,
 }
@@ -568,7 +568,7 @@ fn template_rig(
         clips,
         graph: skylands_formats::AnimationGraph {
             states,
-            transitions: Vec::new(),
+            transitions: actor.transitions.clone(),
         },
         parts,
     })
@@ -1192,6 +1192,9 @@ pub struct CharacterAnimator {
     pub playing: String,
     /// `tfbAnimationState` id of `playing`, when the graph knows it.
     pub state: Option<i32>,
+    /// State id last requested (`advance_state`); differs from `state` while its
+    /// transition chain plays.
+    pub requested: Option<i32>,
     pub blend: Option<ClipBlend>,
 }
 
@@ -1211,6 +1214,7 @@ impl CharacterAnimator {
             graph,
             playing: String::new(),
             state: None,
+            requested: None,
             blend: None,
         };
         animator.advance("idle", 0.0);
@@ -1247,6 +1251,7 @@ impl CharacterAnimator {
         }
         if self.current_clip != requested {
             self.current_clip = requested.to_string();
+            self.requested = None;
             let Some(target) = resolve_clip(&self.animations, requested).map(|c| c.name.clone())
             else {
                 self.playing.clear();
@@ -1290,7 +1295,9 @@ impl CharacterAnimator {
                 self.blend = None;
             }
         }
-        if self.state != Some(state_id) {
+        // A request is taken once; its transitions then play out (`idletowalk`, then
+        // the auto transition to `walk`) instead of being cut short by the next tick.
+        if self.requested != Some(state_id) && self.state != Some(state_id) {
             let clip = self
                 .graph
                 .clip_for_state(state_id)
@@ -1304,6 +1311,7 @@ impl CharacterAnimator {
                 let (target_clip, target_state, blend) =
                     transition.unwrap_or((clip, Some(state_id), 0.0));
                 self.current_clip = target_clip.clone();
+                self.requested = Some(state_id);
                 self.start(target_clip, target_state, blend);
                 return;
             }
@@ -1438,6 +1446,7 @@ pub fn character_animation_system(
                 anim.current_clip = pose.clip.clone();
                 anim.playing = clip.unwrap_or_default();
                 anim.state = None;
+                anim.requested = None;
                 anim.blend = None;
                 anim.elapsed = pose.time;
             }
@@ -2871,7 +2880,9 @@ mod tests {
 
     #[test]
     fn test_spawned_actor_rigged_template_animates_from_state() {
-        use skylands_formats::igb::{AnimationClip, AnimationGraph, Bone, Skeleton};
+        use skylands_formats::igb::{
+            AnimationClip, AnimationGraph, AnimationTransition, Bone, Skeleton,
+        };
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
@@ -2887,11 +2898,32 @@ mod tests {
                 skeleton: Skeleton::new(vec![Bone::default(), Bone::default()], 0),
                 clips: vec![
                     AnimationClip::new("idle", 1.0, vec![]),
+                    AnimationClip::new("opening", 0.5, vec![]),
                     AnimationClip::new("open", 1.0, vec![]),
                 ],
+                // Requesting 4 from 0 plays 3 first, then auto-advances to 4.
                 graph: AnimationGraph {
-                    states: vec![(0, "idle".into()), (4, "open".into())],
-                    transitions: vec![],
+                    states: vec![
+                        (0, "idle".into()),
+                        (3, "opening".into()),
+                        (4, "open".into()),
+                    ],
+                    transitions: vec![
+                        AnimationTransition {
+                            name: "open".into(),
+                            request: 4,
+                            from: vec![0],
+                            to: 3,
+                            blend: 0.0,
+                        },
+                        AnimationTransition {
+                            name: "opened".into(),
+                            request: skylands_formats::igb::AUTO_TRANSITION,
+                            from: vec![3],
+                            to: 4,
+                            blend: 0.0,
+                        },
+                    ],
                 },
                 parts: vec![part(RigAttach::Skinned), part(RigAttach::Joint(1))],
             },
@@ -2925,8 +2957,15 @@ mod tests {
             .get::<CharacterAnimator>(gate)
             .expect("animator");
         assert_eq!(anim.joints.len(), 2);
-        // `OpStartSequence` state 4 plays its clip.
+        // `OpStartSequence` state 4 goes through the template's transition.
+        assert_eq!((anim.playing.as_str(), anim.state), ("opening", Some(3)));
+        // The same request again keeps the chain; the end of `opening` moves on.
+        let mut anim = app.world_mut().get_mut::<CharacterAnimator>(gate).unwrap();
+        anim.advance_state(4, 0.1);
+        assert_eq!(anim.state, Some(3));
+        anim.advance_state(4, 0.5);
         assert_eq!((anim.playing.as_str(), anim.state), ("open", Some(4)));
+        let anim = app.world().get::<CharacterAnimator>(gate).unwrap();
         let children = app.world().get::<Children>(gate).unwrap();
         let skinned = children
             .iter()
@@ -3152,6 +3191,7 @@ mod tests {
                     playing: "idle".to_string(),
                     current_clip: "idle".to_string(),
                     state: Some(0),
+                    requested: None,
                     elapsed: 0.0,
                     skeleton: Skeleton::new(vec![Bone::default()], 0),
                     animations: vec![

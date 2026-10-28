@@ -1961,6 +1961,8 @@ pub struct ActorModel {
     pub attach_nodes: Vec<AttachNode>,
     /// State ID to clip index map from `tfbAnimationStateData`.
     pub animation_states: std::collections::HashMap<i32, usize>,
+    /// `tfbAnimationStateData._transitions` of this model.
+    pub transitions: Vec<AnimationTransition>,
 }
 
 /// `BoneAttachInfo`: `+0x08` node name, `_boneName` `+0x1c`.
@@ -3650,6 +3652,7 @@ impl IgbModel {
     /// (`+0x60` `tfbPhysicsCombinerLink` `+0x0c` -> `igSkeleton2`) and attach nodes
     /// (`+0x28` `BoneAttachInfoList`). Magic Moment: `MMRig` (camera, Skylander, name...
     /// nodes), `MM_dualEndedTunnelTube`, `MM_fastStars`, element backgrounds.
+    #[allow(clippy::too_many_arguments)]
     fn decode_actor_models(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
@@ -3658,6 +3661,7 @@ impl IgbModel {
         mesh_by_geo: &std::collections::HashMap<usize, usize>,
         skeleton_by_offset: &std::collections::HashMap<usize, (usize, Vec<u32>)>,
         animations: &[AnimationClip],
+        transitions: &[(usize, AnimationTransition)],
     ) -> Vec<ActorModel> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
@@ -3740,6 +3744,17 @@ impl IgbModel {
                     })
                     .unzip();
                 let mut animation_states = std::collections::HashMap::new();
+                // `tfbAnimationStateData._transitions` (`+0x10`), in list order.
+                let state_transitions = ptr(model + 0x20)
+                    .and_then(|d| ptr(d + 0x10))
+                    .map(list_items)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|o| {
+                        let (_, t) = transitions.iter().find(|(at, _)| *at == o)?;
+                        Some(t.clone())
+                    })
+                    .collect();
                 if let Some(state_data) = ptr(model + 0x20) {
                     if let Some(list) = ptr(state_data + 0x0c) {
                         for state in list_items(list) {
@@ -3775,6 +3790,7 @@ impl IgbModel {
                     mesh_bones,
                     attach_nodes,
                     animation_states,
+                    transitions: state_transitions,
                 })
             })
             .collect()
@@ -3852,12 +3868,13 @@ impl IgbModel {
             .and_then(|c| self.animations.get(c))
     }
 
+    /// Every `tfbAnimationTransition*` with its object offset, in file order.
     fn decode_animation_transitions(
         data: &[u8],
         sections: &[IgzChunkDescriptor],
         objects: &[IgzObject],
         endian: IgbEndian,
-    ) -> Vec<AnimationTransition> {
+    ) -> Vec<(usize, AnimationTransition)> {
         let rd = |o: usize| -> Option<u32> {
             data.get(o..o + 4).map(|_| Self::read_u32(data, o, endian))
         };
@@ -3900,13 +3917,14 @@ impl IgbModel {
             .filter_map(|t| {
                 let request = rd(t.offset + 0x10)? as i32;
                 let to = *state_ids(ptr(t.offset + 0x24)).first()?;
-                Some(AnimationTransition {
+                let transition = AnimationTransition {
                     name: cstr(t.offset + 0x08),
                     request,
                     from: state_ids(ptr(t.offset + 0x20)),
                     to,
                     blend: f32::from_bits(rd(t.offset + 0x1c).unwrap_or(0)),
-                })
+                };
+                Some((t.offset, transition))
             })
             .collect()
     }
@@ -5906,6 +5924,7 @@ impl IgbModel {
                     &mesh_by_geo,
                     &skeleton_by_offset,
                     &animations,
+                    &animation_transitions,
                 ),
                 Self::decode_animation_states(data, sections, &list.objects, endian, &animations),
             ),
@@ -5965,7 +5984,7 @@ impl IgbModel {
             marker_scripts,
             actor_models,
             animation_states,
-            animation_transitions,
+            animation_transitions: animation_transitions.into_iter().map(|(_, t)| t).collect(),
             script_colors,
         })
     }
@@ -8672,6 +8691,12 @@ mod tests {
             .animation_states
             .values()
             .all(|&c| model.animations[c].skeleton.is_none_or(|s| s == skel)));
+        // Its own transitions, between its own states.
+        assert!(!tessa.transitions.is_empty());
+        assert!(tessa
+            .transitions
+            .iter()
+            .all(|t| tessa.animation_states.contains_key(&t.to)));
 
         // Model-space prop geometry used to sit at the origin (13 placed instances).
         let placed = instances
