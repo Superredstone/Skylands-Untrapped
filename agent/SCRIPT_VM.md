@@ -86,6 +86,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   `tint.alpha`, `distance`, `location`, `movement.ground max speed`, `collision volume.*`.
 - `OpSlideValue`: `_LHS` +0x1c, `_RHS` +0x20, `_secondsRHS` +0x24, `_easeOutRHS` +0x28, `_easeInRHS` +0x2c.
   Its `br` block configures the slider (`@slide.looping`, `@slide.playback mode` 1 = ping-pong).
+  Execute `0x8008f6ac` fills a `Slider` (0x70, vtable `0x80506e44`) and appends it to the list at
+  `0x806db9ec`: elapsed +0x5c = 0, seconds +0x60, from +0x3c, to +0x48/+0x50, ease out +0x64 and
+  ease in +0x68 = `0.02 * value` (SDA2 `r2` = `0x806f5a40`, `r2-0x41f4` = 0.02; 0 when unset).
+  Tick `0x8008ecb8` (called from `0x8008c520` / `0x8008f584`; uses Gekko paired singles, so stock
+  Ghidra cannot decompile it): elapsed += dt (scaled by +0x20 percent, not modelled); mode +0x1c 0:
+  looping wraps by `fmod(elapsed, seconds)`, else ends at `to` once `elapsed >= seconds`; mode 1
+  (ping-pong): span `2 * seconds`, ends at `from`. `u = |elapsed / seconds|`; `u == 1` writes `to`;
+  `u > 1` -> `2 - u` (same ends, curve replayed backwards). Value = `from + (to - from) * E(u)` with
+  `E` = `0x8008ec38`: `a` = ease out, `b` = ease in; `a + b == 0` linear; `a + b > 1` scales both to sum 1;
+  `v = 1 / (2 - a - b)`; `u < a`: `v u^2 / a`; `u < 1 - b`: `v (2u - a)`; else `1 - v (1-u)^2 / b`
+  (trapezoid speed: ease out shapes the start, ease in the end). `script_runtime::ease_curve`.
 - `OpDisplace`: `_NP` +0x1c (target), `_combineMode` +0x20, `_lenNP` +0x24, `_headNP` +0x28, `_pitchNP` +0x2c.
   `OpRemove`: `_NP` +0x1c.
 - Other ops with a `br` block (find variable, spawn, for each, ...) skip their block in the VM.

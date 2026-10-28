@@ -122,6 +122,9 @@ pub enum Op {
         lhs: Vec<Ref>,
         target: Rhs,
         seconds: Option<Rhs>,
+        /// `_easeOutRHS` / `_easeInRHS`: shape of the start / end (`ease_curve`).
+        ease_out: Option<Rhs>,
+        ease_in: Option<Rhs>,
     },
     /// `OpDisplace`: move the object at `target` by `len` along heading/pitch (degrees).
     Displace {
@@ -503,6 +506,8 @@ impl Reader<'_> {
                     lhs: self.lhs(o + 0x1c),
                     target,
                     seconds: self.rhs_at(o + 0x24),
+                    ease_out: self.rhs_at(o + 0x28),
+                    ease_in: self.rhs_at(o + 0x2c),
                 },
                 None => Op::Other(t.into()),
             },
@@ -869,6 +874,7 @@ impl ScriptSet {
                     lhs,
                     target,
                     seconds,
+                    ..
                 } => format!(
                     "slide {} -> {} over {}",
                     self.path_str(lhs),
@@ -1050,13 +1056,16 @@ const SET_SAVE_PARAM: &str = "Set Save Param";
 /// Engine action requested by a script op.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// `OpSlideValue` at op `op` started: `lhs` goes `from` -> `to` over `seconds`.
+    /// `OpSlideValue` at op `op` started: `lhs` goes `from` -> `to` over `seconds`,
+    /// shaped by `ease_out` / `ease_in` (fractions of the slide, `ease_curve`).
     Slide {
         op: usize,
         lhs: Vec<Ref>,
         from: f32,
         to: f32,
         seconds: f32,
+        ease_out: f32,
+        ease_in: f32,
     },
     /// `OpDisplace` of the engine object `target` (name-hash path).
     Displace {
@@ -1495,17 +1504,26 @@ impl<'a> Vm<'a> {
                 // Event blocks other than the one being run.
                 Op::StartUp | Op::ShutDown => pc += skip,
                 // The block after a slide configures its slider (`looping`, ...).
+                // `0x8008f6ac`: eases are stored as `0.02 * value` (slider +0x64 / +0x68),
+                // 0 when they do not evaluate.
                 Op::SlideValue {
                     lhs,
                     target,
                     seconds,
+                    ease_out,
+                    ease_in,
                 } => {
                     let from = self.read(lhs).as_f32();
                     let to = self.eval(target)?.as_f32();
-                    let seconds = match seconds {
-                        Some(r) => self.eval(r)?.as_f32(),
-                        None => 0.0,
+                    let mut opt = |r: &Option<Rhs>| -> Result<f32, VmError> {
+                        Ok(match r {
+                            Some(r) => self.eval(r)?.as_f32(),
+                            None => 0.0,
+                        })
                     };
+                    let seconds = opt(seconds)?;
+                    let ease_out = 0.02 * opt(ease_out)?;
+                    let ease_in = 0.02 * opt(ease_in)?;
                     if let Ok(lhs) = self.canon(lhs) {
                         self.effects.push(Effect::Slide {
                             op: ins.offset,
@@ -1513,6 +1531,8 @@ impl<'a> Vm<'a> {
                             from,
                             to,
                             seconds,
+                            ease_out,
+                            ease_in,
                         });
                     }
                 }

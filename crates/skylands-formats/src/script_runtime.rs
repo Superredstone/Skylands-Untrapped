@@ -64,7 +64,32 @@ struct Slider {
     from: f32,
     to: f32,
     seconds: f32,
+    ease_out: f32,
+    ease_in: f32,
     t: f32,
+}
+
+/// Slider progress curve (`0x8008ec38`): accelerate over the first `a` of the slide,
+/// constant speed, decelerate over the last `b`; linear when both are 0. `a + b`
+/// over 1 is scaled down to 1.
+fn ease_curve(u: f32, a: f32, b: f32) -> f32 {
+    let sum = a + b;
+    if sum == 0.0 {
+        return u;
+    }
+    let (a, b) = if sum > 1.0 {
+        (a / sum, b / sum)
+    } else {
+        (a, b)
+    };
+    let v = 1.0 / (2.0 - a - b);
+    if u < a {
+        v * u * u / a
+    } else if u < 1.0 - b {
+        v * (2.0 * u - a)
+    } else {
+        1.0 - v * (1.0 - u) * (1.0 - u) / b
+    }
 }
 
 /// One actor's script state. The engine seeds and reads `engine`
@@ -256,6 +281,8 @@ impl ScriptProgram {
                     from,
                     to,
                     seconds,
+                    ease_out,
+                    ease_in,
                 } => {
                     st.sliders.retain(|s| s.op != op);
                     st.sliders.push(Slider {
@@ -264,6 +291,8 @@ impl ScriptProgram {
                         from,
                         to,
                         seconds,
+                        ease_out,
+                        ease_in,
                         t: 0.0,
                     });
                 }
@@ -303,23 +332,38 @@ impl ScriptProgram {
             .unwrap_or(0)
     }
 
-    /// Step every slider by `dt` and write its value. `looping` restarts it;
-    /// `playback mode` 1 ping-pongs. Ease in/out is not modelled (linear).
+    /// Step every slider by `dt` and write its value (`0x8008ecb8`). `playback mode` 1
+    /// ping-pongs: out and back over `2 * seconds`, ending at `from`. `looping` wraps
+    /// the time instead of ending. The progress follows `ease_curve`.
     fn advance_sliders(&self, vm: &mut Vm, sliders: &mut Vec<Slider>, dt: f32) {
         sliders.retain_mut(|s| {
             s.t += dt;
-            let done = s.seconds <= 0.0 || s.t >= s.seconds;
             let looping = self.slider_prop(&vm.vars, s.op, field::LOOPING) != 0;
-            let value = if done && !looping {
-                s.to
+            let ping_pong = self.slider_prop(&vm.vars, s.op, field::PLAYBACK_MODE) == 1;
+            let span = if ping_pong {
+                2.0 * s.seconds
             } else {
-                if done {
-                    s.t -= s.seconds;
-                    if self.slider_prop(&vm.vars, s.op, field::PLAYBACK_MODE) == 1 {
-                        std::mem::swap(&mut s.from, &mut s.to);
-                    }
+                s.seconds
+            };
+            let done = s.seconds <= 0.0 || (!looping && s.t >= span);
+            if looping && !done {
+                s.t = s.t.rem_euclid(span);
+            }
+            let value = if done {
+                if ping_pong && s.seconds > 0.0 {
+                    s.from
+                } else {
+                    s.to
                 }
-                s.from + (s.to - s.from) * (s.t / s.seconds)
+            } else {
+                // The far end is written as is (the curve is 0 / 0 there without ease in).
+                let u = s.t / s.seconds;
+                if u == 1.0 {
+                    s.to
+                } else {
+                    let u = if u > 1.0 { 2.0 - u } else { u };
+                    s.from + (s.to - s.from) * ease_curve(u, s.ease_out, s.ease_in)
+                }
             };
             match self.set.engine_key(&s.lhs) {
                 Some(k) => vm.engine.insert(k, Value::Float(value)),
@@ -583,6 +627,8 @@ mod tests {
                         lhs: local.clone(),
                         target: lit(6.0),
                         seconds: Some(lit(2.0)),
+                        ease_out: None,
+                        ease_in: None,
                     },
                 ),
                 ins(
@@ -619,6 +665,92 @@ mod tests {
             offsets.push(st.get(&[MY, VERTICAL_OFFSET]).unwrap());
         }
         assert_eq!(offsets, [0.0, 1.5, 3.0, 4.5, 6.0, 4.5, 3.0]);
+    }
+
+    #[test]
+    fn ease_curve_matches_slider_profile() {
+        assert_eq!(ease_curve(0.3, 0.0, 0.0), 0.3);
+        // Ease 50 / 50 (0.02 * 50 = 1 each) is scaled to 0.5 / 0.5: s-curve.
+        assert_eq!(ease_curve(0.25, 1.0, 1.0), 0.125);
+        assert_eq!(ease_curve(0.5, 1.0, 1.0), 0.5);
+        assert_eq!(ease_curve(0.75, 1.0, 1.0), 0.875);
+        // Continuous at both joins, and 0 -> 1.
+        let (a, b) = (0.2, 0.4);
+        for x in [a, 1.0 - b] {
+            let d = ease_curve(x - 1e-4, a, b) - ease_curve(x + 1e-4, a, b);
+            assert!(d.abs() < 1e-3, "{x}: {d}");
+        }
+        assert_eq!(ease_curve(0.0, a, b), 0.0);
+        assert!((ease_curve(1.0, a, b) - 1.0).abs() < 1e-6);
+    }
+
+    /// Slide `local` 0 -> 8 over 2 s with `mode` and eases, copied to `vertical offset`;
+    /// offsets after each 0.5 s tick.
+    fn slide_offsets(mode: f32, ease_out: f32, ease_in: f32, ticks: usize) -> Vec<f32> {
+        let local = vec![Ref::Obj(LOCAL)];
+        let p = program(
+            vec![
+                ins(
+                    SLIDE,
+                    1,
+                    Op::SlideValue {
+                        lhs: local.clone(),
+                        target: lit(8.0),
+                        seconds: Some(lit(2.0)),
+                        ease_out: Some(lit(ease_out)),
+                        ease_in: Some(lit(ease_in)),
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(SLIDE), h(PLAYBACK_MODE)],
+                        rhs: lit(mode),
+                    },
+                ),
+            ],
+            vec![ins(
+                13,
+                0,
+                Op::SetValue {
+                    lhs: vec![h(MY), h(VERTICAL_OFFSET)],
+                    rhs: rd(local),
+                },
+            )],
+        );
+        let mut st = ActorScriptState::default();
+        (0..ticks)
+            .map(|_| {
+                p.tick(0, &mut st, 0.5);
+                st.get(&[MY, VERTICAL_OFFSET]).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ping_pong_slide_goes_out_and_back_once() {
+        assert_eq!(
+            slide_offsets(1.0, 0.0, 0.0, 7),
+            [0.0, 2.0, 4.0, 6.0, 8.0, 6.0, 4.0]
+        );
+        // Not looping: it ends back at the start after 2 * seconds.
+        assert_eq!(slide_offsets(1.0, 0.0, 0.0, 10)[8..], [0.0, 0.0]);
+        assert_eq!(slide_offsets(0.0, 0.0, 0.0, 6)[4..], [8.0, 8.0]);
+    }
+
+    #[test]
+    fn eased_ping_pong_mirrors_the_way_out() {
+        // Ease out 25 (start, 0.5 of the slide), no ease in.
+        let o = slide_offsets(1.0, 25.0, 0.0, 8);
+        // u = 0.25: v = 1 / 1.5, 8 * v * 0.0625 / 0.5.
+        assert!((o[1] - 8.0 / 1.5 * 0.125).abs() < 1e-5, "{o:?}");
+        assert_eq!(o[4], 8.0);
+        // The way back replays the same curve backwards (not a swapped slide).
+        assert!(
+            (o[5] - o[3]).abs() < 1e-5 && (o[7] - o[1]).abs() < 1e-5,
+            "{o:?}"
+        );
     }
 
     #[test]
