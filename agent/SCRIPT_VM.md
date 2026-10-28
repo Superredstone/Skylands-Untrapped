@@ -115,7 +115,9 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   `SpawnedActor` with that parent and serial: scripted clones `apply` them to their state
   (`Set`, `Slide` included), script-less ones take only `tint.alpha` and `remove`. A slide on the
   clone inside its setup block (`slide @spawn.tint.alpha -> 255`) is a setup effect, run by the
-  clone. A slide's `from` through a reference is the spawner's local copy, not the clone's
+  clone, and so are writes through a reference to the clone whose block is still running
+  (`TransitCrystal.ai`: `"my Prop" = @spawn; "my Prop".tint.alpha = 200` seeds it).
+  A slide's `from` through a reference is the spawner's local copy, not the clone's
   current value. Not done: other actors than the script's own clones (`"tr data ref"."glow"`,
   placed props, macro outputs: `RefTarget::Unknown`), whole-colour `tint` slides
   (`slide my.tint -> "tint normal"`, an `Other` value), tint RGB, sliders on script-less clones.

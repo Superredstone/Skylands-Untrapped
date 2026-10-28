@@ -1245,7 +1245,14 @@ impl<'a> Vm<'a> {
         if let Some((i, k)) = self.clone_key(&p) {
             return Some(Target::Clone(i, k));
         }
-        self.spawned_key(&p).map(|(s, k)| Target::Spawned(s, k))
+        let (serial, k) = self.spawned_key(&p)?;
+        // A reference to the clone whose setup block is still running means that clone.
+        Some(
+            match self.spawning.iter().rposition(|s| s.serial == serial) {
+                Some(i) => Target::Clone(i, k),
+                None => Target::Spawned(serial, k),
+            },
+        )
     }
 
     fn emit(&mut self, t: Target, effect: impl FnOnce(Vec<u32>) -> Effect) {
@@ -1888,16 +1895,17 @@ impl<'a> Vm<'a> {
 
     fn write(&mut self, path: &[Ref], v: Value) {
         if let Ok(p) = self.canon(path) {
-            if let Some((i, k)) = self.clone_key(&p) {
-                self.spawning[i].seed.insert(k, v);
-                return;
-            }
-            // Kept here too, so the script reads back what it wrote.
-            if let Some((serial, key)) = self.spawned_key(&p) {
-                self.effects.push(Effect::ForClone {
+            match self.target(&p) {
+                Some(Target::Clone(i, k)) => {
+                    self.spawning[i].seed.insert(k, v);
+                    return;
+                }
+                // Kept here too, so the script reads back what it wrote.
+                Some(Target::Spawned(serial, key)) => self.effects.push(Effect::ForClone {
                     serial,
                     effect: Box::new(Effect::Set { key, value: v }),
-                });
+                }),
+                _ => {}
             }
             match self.set.engine_key(&p) {
                 Some(k) => {

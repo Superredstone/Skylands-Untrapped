@@ -430,7 +430,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 11] = [
+    const NAMES: [u32; 13] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -442,6 +442,8 @@ mod tests {
         TILT,
         TINT,
         ALPHA,
+        SCALE,
+        UNIFORM,
     ];
     fn h(id: u32) -> Ref {
         Ref::Handle(NAMES.iter().position(|&n| n == id).unwrap() as u32)
@@ -665,6 +667,64 @@ mod tests {
         }
         assert_eq!(clone_st.get(&[MY, TINT, ALPHA]), Some(128.0));
         assert_eq!(clone_st.sliders.len(), 1);
+    }
+
+    #[test]
+    fn reference_to_clone_in_its_setup_block_seeds_it() {
+        // `TransitCrystal.ai`: `spawn "TS_Balloon" { "my Prop" = @spawn;
+        // "my Prop".scale.uniform = 10; "my Prop".tint.alpha = 200 }`.
+        let prop = |rest: &[Ref]| [Ref::Obj(LOCAL)].iter().chain(rest).copied().collect();
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    3,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![h(MY)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: prop(&[]),
+                        rhs: vec![Ref::Obj(SPAWN)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::SetValue {
+                        lhs: prop(&[h(SCALE), h(UNIFORM)]),
+                        rhs: lit(10.0),
+                    },
+                ),
+                ins(
+                    13,
+                    0,
+                    Op::SetValue {
+                        lhs: prop(&[h(TINT), h(ALPHA)]),
+                        rhs: lit(200.0),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        let Effect::Spawn { seed, .. } = &st.spawns[0] else {
+            panic!()
+        };
+        assert_eq!(
+            seed.get(&vec![MY, SCALE, UNIFORM]),
+            Some(&Value::Float(10.0))
+        );
+        assert_eq!(seed.get(&vec![MY, TINT, ALPHA]), Some(&Value::Float(200.0)));
+        assert!(st.clone_effects.is_empty());
     }
 
     #[test]
