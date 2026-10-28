@@ -343,12 +343,27 @@ fn rigid_parts(
     model_parts(
         model,
         mesh_indices,
-        loader,
-        bld_name,
+        &model_textures(model, mesh_indices, loader, bld_name),
         false,
         meshes,
         materials,
         images,
+    )
+}
+
+/// Decoded textures of `mesh_indices`, by image index. One read of the model file:
+/// each read decompresses its archive.
+fn model_textures(
+    model: &skylands_formats::igb::IgbModel,
+    mesh_indices: &[usize],
+    loader: &skylands_formats::AssetLoader,
+    bld_name: &str,
+) -> std::collections::HashMap<usize, (u32, u32, Vec<u8>)> {
+    loader.load_images_rgba(
+        bld_name,
+        mesh_indices
+            .iter()
+            .filter_map(|&i| model.meshes.get(i)?.image_index),
     )
 }
 
@@ -357,8 +372,7 @@ fn rigid_parts(
 fn model_parts(
     model: &skylands_formats::igb::IgbModel,
     mesh_indices: &[usize],
-    loader: &skylands_formats::AssetLoader,
-    bld_name: &str,
+    textures: &std::collections::HashMap<usize, (u32, u32, Vec<u8>)>,
     skinned: bool,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -374,18 +388,18 @@ fn model_parts(
                 mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
             }
             let mut alpha_mode = AlphaMode::Opaque;
-            let texture = m
-                .image_index
-                .and_then(|i| loader.load_image_rgba(bld_name, i).ok())
-                .map(|(w, h, rgba)| {
-                    alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
-                    images.add(crate::texture_conversion::rgba8_to_model_texture(
-                        w,
-                        h,
-                        rgba,
-                        m.texture_wrap,
-                    ))
-                });
+            let texture =
+                m.image_index
+                    .and_then(|i| textures.get(&i).cloned())
+                    .map(|(w, h, rgba)| {
+                        alpha_mode = crate::texture_conversion::alpha_mode_for_rgba(&rgba);
+                        images.add(crate::texture_conversion::rgba8_to_model_texture(
+                            w,
+                            h,
+                            rgba,
+                            m.texture_wrap,
+                        ))
+                    });
             let color = match (&texture, m.base_color) {
                 (Some(_), _) => Color::WHITE,
                 (None, Some(c)) => Color::srgb(c[0], c[1], c[2]),
@@ -493,8 +507,7 @@ pub enum RigAttach {
 fn template_rig(
     model: &skylands_formats::IgbModel,
     actor: &skylands_formats::igb::ActorModel,
-    loader: &skylands_formats::AssetLoader,
-    path: &str,
+    textures: &std::collections::HashMap<usize, (u32, u32, Vec<u8>)>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -546,16 +559,9 @@ fn template_rig(
             _ => RigAttach::Static,
         };
         let skinned = attach == RigAttach::Skinned;
-        for (mesh, material) in model_parts(
-            model,
-            &[m],
-            loader,
-            path,
-            skinned,
-            meshes,
-            materials,
-            images,
-        ) {
+        for (mesh, material) in
+            model_parts(model, &[m], textures, skinned, meshes, materials, images)
+        {
             parts.push(TemplateRigPart {
                 mesh,
                 material,
@@ -670,12 +676,24 @@ pub fn spawn_level_render_mesh(
             }
         }
     }
+    let rigged: Vec<_> = model
+        .actor_models
+        .iter()
+        .filter(|a| model.template_geometries.contains_key(&a.offset))
+        .collect();
+    // One read of the level file (each read decompresses its archive).
     let level_textures = loader.load_images_rgba(
         &path,
         material_groups
             .keys()
             .filter_map(|(_, _, k)| k.image)
-            .chain(template_groups.keys().filter_map(|(_, k)| k.image)),
+            .chain(template_groups.keys().filter_map(|(_, k)| k.image))
+            .chain(
+                rigged
+                    .iter()
+                    .flat_map(|a| &a.meshes)
+                    .filter_map(|&m| model.meshes.get(m)?.image_index),
+            ),
     );
     // Parts sharing an image (sky and world, or several tints) share one `Image`.
     let mut texture_handles = HashMap::new();
@@ -799,12 +817,10 @@ pub fn spawn_level_render_mesh(
         }
     }
     commands.insert_resource(TemplateMeshes(template_meshes));
-    let rigs = model
-        .actor_models
-        .iter()
-        .filter(|a| model.template_geometries.contains_key(&a.offset))
+    let rigs = rigged
+        .into_iter()
         .filter_map(|a| {
-            let rig = template_rig(&model, a, loader, &path, meshes, materials, images)?;
+            let rig = template_rig(&model, a, &level_textures, meshes, materials, images)?;
             Some((a.offset, rig))
         })
         .collect();
