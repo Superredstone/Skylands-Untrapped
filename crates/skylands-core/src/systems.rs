@@ -1766,17 +1766,15 @@ pub fn spawn_level_content(
                     prop.insert(LevelDrawnModel);
                 }
                 if let Some((si, _)) = script {
-                    let mut state = skylands_formats::ActorScriptState::default();
-                    use skylands_formats::script_runtime::field;
-                    state.set(&[field::MY, field::SCALE, field::UNIFORM], 100.0);
                     prop.insert((
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state,
+                            state: placed_script_state(marker.tint),
                             base,
                         },
                         base,
+                        ActorTint::default(),
                     ));
                 }
                 marker_id_counter += 1;
@@ -1861,17 +1859,15 @@ pub fn spawn_level_content(
                     npc.insert(LevelDrawnModel);
                 }
                 if let Some((si, _)) = script {
-                    let mut state = skylands_formats::ActorScriptState::default();
-                    use skylands_formats::script_runtime::field;
-                    state.set(&[field::MY, field::SCALE, field::UNIFORM], 100.0);
                     npc.insert((
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state,
+                            state: placed_script_state(marker.tint),
                             base,
                         },
                         base,
+                        ActorTint::default(),
                     ));
                 }
                 marker_id_counter += 1;
@@ -1951,6 +1947,7 @@ pub fn actor_script_system(
         &mut Transform,
         Option<&mut ActorAnimation>,
         Option<&Npc>,
+        Option<&mut ActorTint>,
     )>,
 ) {
     use skylands_formats::script_runtime::field::*;
@@ -1961,7 +1958,7 @@ pub fn actor_script_system(
         .as_ref()
         .map(|c| c.completed_chapters.len() as i32)
         .unwrap_or(0);
-    for (entity, mut actor, mut transform, mut anim, npc) in &mut actors {
+    for (entity, mut actor, mut transform, mut anim, npc, tint) in &mut actors {
         let actor = &mut *actor;
         actor.state.globals.insert(
             "Levels_Completed".to_string(),
@@ -1989,6 +1986,13 @@ pub fn actor_script_system(
         transform.translation = actor.base.translation + lift + Vec3::from(st.displacement);
         transform.rotation = actor.base.rotation * turn;
         transform.scale = actor.base.scale * scale;
+        if let Some(mut tint) = tint {
+            let alpha = (st.get(&[MY, TINT, ALPHA]).unwrap_or(255.0) / 255.0).clamp(0.0, 1.0);
+            // Only on change, so the renderer can react to `Changed<ActorTint>`.
+            if tint.alpha != alpha {
+                tint.alpha = alpha;
+            }
+        }
         // Clones are made before a removal in the same tick takes effect.
         for spawn in spawns {
             spawn_script_clone(&mut commands, &scripts.0, entity, &transform, spawn);
@@ -2010,6 +2014,16 @@ pub fn actor_script_system(
             }
         }
     }
+}
+
+/// Engine state a placed actor's script starts with: `scale.uniform` 100 and
+/// `tint.alpha` from its `Placement._tint`.
+fn placed_script_state(tint: Option<[u8; 4]>) -> skylands_formats::ActorScriptState {
+    use skylands_formats::script_runtime::field::*;
+    let mut state = skylands_formats::ActorScriptState::default();
+    state.set(&[MY, SCALE, UNIFORM], 100.0);
+    state.set(&[MY, TINT, ALPHA], tint.map_or(255.0, |t| t[3] as f32));
+    state
 }
 
 /// Start an `OpSpawn` clone (`0x8007a158`): it takes the spawner's current transform
@@ -2071,12 +2085,19 @@ fn spawn_script_clone(
         if state.get(&[MY, SCALE, UNIFORM]).is_none() {
             state.set(&[MY, SCALE, UNIFORM], 100.0);
         }
-        clone.insert(ActorScript {
-            script: si,
-            marker_node: usize::MAX,
-            state,
-            base,
-        });
+        // The clone copies the template's `_tint`; the setup block may have set alpha.
+        if state.get(&[MY, TINT, ALPHA]).is_none() {
+            state.set(&[MY, TINT, ALPHA], template.tint[3] as f32);
+        }
+        clone.insert((
+            ActorScript {
+                script: si,
+                marker_node: usize::MAX,
+                state,
+                base,
+            },
+            ActorTint::default(),
+        ));
     } else {
         let lift = Vec3::Y * state.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
         clone.insert(Transform {
@@ -3808,7 +3829,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, op)| ins(10 + i, 0, op)),
         );
-        let ids = vec![MY, ORIENTATION, RELATIVE_FACING, SCRIPT_TIMER];
+        let ids = vec![MY, ORIENTATION, RELATIVE_FACING, SCRIPT_TIMER, TINT, ALPHA];
         let set = skylands_formats::ScriptSet {
             scripts: vec![Script {
                 name: "Windmill.ai".into(),
@@ -3836,6 +3857,38 @@ mod tests {
                 base,
             ))
             .id()
+    }
+
+    #[test]
+    fn test_actor_script_fades_from_placement_tint() {
+        use skylands_formats::script::{NumKind, Op, Operand, Ref, Rhs, Value};
+        // Every tick: `my.tint.alpha = my.tint.alpha - 51`.
+        let alpha = vec![Ref::Handle(0), Ref::Handle(4), Ref::Handle(5)];
+        let fade = Op::SetValue {
+            lhs: alpha.clone(),
+            rhs: Rhs {
+                a: Operand::Read {
+                    path: alpha,
+                    kind: NumKind::Float,
+                },
+                arith: 1,
+                b: Some(Operand::Lit(Value::Int(51))),
+                func: 0,
+            },
+        };
+        let mut app = build_test_app();
+        let base = Transform::IDENTITY;
+        let prop = spawn_scripted(&mut app, scripted_level(vec![fade]), base);
+        app.world_mut()
+            .entity_mut(prop)
+            .insert(ActorTint::default());
+        app.world_mut().get_mut::<ActorScript>(prop).unwrap().state =
+            placed_script_state(Some([0x80, 0x80, 0x80, 0xff]));
+        step_fixed(&mut app);
+        step_fixed(&mut app);
+        // Starts at the placement's 255, not at an unset 0.
+        let tint = app.world().get::<ActorTint>(prop).unwrap();
+        assert!((tint.alpha - 153.0 / 255.0).abs() < 1e-6, "{tint:?}");
     }
 
     #[test]
@@ -3903,6 +3956,7 @@ mod tests {
                         id: 0,
                         script: Some("Mill.ai".into()),
                         scale: [200.0; 3],
+                        tint: [0x80, 0x80, 0x80, 0xff],
                     }),
                     at: vec![Ref::Handle(0)],
                     facing: None,

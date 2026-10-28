@@ -101,6 +101,14 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   `OpRemove`: `_NP` +0x1c.
 - Other ops with a `br` block (find variable, spawn, for each, ...) skip their block in the VM.
 - Engine state lives in `Vm::engine` keyed by name-hash path; script locals stay per actor.
+- `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
+  starts at `Placement._tint` (+0xc8, `igVec4uc` RGBA; all 1260 hub actors `80 80 80 ff`) for
+  placed actors and `OpSpawn` clones (template copy) instead of an unset 0. Core publishes
+  `my.tint.alpha / 255` as `ActorTint`; render `actor_tint_system` draws the actor's parts
+  (`ScriptedActorMesh` of its marker, `SpawnedActor` descendants) with a blended copy of their
+  material at that alpha, and restores the material at 255. Not done: `tint` on other objects
+  (`"my Prop".tint.alpha`, `@clone.tint.alpha` in spawn blocks: engine paths of other actors),
+  whole-colour `tint` slides (`slide my.tint -> "tint normal"`, an `Other` value), tint RGB.
 
 ## `OpSpawn` (`Op::Spawn`)
 - Class size 0x30. Fields: template +0x20, a reference path stored as an `AbstractPlacementList`

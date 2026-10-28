@@ -669,6 +669,7 @@ mod tests {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),

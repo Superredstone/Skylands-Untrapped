@@ -10,8 +10,8 @@ use bevy::utils::HashMap;
 pub use skylands_core::GameAssetServer as CharacterAssetServer;
 use skylands_core::{
     get_character_info, resolve_character_model_archive, resolve_model_archive, ActiveLevel,
-    ActorAnimation, ActorIdentity, ActorScript, Collectible, Element, Enemy, Hero, LevelDrawnModel,
-    Projectile, Prop, SpawnedActor, Villain,
+    ActorAnimation, ActorIdentity, ActorScript, ActorTint, Collectible, Element, Enemy, Hero,
+    LevelDrawnModel, Projectile, Prop, SpawnedActor, Villain,
 };
 #[cfg(test)]
 use skylands_formats::AssetLoader;
@@ -915,6 +915,64 @@ pub fn scripted_actor_mesh_follow_system(
             }
             None if part.seen => *visibility = Visibility::Hidden,
             None => {}
+        }
+    }
+}
+
+/// Material a part had before `actor_tint_system` gave it its own faded copy.
+#[derive(Component, Debug, Clone)]
+pub struct TintBase(pub Handle<StandardMaterial>);
+
+/// Fades a script-driven actor's model by its `ActorTint`: the level parts it owns
+/// (`ScriptedActorMesh`) and the parts under a `SpawnedActor`. A faded part draws a
+/// blended copy of its material; at full alpha it gets its own material back.
+/// Runs on a tint change and when parts appear (a clone's model, the level's meshes).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn actor_tint_system(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    actors: Query<(Entity, &ActorScript, &ActorTint)>,
+    changed: Query<(), Or<(Changed<ActorTint>, Added<SpawnedActorVisual>)>>,
+    new_level_parts: Query<(), Added<ScriptedActorMesh>>,
+    children: Query<&Children>,
+    level_parts: Query<(Entity, &ScriptedActorMesh)>,
+    mut parts: Query<(&mut MeshMaterial3d<StandardMaterial>, Option<&TintBase>)>,
+) {
+    let all = !new_level_parts.is_empty();
+    for (entity, script, tint) in &actors {
+        if !all && !changed.contains(entity) {
+            continue;
+        }
+        let owned = level_parts
+            .iter()
+            .filter(|(_, p)| p.marker_node == script.marker_node)
+            .map(|(e, _)| e)
+            .chain(children.iter_descendants(entity));
+        for part in owned {
+            let Ok((mut material, base)) = parts.get_mut(part) else {
+                continue;
+            };
+            let base = base.map_or_else(|| material.0.clone(), |b| b.0.clone());
+            if tint.alpha >= 1.0 {
+                material.0 = base;
+                commands.entity(part).remove::<TintBase>();
+                continue;
+            }
+            let Some(mut faded) = materials.get(&base).cloned() else {
+                continue;
+            };
+            faded
+                .base_color
+                .set_alpha(faded.base_color.alpha() * tint.alpha);
+            if matches!(faded.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_)) {
+                faded.alpha_mode = AlphaMode::Blend;
+            }
+            if material.0 == base {
+                material.0 = materials.add(faded);
+                commands.entity(part).insert(TintBase(base));
+            } else if let Some(m) = materials.get_mut(&material.0) {
+                *m = faded;
+            }
         }
     }
 }
@@ -2876,6 +2934,76 @@ mod tests {
         // A template without a model gets no parts.
         assert!(app.world().get::<SpawnedActorVisual>(bare).is_some());
         assert!(app.world().get::<Children>(bare).is_none());
+    }
+
+    #[test]
+    fn test_actor_tint_fades_owned_parts_and_restores() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.add_systems(Update, actor_tint_system);
+        let shared = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let part = |app: &mut App| app.world_mut().spawn(MeshMaterial3d(shared.clone())).id();
+        let level_part = part(&mut app);
+        app.world_mut()
+            .entity_mut(level_part)
+            .insert(ScriptedActorMesh {
+                marker_node: 7,
+                seen: true,
+            });
+        let child = part(&mut app);
+        let other = part(&mut app);
+        let actor = app
+            .world_mut()
+            .spawn((
+                ActorScript {
+                    script: 0,
+                    marker_node: 7,
+                    state: Default::default(),
+                    base: Transform::IDENTITY,
+                },
+                ActorTint { alpha: 0.5 },
+            ))
+            .add_child(child)
+            .id();
+        app.update();
+
+        let world = app.world();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        for p in [level_part, child] {
+            let handle = &world.get::<MeshMaterial3d<StandardMaterial>>(p).unwrap().0;
+            assert_ne!(handle, &shared, "own copy");
+            let m = materials.get(handle).unwrap();
+            assert_eq!(
+                (m.base_color.alpha(), m.alpha_mode),
+                (0.5, AlphaMode::Blend)
+            );
+        }
+        // Other actors' parts and the shared material are untouched.
+        assert_eq!(
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(other)
+                .unwrap()
+                .0,
+            shared
+        );
+        assert_eq!(materials.get(&shared).unwrap().base_color.alpha(), 1.0);
+
+        app.world_mut().get_mut::<ActorTint>(actor).unwrap().alpha = 1.0;
+        app.update();
+        for p in [level_part, child] {
+            assert_eq!(
+                app.world()
+                    .get::<MeshMaterial3d<StandardMaterial>>(p)
+                    .unwrap()
+                    .0,
+                shared
+            );
+            assert!(app.world().get::<TintBase>(p).is_none());
+        }
     }
 
     #[test]

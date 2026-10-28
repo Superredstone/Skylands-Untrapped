@@ -180,6 +180,18 @@ pub struct ActorScript {
     pub base: Transform,
 }
 
+/// Opacity of a script-driven actor's model: its script's `my.tint.alpha` / 255.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ActorTint {
+    pub alpha: f32,
+}
+
+impl Default for ActorTint {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
 /// Actor cloned at run time by a script's `OpSpawn` (`Effect::Spawn`).
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedActor {

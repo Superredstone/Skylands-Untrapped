@@ -113,6 +113,8 @@ pub mod meta_fields {
         pub const COLLISION: usize = 0xc4;
         /// `_scaleVec`, percent per axis.
         pub const SCALE_VEC: usize = 0xb8;
+        /// `_tint` (`igVec4uc`, RGBA; hub actors all `80 80 80 ff`).
+        pub const TINT: usize = 0xc8;
     }
 
     pub mod collision_info {
@@ -692,6 +694,8 @@ pub struct ActorPlacement {
     pub scale: [f32; 3],
     /// `tfbPhysicsModel` object offset drawn at the placement.
     pub model: Option<usize>,
+    /// `_tint` RGBA (scripts' `tint.alpha` starts from it).
+    pub tint: [u8; 4],
 }
 
 impl ActorPlacement {
@@ -750,6 +754,8 @@ pub struct LevelMarker {
     pub animated: bool,
     /// Associated `ActorModel` index when known.
     pub actor_model_index: Option<usize>,
+    /// Placing actor's `Placement._tint` RGBA, when placed by a `tfbActorInfo`.
+    pub tint: Option<[u8; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1930,6 +1936,8 @@ pub struct IgbModel {
     pub template_geometries: std::collections::HashMap<usize, Vec<(usize, [f32; 16])>>,
     /// Marker node -> `.ai` script path.
     pub marker_scripts: std::collections::HashMap<usize, String>,
+    /// Marker node -> placing actor's `Placement._tint`.
+    pub marker_tints: std::collections::HashMap<usize, [u8; 4]>,
     /// `tfbActorInfo` templates with a model (what scripts `OpSpawn`).
     pub actor_models: Vec<ActorModel>,
     /// `tfbAnimationState`s: the ids `OpStartSequence` on the `animation palette` plays.
@@ -2124,6 +2132,7 @@ impl Default for IgbModel {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -2288,6 +2297,7 @@ impl IgbModel {
                 node_owner: Default::default(),
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
+                marker_tints: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2332,6 +2342,7 @@ impl IgbModel {
                 node_owner: Default::default(),
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
+                marker_tints: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2524,6 +2535,7 @@ impl IgbModel {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -4558,6 +4570,10 @@ impl IgbModel {
                 let model = ptr(o.offset + meta_fields::actor_info::PHYSICS_MODEL)
                     .filter(|p| models.contains(p));
                 let scale = vec3(o.offset + meta_fields::placement::SCALE_VEC);
+                let tint = data
+                    .get(o.offset + meta_fields::placement::TINT..)
+                    .and_then(|b| b.get(..4))
+                    .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]);
                 let collision = ptr(o.offset + meta_fields::placement::COLLISION)
                     .filter(|p| col_info_offsets.contains(p))
                     .and_then(|col_off| {
@@ -4630,6 +4646,7 @@ impl IgbModel {
                         active,
                         scale,
                         model,
+                        tint,
                     },
                 )
             })
@@ -4862,6 +4879,7 @@ impl IgbModel {
                 mesh,
                 drawn_by_level: self.level_drawn_markers.contains(&node_idx),
                 script: self.marker_scripts.get(&node_idx).cloned(),
+                tint: self.marker_tints.get(&node_idx).copied(),
                 animated: self.animated_markers.contains(&node_idx),
                 actor_model_index,
             });
@@ -5433,6 +5451,7 @@ impl IgbModel {
         let mut node_owner = std::collections::HashMap::new();
         let mut template_geometries = std::collections::HashMap::new();
         let mut marker_scripts = std::collections::HashMap::new();
+        let mut marker_tints = std::collections::HashMap::new();
         let mut animated_actor_marker = std::collections::HashMap::new();
         if !actor_placements.is_empty() {
             for (ai, actor) in actor_placements.iter().enumerate() {
@@ -5459,6 +5478,7 @@ impl IgbModel {
                 if let Some(script) = &actor.script {
                     marker_scripts.insert(nodes.len(), script.clone());
                 }
+                marker_tints.insert(nodes.len(), actor.tint);
                 if (animated && kind == MarkerKind::Prop) || kind == MarkerKind::Npc {
                     animated_markers.insert(nodes.len());
                     animated_actor_marker.insert(ai, nodes.len());
@@ -5982,6 +6002,7 @@ impl IgbModel {
             node_owner,
             template_geometries,
             marker_scripts,
+            marker_tints,
             actor_models,
             animation_states,
             animation_transitions: animation_transitions.into_iter().map(|(_, t)| t).collect(),
@@ -6482,6 +6503,7 @@ mod tests {
             active: true,
             scale: [100.0; 3],
             model: None,
+            tint: [0x80, 0x80, 0x80, 0xff],
         };
         let s = "C:/tfb/Content/Levels/Level_Hub_2014/Scripts/";
         let crystal = actor("Transit_01", Some(&format!("{s}TransitCrystal.ai")));
@@ -6969,6 +6991,7 @@ mod tests {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7096,6 +7119,7 @@ mod tests {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7377,6 +7401,7 @@ mod tests {
             node_owner: Default::default(),
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
+            marker_tints: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -8561,6 +8586,7 @@ mod tests {
             active,
             scale: [100.0; 3],
             model,
+            tint: [0x80, 0x80, 0x80, 0xff],
         };
         assert!(actor(None, true, Some(1)).draws_level_model());
         assert!(!actor(None, false, Some(1)).draws_level_model());
@@ -8697,6 +8723,13 @@ mod tests {
             .transitions
             .iter()
             .all(|t| tessa.animation_states.contains_key(&t.to)));
+
+        // `Placement._tint`: every hub actor is neutral grey, fully opaque.
+        assert!(!model.marker_tints.is_empty());
+        assert!(model
+            .marker_tints
+            .values()
+            .all(|t| *t == [0x80, 0x80, 0x80, 0xff]));
 
         // Model-space prop geometry used to sit at the origin (13 placed instances).
         let placed = instances

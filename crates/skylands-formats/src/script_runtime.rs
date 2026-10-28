@@ -29,6 +29,9 @@ pub mod field {
     /// Sequence group of `my`'s `tfbAnimationState`s (`OpStartSequence` index = state id).
     pub const ANIMATION_PALETTE: u32 = 0x8d18_097e;
     pub const VISIBLE: u32 = 0x54fa_99a1;
+    /// `my.tint.alpha`: 0..255, starts at `Placement._tint` alpha.
+    pub const TINT: u32 = 0x5c35_de8c;
+    pub const ALPHA: u32 = 0x5d8b_6dab;
 }
 
 /// `my` fields that move, turn, scale or remove the actor.
@@ -474,6 +477,7 @@ mod tests {
             id: 0,
             script: Some("Coin_Art.ai".into()),
             scale: [100.0; 3],
+            tint: [0x80, 0x80, 0x80, 0xff],
         }
     }
 

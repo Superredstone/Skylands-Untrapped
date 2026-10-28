@@ -166,6 +166,7 @@ mod tests {
                 script: None,
                 animated: false,
                 actor_model_index: None,
+                tint: None,
             },
             LevelMarker {
                 name: "Transit_00_MainHall-LandingArea".to_string(),
@@ -179,6 +180,7 @@ mod tests {
                 script: None,
                 animated: false,
                 actor_model_index: None,
+                tint: None,
             },
         ];
 

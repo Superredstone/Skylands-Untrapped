@@ -184,8 +184,8 @@ pub enum Op {
 
 /// Placement an `OpSpawn` clones: object offset, type, `+0x08` name and
 /// `AbstractPlacement._ID` (+0x20). The clone copies the template's fields
-/// (`0x80156328`), so also its `Placement._script` (+0xa8, `.ai` path) and
-/// `_scaleVec` (+0xb8, percent).
+/// (`0x80156328`), so also its `Placement._script` (+0xa8, `.ai` path),
+/// `_scaleVec` (+0xb8, percent) and `_tint` (+0xc8, RGBA).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnTemplate {
     pub offset: usize,
@@ -194,6 +194,7 @@ pub struct SpawnTemplate {
     pub id: u32,
     pub script: Option<String>,
     pub scale: [f32; 3],
+    pub tint: [u8; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -558,6 +559,10 @@ impl Reader<'_> {
                             .map(|p| self.cstr(p + 0x08)),
                         scale: [0, 4, 8]
                             .map(|k| f32::from_bits(self.u32(a + 0xb8 + k).unwrap_or(0x42c8_0000))),
+                        tint: self
+                            .data
+                            .get(a + 0xc8..a + 0xcc)
+                            .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]),
                     }),
                     _ => None,
                 };

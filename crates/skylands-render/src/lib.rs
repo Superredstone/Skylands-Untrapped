@@ -38,11 +38,11 @@ pub use texture_conversion::{
 };
 pub use viewer::{viewer_controls_system, ViewerSettings, SHOWCASE_CHARACTERS};
 pub use visual_sync::{
-    actor_visual_sync_system, character_animation_system, level_render_mesh_sync_system,
-    scripted_actor_mesh_follow_system, setup_environment_and_assets, spawn_level_render_mesh,
-    spawned_actor_mesh_system, CharacterAnimator, CharacterAssetServer, CharacterVisualRegistry,
-    LevelRenderMesh, LevelSkyMesh, ModelVisualRegistry, RenderMeshAssets, ScriptedActorMesh,
-    SpawnedActorVisual, TemplateMeshes, TemplateRigs,
+    actor_tint_system, actor_visual_sync_system, character_animation_system,
+    level_render_mesh_sync_system, scripted_actor_mesh_follow_system, setup_environment_and_assets,
+    spawn_level_render_mesh, spawned_actor_mesh_system, CharacterAnimator, CharacterAssetServer,
+    CharacterVisualRegistry, LevelRenderMesh, LevelSkyMesh, ModelVisualRegistry, RenderMeshAssets,
+    ScriptedActorMesh, SpawnedActorVisual, TemplateMeshes, TemplateRigs,
 };
 
 use bevy::prelude::*;
@@ -88,6 +88,7 @@ impl Plugin for SkylandsRenderPlugin {
                     level_render_mesh_sync_system,
                     scripted_actor_mesh_follow_system,
                     spawned_actor_mesh_system,
+                    actor_tint_system.after(spawned_actor_mesh_system),
                     camera_follow_system,
                     free_cam_system,
                     orbit_cam_system,
