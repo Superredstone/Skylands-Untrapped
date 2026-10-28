@@ -178,6 +178,20 @@ pub enum Op {
         at: Vec<Ref>,
         facing: Option<Rhs>,
     },
+    /// `OpChangeMembership`: combine set `set` with `group` (`_combineOp` +0x20: 0 include,
+    /// 1 exclude, 2 intersect_with, 3 be_replaced_by, 4 add, 5 exclude_all; enum table
+    /// `0x805b5880`).
+    ChangeMembership {
+        set: Vec<Ref>,
+        op: i32,
+        group: Vec<Ref>,
+    },
+    /// `OpForEach`: run the `br` block once per member of `set`, the op meaning the member
+    /// (+0x28 order: 0 forward, 1 backward, 2 randomly; enum table `0x805b58b0`).
+    ForEach {
+        set: Vec<Ref>,
+        order: i32,
+    },
     /// Anything else (movement, sound...): skipped by the evaluator.
     Other(String),
 }
@@ -505,6 +519,15 @@ impl Reader<'_> {
                 macro_def: self.ptr(o + 0x38),
             },
             "OpCreateVariable" => Op::CreateVariable { var: o },
+            "OpChangeMembership" => Op::ChangeMembership {
+                set: self.lhs(o + 0x1c),
+                op: self.u32(o + 0x20).unwrap_or(0) as i32,
+                group: self.lhs(o + 0x24),
+            },
+            "OpForEach" => Op::ForEach {
+                set: self.lhs(o + 0x20),
+                order: self.u32(o + 0x28).unwrap_or(0) as i32,
+            },
             "OpMacroInterface" => Op::Interface,
             "OpSlideValue" => match self.rhs_at(o + 0x20) {
                 Some(target) => Op::SlideValue {
@@ -910,6 +933,22 @@ impl ScriptSet {
                     macro_def.unwrap_or(0)
                 ),
                 Op::CreateVariable { var } => format!("var {}", self.ref_name(&Ref::Obj(*var))),
+                Op::ChangeMembership { set, op, group } => {
+                    let o = [
+                        "include",
+                        "exclude",
+                        "intersect_with",
+                        "be_replaced_by",
+                        "add",
+                    ]
+                    .get(*op as usize)
+                    .copied()
+                    .unwrap_or("exclude_all");
+                    format!("set {} {o} {}", self.path_str(set), self.path_str(group))
+                }
+                Op::ForEach { set, order } => {
+                    format!("for each in {} order={order}", self.path_str(set))
+                }
                 Op::SlideValue {
                     lhs,
                     target,
@@ -1043,6 +1082,8 @@ pub struct Vm<'a> {
     pub board: VarBoard,
     /// `OpFindVariable` ops bound this run: op offset -> (actor, variable name).
     found: HashMap<usize, (usize, String)>,
+    /// Script sets by canonical path: members as far as the VM can tell who they are.
+    pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// Engine actions the scripts asked for, in execution order.
     pub effects: Vec<Effect>,
     /// Global variables shared across actor scripts (e.g. "Levels_Completed").
@@ -1219,6 +1260,7 @@ impl<'a> Vm<'a> {
             set_counts: HashMap::new(),
             board: HashMap::new(),
             found: HashMap::new(),
+            sets: HashMap::new(),
             unbound: Vec::new(),
             rng: 0,
             behavior: None,
@@ -1255,6 +1297,18 @@ impl<'a> Vm<'a> {
                 RefTarget::Null
             }
             _ => RefTarget::Unknown,
+        }
+    }
+
+    /// Members of a group path: a stored set's members, else the one object it refers to
+    /// (nothing for `null` or what only the live engine knows).
+    fn members(&self, group: &[Ref]) -> Vec<RefTarget> {
+        if let Some(s) = self.canon(group).ok().and_then(|k| self.sets.get(&k)) {
+            return s.clone();
+        }
+        match self.ref_target(group) {
+            RefTarget::Null | RefTarget::Unknown => Vec::new(),
+            t => vec![t],
         }
     }
 
@@ -1583,6 +1637,20 @@ impl<'a> Vm<'a> {
                     lhs,
                     rhs,
                 } => {
+                    let stored = desc
+                        .starts_with("OpCheckMembership")
+                        .then(|| self.canon(lhs).ok())
+                        .flatten()
+                        .and_then(|k| self.sets.get(&k).cloned());
+                    let group = self.members(rhs);
+                    // `_membershipOp`: 0 includes, 1 excludes, 2 intersects_with, 3 includes_all
+                    // (enum table `0x805b5658`); with one known member they agree pairwise.
+                    if let (Some(set), [m]) = (&stored, &group[..]) {
+                        if set.contains(m) == (*rel == 1) {
+                            pc += skip;
+                        }
+                        continue;
+                    }
                     let known = desc.starts_with("OpCheckReference") && matches!(rel, 1 | 5);
                     let holds = match (self.ref_target(lhs), self.ref_target(rhs)) {
                         (a, b) if known && a != RefTarget::Unknown && b != RefTarget::Unknown => {
@@ -1608,6 +1676,54 @@ impl<'a> Vm<'a> {
                     pc = end;
                 }
                 Op::UseMacro { target } => pc = self.use_macro(si, pc - 1, *target)?,
+                Op::ChangeMembership { set, op, group } => {
+                    if let Ok(key) = self.canon(set) {
+                        let group = self.members(group);
+                        let s = self.sets.entry(key).or_default();
+                        match op {
+                            0 => {
+                                for m in group {
+                                    if !s.contains(&m) {
+                                        s.push(m);
+                                    }
+                                }
+                            }
+                            1 => s.retain(|m| !group.contains(m)),
+                            2 => s.retain(|m| group.contains(m)),
+                            3 => *s = group,
+                            4 => s.extend(group),
+                            _ => s.clear(),
+                        }
+                    }
+                }
+                Op::ForEach { set, order } => {
+                    let end = (pc + skip).min(to);
+                    let mut members = self
+                        .canon(set)
+                        .ok()
+                        .and_then(|k| self.sets.get(&k).cloned())
+                        .unwrap_or_default();
+                    match order {
+                        1 => members.reverse(),
+                        2 => {
+                            for i in (1..members.len()).rev() {
+                                let j = self.next_rand() as usize % (i + 1);
+                                members.swap(i, j);
+                            }
+                        }
+                        _ => {}
+                    }
+                    let me = vec![Ref::Obj(ins.offset)];
+                    for m in members {
+                        self.refs.insert(me.clone(), m);
+                        if let Flow::Return = self.run(si, pc, end)? {
+                            self.refs.remove(&me);
+                            return Ok(Flow::Return);
+                        }
+                    }
+                    self.refs.remove(&me);
+                    pc = end;
+                }
                 // Event blocks other than the one being run.
                 Op::StartUp | Op::ShutDown => pc += skip,
                 // The block after a slide configures its slider (`looping`, ...).
@@ -1963,6 +2079,13 @@ impl<'a> Vm<'a> {
                 .global
                 .and_then(|g| self.set.global_handle(h, g))
                 .and_then(|v| v.init),
+            // `<script set>.count`.
+            [ref set @ .., Ref::Handle(c)]
+                if self.set.engine_key(&[Ref::Handle(c)]) == Some(vec![SET_COUNT])
+                    && self.sets.contains_key(set) =>
+            {
+                Some(Value::Int(self.sets[set].len() as i32))
+            }
             // `<global set>.count`: what the engine put in it, else its static members.
             [Ref::Handle(h), Ref::Handle(c)]
                 if self.set.engine_key(&[Ref::Handle(c)]) == Some(vec![SET_COUNT]) =>

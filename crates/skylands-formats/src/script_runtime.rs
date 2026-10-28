@@ -123,6 +123,8 @@ pub struct ActorScriptState {
     /// Op offset of the current `OpUserBehavior`.
     behavior: Option<usize>,
     refs: HashMap<Vec<Ref>, RefTarget>,
+    /// The script's sets (`OpChangeMembership`), by canonical path.
+    sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// The script hit an op the VM does not model; it no longer runs.
     pub error: Option<VmError>,
     /// Save slot read by "Get Save Param" (set by the engine each tick).
@@ -351,6 +353,7 @@ impl ScriptProgram {
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
         vm.refs = std::mem::take(&mut st.refs);
+        vm.sets = std::mem::take(&mut st.sets);
         vm.save = st.save.clone();
         vm.spawned = st.spawned;
         self.advance_sliders(&mut vm, &mut st.sliders, dt);
@@ -382,6 +385,7 @@ impl ScriptProgram {
         st.behavior = vm.behavior;
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
+        st.sets = std::mem::take(&mut vm.sets);
         st.save_writes.append(&mut vm.save_writes);
         st.spawned = vm.spawned;
         if let Err(e) = result {
@@ -516,7 +520,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 13] = [
+    const NAMES: [u32; 14] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -530,7 +534,9 @@ mod tests {
         ALPHA,
         SCALE,
         UNIFORM,
+        COUNT,
     ];
+    const COUNT: u32 = 0x39b1_ddf4;
     fn h(id: u32) -> Ref {
         Ref::Handle(NAMES.iter().position(|&n| n == id).unwrap() as u32)
     }
@@ -859,6 +865,110 @@ mod tests {
         let mut st = ActorScriptState::default();
         p.tick(0, &mut st, 1.0 / 60.0);
         assert!(st.board.is_empty());
+    }
+
+    #[test]
+    fn script_sets_track_clones_and_iterate_them() {
+        // `"active dropships" include "active dropship"`, `.count`, `for each { fade it }`,
+        // `check "active dropships" includes "active dropship"`, then exclude it.
+        const SET: usize = 0x700;
+        const N1: usize = 0x710;
+        const N2: usize = 0x720;
+        const IN: usize = 0x730;
+        const EACH: usize = 0x600;
+        const CHECK: usize = 0x610;
+        let set = || vec![Ref::Obj(SET)];
+        let count = |n| Op::SetValue {
+            lhs: vec![Ref::Obj(n)],
+            rhs: rd(vec![Ref::Obj(SET), h(COUNT)]),
+        };
+        let change = |op| Op::ChangeMembership {
+            set: set(),
+            op,
+            group: vec![Ref::Obj(LOCAL)],
+        };
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    1,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![h(MY)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(LOCAL)],
+                        rhs: vec![Ref::Obj(SPAWN)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(12, 0, change(0)),
+                ins(13, 0, change(0)),
+                ins(14, 0, count(N1)),
+                ins(
+                    EACH,
+                    1,
+                    Op::ForEach {
+                        set: set(),
+                        order: 0,
+                    },
+                ),
+                ins(
+                    15,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(EACH), h(TINT), h(ALPHA)],
+                        rhs: lit(7.0),
+                    },
+                ),
+                ins(
+                    CHECK,
+                    1,
+                    Op::CheckRef {
+                        rel: 0,
+                        desc: "OpCheckMembership".into(),
+                        lhs: set(),
+                        rhs: vec![Ref::Obj(LOCAL)],
+                    },
+                ),
+                ins(
+                    16,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(IN)],
+                        rhs: lit(1.0),
+                    },
+                ),
+                ins(17, 0, change(1)),
+                ins(18, 0, count(N2)),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let var = |n| st.vars.get(&vec![Ref::Obj(n)]).copied();
+        // Included once (include does not duplicate), then excluded.
+        assert_eq!(var(N1), Some(Value::Int(1)));
+        assert_eq!(var(N2), Some(Value::Int(0)));
+        assert_eq!(var(IN), Some(Value::Float(1.0)));
+        // The loop body reached the clone through the member.
+        assert_eq!(
+            st.clone_effects,
+            vec![(
+                0,
+                Effect::Set {
+                    key: vec![MY, TINT, ALPHA],
+                    value: Value::Float(7.0)
+                }
+            )]
+        );
     }
 
     #[test]

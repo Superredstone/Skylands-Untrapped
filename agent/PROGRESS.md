@@ -237,7 +237,10 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     board (`VarBoard`, `ScriptVarBoard`: `OpFindVariable` on a placed actor binds its `_masterVarList` variable by name;
     board actors import before and export after their tick), scripts step by the fixed 60 Hz timestep. Arena 300/000 with
     a hero reaches "Stage 1 - 01 - Spawn" after 5 s, camera "hang", nests "Setup Pattern".
-  - [ ] Next: sets (`OpChangeMembership`, `OpForEach`, membership checks);
+  - [x] Script sets: `OpChangeMembership`, `OpForEach`, `<set>.count`, `OpCheckMembership` with one known member (see
+    `agent/SCRIPT_VM.md`). Members are what the VM can identify (clones, engine objects); engine-filled sets (`Minions`)
+    have a count but no members.
+  - [ ] Next:
     `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.

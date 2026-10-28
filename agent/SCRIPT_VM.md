@@ -108,6 +108,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   Core keeps a board entry for every placed actor some script targets (`ScriptProgram::find_targets`).
 - `<global set>.count` (`$39b1ddf4`) reads `Vm::set_counts` by set name (`ScriptSet::set_names`), else
   the static member count. Engine-filled: `global.bld` `$51a` "Minions" = heroes in play.
+- Sets (enum tables `0x805b5658` membership, `0x805b5880` combine, `0x805b58b0` order: name pointers
+  then values). `OpChangeMembership` `_LHS` +0x1c set, `_combineOp` +0x20 (0 include, 1 exclude,
+  2 intersect_with, 3 be_replaced_by, 4 add, 5 exclude_all), `_RHS` +0x24 group. `OpCheckMembership`
+  `_LHS` +0x1c, `_membershipOp` +0x20 (0 includes, 1 excludes, 2 intersects_with, 3 includes_all),
+  `_RHS` +0x24. `OpForEach` (0x34) set +0x20, order +0x28 (0 forward, 1 backward, 2 randomly).
+  VM (`Vm::sets`, kept per actor): a group is a stored set's members or the one object a reference
+  resolves to (`RefTarget`); members the VM cannot identify (macro outputs, `null`) are not added,
+  so counts include only known members. include skips duplicates, add does not. `OpForEach` runs
+  the block per member with the op as a reference to it (effects reach clones via `ForClone`);
+  over a set the VM does not hold (engine-filled `Minions`) it runs zero times. Membership checks
+  are evaluated for a stored set and a one-member group (where the four ops agree pairwise),
+  otherwise the old reference fallback. Not done: set members that are engine objects of other
+  actors, `OpFindSubSet`, set-valued macro params beyond reference passing.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
