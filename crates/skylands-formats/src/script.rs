@@ -223,6 +223,8 @@ pub struct VarInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ScriptSet {
     pub scripts: Vec<Script>,
+    /// Per script: its `_masterVarList` variable objects (what `OpFindVariable` finds).
+    pub master_vars: Vec<Vec<usize>>,
     pub vars: HashMap<usize, VarInfo>,
     /// `EXID` index -> first word: export id when `handle_ns` is `global.bld`, else
     /// FNV-1a of the lower-case engine name.
@@ -238,6 +240,8 @@ pub struct ScriptSet {
     /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
     /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
     pub sets: HashMap<usize, Vec<String>>,
+    /// `ScriptSet` object -> its `+0x08` name (`global.bld` `$51a` = "Minions").
+    pub set_names: HashMap<usize, String>,
     /// Name of every `OpDefineMacro` object, including stubs of macros defined in other
     /// files (`global.bld` "System - Save - Get Save Param"), which no script lists.
     pub macro_names: HashMap<usize, String>,
@@ -661,6 +665,11 @@ impl ScriptSet {
             };
             vars.insert(o.offset, info);
         }
+        let set_names = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
+            .map(|o| (o.offset, r.cstr(o.offset + 0x08)))
+            .collect();
         let sets = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
@@ -687,7 +696,7 @@ impl ScriptSet {
             .map(|o| (o.offset, r.cstr(o.offset + 0x08)))
             .collect();
         let mut opaque_operands = HashMap::new();
-        let scripts = objects
+        let (scripts, master_vars): (Vec<_>, Vec<_>) = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("tfbScriptInfo"))
             .filter_map(|info| {
@@ -714,14 +723,26 @@ impl ScriptSet {
                         }
                     })
                     .collect();
-                Some(Script {
-                    name: r.cstr(info.offset + 0x08),
-                    ops,
-                })
+                // `_masterVarList` (+0x18): the script's own variables (`ValueInfo`...).
+                let master = r
+                    .ptr(info.offset + 0x18)
+                    .map(|l| r.list(l))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|w| r.decode_ptr(w))
+                    .collect();
+                Some((
+                    Script {
+                        name: r.cstr(info.offset + 0x08),
+                        ops,
+                    },
+                    master,
+                ))
             })
-            .collect();
+            .unzip();
         Some(Self {
             scripts,
+            master_vars,
             vars,
             handle_ids: file.exid_formats.clone(),
             handle_ns: file.exid_namespaces.clone(),
@@ -729,6 +750,7 @@ impl ScriptSet {
             export_base: file.external_types.len(),
             opaque_operands,
             sets,
+            set_names,
             macro_names,
         })
     }
@@ -770,6 +792,19 @@ impl ScriptSet {
         }
         let id = (*self.handle_ids.get(i)? as usize).checked_sub(global.export_base)?;
         global.sets.get(global.roots.get(id)?).map(Vec::as_slice)
+    }
+
+    /// Name of the `ScriptSet` behind `EXID` handle `h` exported by `global`.
+    pub fn global_set_name<'g>(&self, h: u32, global: &'g ScriptSet) -> Option<&'g str> {
+        let i = h as usize;
+        if *self.handle_ns.get(i)? != name_hash("global.bld") {
+            return None;
+        }
+        let id = (*self.handle_ids.get(i)? as usize).checked_sub(global.export_base)?;
+        global
+            .set_names
+            .get(global.roots.get(id)?)
+            .map(String::as_str)
     }
 
     pub fn script(&self, name_suffix: &str) -> Option<&Script> {
@@ -1001,6 +1036,13 @@ pub struct Vm<'a> {
     /// Engine state by name-hash path (`ScriptSet::engine_key`): reads fall back to it,
     /// writes to engine paths land here.
     pub engine: HashMap<Vec<u32>, Value>,
+    /// Sizes of `global.bld` sets the engine fills (`"Minions"`: heroes in play), by set
+    /// name; `<set>.count` reads them.
+    pub set_counts: HashMap<String, i32>,
+    /// Other actors' variables `OpFindVariable` can bind (`VarBoard`); writes land here.
+    pub board: VarBoard,
+    /// `OpFindVariable` ops bound this run: op offset -> (actor, variable name).
+    found: HashMap<usize, (usize, String)>,
     /// Engine actions the scripts asked for, in execution order.
     pub effects: Vec<Effect>,
     /// Global variables shared across actor scripts (e.g. "Levels_Completed").
@@ -1025,6 +1067,10 @@ pub struct Vm<'a> {
     spawning: Vec<Spawning>,
 }
 
+/// Script variables of other placed actors, by `tfbActorInfo` offset and variable name,
+/// for `OpFindVariable` (`find variable "state" on _ArenaMaster2`).
+pub type VarBoard = HashMap<usize, HashMap<String, Value>>;
+
 /// Object a script reference points at, as far as the VM can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefTarget {
@@ -1041,6 +1087,8 @@ pub enum RefTarget {
 const NULL_HASH: u32 = 0x7707_4ba4;
 /// Name hash of `my`, the actor running the script.
 const MY_HASH: u32 = 0x4c2d_fe93;
+/// Name hash of a set's `count` field.
+const SET_COUNT: u32 = 0x39b1_ddf4;
 
 /// Object an effect acts on: an engine object of this actor, a clone being set up
 /// (index into `Vm::spawning`, key as the clone's own `my` path), or an earlier clone
@@ -1168,6 +1216,9 @@ impl<'a> Vm<'a> {
             engine: HashMap::new(),
             effects: Vec::new(),
             globals: HashMap::new(),
+            set_counts: HashMap::new(),
+            board: HashMap::new(),
+            found: HashMap::new(),
             unbound: Vec::new(),
             rng: 0,
             behavior: None,
@@ -1713,7 +1764,25 @@ impl<'a> Vm<'a> {
                     }
                     pc = end;
                 }
-                Op::FindVariable { .. } | Op::Other(_) => pc += skip,
+                // A variable of another placed actor: the block runs with the op meaning
+                // that variable. Anything else is not found: the block is skipped.
+                Op::FindVariable { name, target } => {
+                    let actor = match target[..] {
+                        [Ref::Obj(a)]
+                            if self.board.get(&a).is_some_and(|v| v.contains_key(name)) =>
+                        {
+                            Some(a)
+                        }
+                        _ => None,
+                    };
+                    match actor {
+                        Some(a) => {
+                            self.found.insert(ins.offset, (a, name.clone()));
+                        }
+                        None => pc += skip,
+                    }
+                }
+                Op::Other(_) => pc += skip,
                 Op::Interface | Op::Param { .. } | Op::CreateVariable { .. } | Op::PreScript => {}
             }
         }
@@ -1806,6 +1875,7 @@ impl<'a> Vm<'a> {
                 Some(Op::CheckValue { lhs, .. }) => {
                     p = lhs.iter().chain(&p[1..]).copied().collect();
                 }
+                Some(Op::FindVariable { .. }) if self.found.contains_key(o) => break,
                 Some(Op::FindVariable { name, target }) => {
                     // Try looking up the variable by name in globals
                     if let Some(v) = self.globals.get(name) {
@@ -1848,11 +1918,22 @@ impl<'a> Vm<'a> {
         Ok(p)
     }
 
+    /// Board slot of a path that names a bound `OpFindVariable`.
+    fn found_slot(&self, path: &[Ref]) -> Option<(usize, String)> {
+        match path {
+            [Ref::Obj(o)] => self.found.get(o).cloned(),
+            _ => None,
+        }
+    }
+
     fn read(&mut self, path: &[Ref]) -> Value {
         let path = match self.canon(path) {
             Ok(p) => p,
             Err(i) => return Value::Int(i),
         };
+        if let Some((a, name)) = self.found_slot(&path) {
+            return self.board[&a][&name];
+        }
         if let Some(v) = self.vars.get(&path) {
             return *v;
         }
@@ -1882,6 +1963,18 @@ impl<'a> Vm<'a> {
                 .global
                 .and_then(|g| self.set.global_handle(h, g))
                 .and_then(|v| v.init),
+            // `<global set>.count`: what the engine put in it, else its static members.
+            [Ref::Handle(h), Ref::Handle(c)]
+                if self.set.engine_key(&[Ref::Handle(c)]) == Some(vec![SET_COUNT]) =>
+            {
+                self.global.and_then(|g| {
+                    let name = self.set.global_set_name(h, g)?;
+                    Some(Value::Int(match self.set_counts.get(name) {
+                        Some(&n) => n,
+                        None => self.set.global_set(h, g)?.len() as i32,
+                    }))
+                })
+            }
             _ => None,
         };
         init.unwrap_or_else(|| {
@@ -1895,6 +1988,10 @@ impl<'a> Vm<'a> {
 
     fn write(&mut self, path: &[Ref], v: Value) {
         if let Ok(p) = self.canon(path) {
+            if let Some((a, name)) = self.found_slot(&p) {
+                self.board.entry(a).or_default().insert(name, v);
+                return;
+            }
             match self.target(&p) {
                 Some(Target::Clone(i, k)) => {
                     self.spawning[i].seed.insert(k, v);

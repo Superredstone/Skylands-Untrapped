@@ -101,6 +101,15 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   `OpRemove`: `_NP` +0x1c.
 - Other ops with a `br` block (find variable, spawn, for each, ...) skip their block in the VM.
 - Engine state lives in `Vm::engine` keyed by name-hash path; script locals stay per actor.
+- `OpFindVariable "name" on <tfbActorInfo>`: the named variable of that placed actor's script
+  (`tfbScriptInfo._masterVarList` +0x18, `ScriptSet::master_vars`). Found: the block runs and the op
+  means that variable (reads/writes go to `Vm::board`); not found (not a board actor, a
+  `PlacementReference` such as `Current_BattleMaster`, a reference variable): the block is skipped.
+  Core keeps a board entry for every placed actor some script targets (`ScriptProgram::find_targets`).
+- `<global set>.count` (`$39b1ddf4`) reads `Vm::set_counts` by set name (`ScriptSet::set_names`), else
+  the static member count. Engine-filled: `global.bld` `$51a` "Minions" = heroes in play.
+- Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
+  headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
   starts at `Placement._tint` (+0xc8, `igVec4uc` RGBA; all 1260 hub actors `80 80 80 ff`) for
   placed actors and `OpSpawn` clones (template copy) instead of an unset 0. Core publishes

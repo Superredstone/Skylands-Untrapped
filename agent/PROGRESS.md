@@ -230,7 +230,14 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [x] Script-only controllers (`MarkerKind::Controller`: active, scripted, no other kind, no level model) run as `ScriptController`
     `ActorScript`s (also in the hub). Arena 300/000 after 2 s: challenge in "Start Arena", `Arena_Rules` "Check Players", camera
     "init", nests "Nest Pattern", no VM errors (`test_arena_controllers_run_their_scripts`, ROM).
-  - [ ] Next: what "ArenaMaster - Begin Arena" waits on for `done`; sets (`OpChangeMembership`, `OpForEach`, membership checks);
+  - [x] "ArenaMaster - Begin Arena" (`_ArenaMaster2.ai`) is a multi-tick machine kept in `_ArenaMaster2`'s own "state"/"timer"
+    (reached with `OpFindVariable` on that `tfbActorInfo`): state 0 waits for `global.bld` set `$51a` "Minions" (players'
+    Skylanders) `.count != 0`, starts the BattleMaster and audience; state 1 shows the title (`timer = Script Timer + 3.2`);
+    state 2 sets `done`. Now run: engine-filled set counts (`Vm::set_counts`, core "Minions" = `Hero` count), the variable
+    board (`VarBoard`, `ScriptVarBoard`: `OpFindVariable` on a placed actor binds its `_masterVarList` variable by name;
+    board actors import before and export after their tick), scripts step by the fixed 60 Hz timestep. Arena 300/000 with
+    a hero reaches "Stage 1 - 01 - Spawn" after 5 s, camera "hang", nests "Setup Pattern".
+  - [ ] Next: sets (`OpChangeMembership`, `OpForEach`, membership checks);
     `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.

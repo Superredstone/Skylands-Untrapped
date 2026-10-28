@@ -759,6 +759,8 @@ pub struct LevelMarker {
     pub actor_model_index: Option<usize>,
     /// Placing actor's `Placement._tint` RGBA, when placed by a `tfbActorInfo`.
     pub tint: Option<[u8; 4]>,
+    /// Placing `tfbActorInfo` offset.
+    pub placement: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1941,6 +1943,8 @@ pub struct IgbModel {
     pub marker_scripts: std::collections::HashMap<usize, String>,
     /// Marker node -> placing actor's `Placement._tint`.
     pub marker_tints: std::collections::HashMap<usize, [u8; 4]>,
+    /// Marker node -> placing `tfbActorInfo` offset (what `OpFindVariable` targets).
+    pub marker_placements: std::collections::HashMap<usize, usize>,
     /// `tfbActorInfo` templates with a model (what scripts `OpSpawn`).
     pub actor_models: Vec<ActorModel>,
     /// `tfbAnimationState`s: the ids `OpStartSequence` on the `animation palette` plays.
@@ -2136,6 +2140,7 @@ impl Default for IgbModel {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_placements: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -2301,6 +2306,7 @@ impl IgbModel {
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
+                marker_placements: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2346,6 +2352,7 @@ impl IgbModel {
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
+                marker_placements: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2539,6 +2546,7 @@ impl IgbModel {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_placements: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -4883,6 +4891,7 @@ impl IgbModel {
                 drawn_by_level: self.level_drawn_markers.contains(&node_idx),
                 script: self.marker_scripts.get(&node_idx).cloned(),
                 tint: self.marker_tints.get(&node_idx).copied(),
+                placement: self.marker_placements.get(&node_idx).copied(),
                 animated: self.animated_markers.contains(&node_idx),
                 actor_model_index,
             });
@@ -5455,6 +5464,7 @@ impl IgbModel {
         let mut template_geometries = std::collections::HashMap::new();
         let mut marker_scripts = std::collections::HashMap::new();
         let mut marker_tints = std::collections::HashMap::new();
+        let mut marker_placements = std::collections::HashMap::new();
         let mut animated_actor_marker = std::collections::HashMap::new();
         if !actor_placements.is_empty() {
             for (ai, actor) in actor_placements.iter().enumerate() {
@@ -5486,6 +5496,7 @@ impl IgbModel {
                     marker_scripts.insert(nodes.len(), script.clone());
                 }
                 marker_tints.insert(nodes.len(), actor.tint);
+                marker_placements.insert(nodes.len(), actor.offset);
                 if (animated && kind == MarkerKind::Prop) || kind == MarkerKind::Npc {
                     animated_markers.insert(nodes.len());
                     animated_actor_marker.insert(ai, nodes.len());
@@ -6010,6 +6021,7 @@ impl IgbModel {
             template_geometries,
             marker_scripts,
             marker_tints,
+            marker_placements,
             actor_models,
             animation_states,
             animation_transitions: animation_transitions.into_iter().map(|(_, t)| t).collect(),
@@ -6999,6 +7011,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_placements: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7127,6 +7140,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_placements: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7409,6 +7423,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_placements: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),

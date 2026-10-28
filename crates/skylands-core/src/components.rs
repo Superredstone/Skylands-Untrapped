@@ -180,6 +180,11 @@ pub struct ActorScript {
     pub base: Transform,
 }
 
+/// `tfbActorInfo` offset of a placed scripted actor: other scripts reach its variables
+/// with `OpFindVariable` (`ScriptVarBoard`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementOffset(pub usize);
+
 /// Script-only level actor (`MarkerKind::Controller`): runs its `ActorScript`, nothing else.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScriptController;

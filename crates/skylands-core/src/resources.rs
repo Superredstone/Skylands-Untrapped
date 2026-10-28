@@ -486,6 +486,15 @@ pub struct PortalAudioStreaming {
     pub sink: PortalSpeakerSink,
 }
 
+/// Variables of placed actors that scripts reach with `OpFindVariable`, by
+/// `tfbActorInfo` offset (`targets`), for the level's `program`.
+#[derive(Debug, Default)]
+pub struct ScriptVarBoard {
+    pub program: usize,
+    pub targets: std::collections::HashSet<usize>,
+    pub vars: skylands_formats::script::VarBoard,
+}
+
 /// Script effects on `OpSpawn` clones through reference variables, by spawner and
 /// serial (`Effect::ForClone`), for `clone_effect_system`.
 #[derive(Resource, Debug, Default)]

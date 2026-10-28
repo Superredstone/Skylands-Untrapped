@@ -1735,7 +1735,7 @@ pub fn spawn_level_content(
                 if let Some(si) = script {
                     let base =
                         Transform::from_matrix(Mat4::from_cols_array(&marker.world_transform));
-                    commands.spawn((
+                    let mut c = commands.spawn((
                         LevelEntity,
                         ScriptController,
                         ActorScript {
@@ -1746,6 +1746,9 @@ pub fn spawn_level_content(
                         },
                         base,
                     ));
+                    if let Some(p) = marker.placement {
+                        c.insert(PlacementOffset(p));
+                    }
                 }
             }
             skylands_formats::igb::MarkerKind::Prop => {
@@ -1799,6 +1802,9 @@ pub fn spawn_level_content(
                         base,
                         ActorTint::default(),
                     ));
+                    if let Some(p) = marker.placement {
+                        prop.insert(PlacementOffset(p));
+                    }
                 }
                 marker_id_counter += 1;
             }
@@ -1892,6 +1898,9 @@ pub fn spawn_level_content(
                         base,
                         ActorTint::default(),
                     ));
+                    if let Some(p) = marker.placement {
+                        npc.insert(PlacementOffset(p));
+                    }
                 }
                 marker_id_counter += 1;
             }
@@ -1959,12 +1968,14 @@ fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Op
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn actor_script_system(
     mut commands: Commands,
-    time: Res<Time>,
+    time: Res<Time<Fixed>>,
     scripts: Option<Res<LevelScripts>>,
     dialogue: Option<Res<ActiveDialogue>>,
     campaign: Option<Res<CampaignProgress>>,
     mut save: Option<ResMut<crate::save_game::SaveGame>>,
     mut clone_effects: Option<ResMut<CloneEffects>>,
+    mut board: Local<ScriptVarBoard>,
+    heroes: Query<(), With<Hero>>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -1972,24 +1983,58 @@ pub fn actor_script_system(
         Option<&mut ActorAnimation>,
         Option<&Npc>,
         Option<&mut ActorTint>,
+        Option<&PlacementOffset>,
     )>,
 ) {
     use skylands_formats::script_runtime::field::*;
     let Some(scripts) = scripts else { return };
-    let dt = time.delta_secs();
+    // One 60 Hz step per run, also when a runner steps `FixedUpdate` directly.
+    let dt = time.timestep().as_secs_f32();
+    // Variables other actors' scripts reach with `OpFindVariable`: one board per level.
+    let program = std::sync::Arc::as_ptr(&scripts.0) as usize;
+    if board.program != program {
+        *board = ScriptVarBoard {
+            program,
+            targets: scripts.0.find_targets(),
+            vars: Default::default(),
+        };
+    }
+    for (_, actor, .., placed) in &actors {
+        if let Some(&PlacementOffset(p)) = placed.filter(|p| board.targets.contains(&p.0)) {
+            board
+                .vars
+                .entry(p)
+                .or_insert_with(|| scripts.0.export_vars(actor.script, &actor.state));
+        }
+    }
     let talking_npc = dialogue.as_ref().and_then(|d| d.npc);
     let levels_completed = campaign
         .as_ref()
         .map(|c| c.completed_chapters.len() as i32)
         .unwrap_or(0);
-    for (entity, mut actor, mut transform, mut anim, npc, tint) in &mut actors {
+    for (entity, mut actor, mut transform, mut anim, npc, tint, placed) in &mut actors {
         let actor = &mut *actor;
         actor.state.globals.insert(
             "Levels_Completed".to_string(),
             skylands_formats::script::Value::Int(levels_completed),
         );
+        // `global.bld` "Minions": the players' Skylanders in play.
+        actor
+            .state
+            .set_counts
+            .insert("Minions".to_string(), heroes.iter().count() as i32);
         actor.state.save = save.as_mut().map(|s| s.view() as _);
+        let on_board = placed.map(|p| p.0).filter(|p| board.targets.contains(p));
+        if let Some(vals) = on_board.and_then(|p| board.vars.get(&p)) {
+            scripts.0.import_vars(actor.script, &mut actor.state, vals);
+        }
+        actor.state.board = std::mem::take(&mut board.vars);
         scripts.0.tick(actor.script, &mut actor.state, dt);
+        board.vars = std::mem::take(&mut actor.state.board);
+        if let Some(p) = on_board {
+            let vars = scripts.0.export_vars(actor.script, &actor.state);
+            board.vars.insert(p, vars);
+        }
         let spawns = std::mem::take(&mut actor.state.spawns);
         let for_clones = std::mem::take(&mut actor.state.clone_effects);
         if let Some(buf) = clone_effects.as_mut() {
@@ -4256,7 +4301,9 @@ mod tests {
             export_base: 0,
             roots: Vec::new(),
             vars,
+            master_vars: Default::default(),
             sets: Default::default(),
+            set_names: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4344,7 +4391,9 @@ mod tests {
             export_base: 0,
             roots: Vec::new(),
             vars: vars2,
+            master_vars: Default::default(),
             sets: Default::default(),
+            set_names: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4630,7 +4679,9 @@ mod tests {
             &CampaignProgress::default(),
         ));
         queue.apply(world);
-        for _ in 0..120 {
+        world.spawn((Hero, Transform::IDENTITY));
+        // 5 s at 60 Hz.
+        for _ in 0..300 {
             step_fixed(&mut app);
         }
         let world = app.world_mut();
@@ -4655,7 +4706,12 @@ mod tests {
         // `_ArenaMaster2`, `Arena_Rules`, the camera, the nests... run without a model.
         assert!(controllers.len() >= 5, "{controllers:?}");
         assert!(controllers.iter().all(|(_, _, e)| e.is_none()));
-        // The challenge passed "Intro IGC" and "Warp In" and waits in "Start Arena".
-        assert!(controllers.contains(&("ArenaScript_300_000.ai", Some("Start Arena"), None)));
+        // With a hero in "Minions" and `_ArenaMaster2`'s "state"/"timer" reached through
+        // `OpFindVariable`, "Begin Arena" finishes after its 3.2 s title and stage 1 starts.
+        assert!(controllers.contains(&(
+            "ArenaScript_300_000.ai",
+            Some("Stage 1 - 01 - Spawn"),
+            None
+        )));
     }
 }

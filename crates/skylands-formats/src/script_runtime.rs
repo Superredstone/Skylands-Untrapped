@@ -4,7 +4,7 @@
 //! fields are name-hash paths (`ScriptSet::engine_key`). Notes: `agent/SCRIPT_VM.md`.
 
 use crate::script::{
-    name_hash, Effect, Op, Ref, RefTarget, ScriptSet, Value, Vm, VmError, VmIndex,
+    name_hash, Effect, Op, Ref, RefTarget, ScriptSet, Value, VarBoard, Vm, VmError, VmIndex,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -107,6 +107,11 @@ pub struct ActorScriptState {
     pub time: f32,
     /// Shared story/engine globals for this actor's scripts (e.g. "Levels_Completed").
     pub globals: HashMap<String, Value>,
+    /// Engine-filled `global.bld` set sizes by name (`Vm::set_counts`).
+    pub set_counts: HashMap<String, i32>,
+    /// Other actors' variables for `OpFindVariable`; the engine moves its board in for
+    /// the tick and takes it back after.
+    pub board: VarBoard,
     /// Sum of `OpDisplace` moves of `my`, world units (heading 0 = +Z, pitch 90 = up).
     pub displacement: [f32; 3],
     /// `OpRemove my` ran.
@@ -209,6 +214,66 @@ impl ScriptProgram {
         Self { set, global, index }
     }
 
+    /// Variables script `si` declares (`_masterVarList`): object and name.
+    fn declared(&self, si: usize) -> impl Iterator<Item = (usize, &str)> {
+        self.set
+            .master_vars
+            .get(si)
+            .into_iter()
+            .flatten()
+            .filter(|v| self.set.vars.contains_key(v))
+            .map(|&v| (v, self.set.var_name(v)))
+    }
+
+    /// Values of script `si`'s variables by name (initial values until written), for
+    /// other actors' `OpFindVariable`.
+    pub fn export_vars(&self, si: usize, st: &ActorScriptState) -> HashMap<String, Value> {
+        self.declared(si)
+            .map(|(var, name)| {
+                let v = st
+                    .vars
+                    .get(&vec![Ref::Obj(var)])
+                    .copied()
+                    .unwrap_or_else(|| {
+                        self.set
+                            .vars
+                            .get(&var)
+                            .and_then(|i| i.init)
+                            .unwrap_or(Value::Int(0))
+                    });
+                (name.to_string(), v)
+            })
+            .collect()
+    }
+
+    /// Takes other actors' writes to script `si`'s variables (`export_vars` names).
+    pub fn import_vars(&self, si: usize, st: &mut ActorScriptState, vals: &HashMap<String, Value>) {
+        let vars: Vec<_> = self
+            .declared(si)
+            .filter_map(|(var, name)| Some((var, *vals.get(name)?)))
+            .collect();
+        for (var, v) in vars {
+            st.vars.insert(vec![Ref::Obj(var)], v);
+        }
+    }
+
+    /// `tfbActorInfo`-like objects scripts run `OpFindVariable` on: whose variables
+    /// the engine keeps on the board.
+    pub fn find_targets(&self) -> HashSet<usize> {
+        self.set
+            .scripts
+            .iter()
+            .flat_map(|s| &s.ops)
+            .filter_map(|i| match &i.op {
+                Op::FindVariable { target, .. } => match target[..] {
+                    [Ref::Obj(o)] => Some(o),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Name of the `OpUserBehavior` at op offset `offset` in script `si`.
     pub fn behavior_name(&self, si: usize, offset: usize) -> Option<&str> {
         self.set
@@ -280,6 +345,8 @@ impl ScriptProgram {
         vm.vars = std::mem::take(&mut st.vars);
         vm.engine = std::mem::take(&mut st.engine);
         vm.globals = st.globals.clone();
+        vm.set_counts = st.set_counts.clone();
+        vm.board = std::mem::take(&mut st.board);
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
@@ -344,6 +411,7 @@ impl ScriptProgram {
         }
         st.vars = std::mem::take(&mut vm.vars);
         st.rng = vm.rng;
+        st.board = std::mem::take(&mut vm.board);
         st.time += dt;
     }
 
@@ -743,6 +811,54 @@ mod tests {
         );
         assert_eq!(seed.get(&vec![MY, TINT, ALPHA]), Some(&Value::Float(200.0)));
         assert!(st.clone_effects.is_empty());
+    }
+
+    #[test]
+    fn find_variable_binds_another_actors_variable() {
+        // `_ArenaMaster2.ai` "Begin Arena": `find variable "state" on _ArenaMaster2 { inc @find }`.
+        const FIND: usize = 0x500;
+        const MASTER: usize = 0x900;
+        let p = program(
+            vec![
+                ins(
+                    FIND,
+                    1,
+                    Op::FindVariable {
+                        name: "state".into(),
+                        target: vec![Ref::Obj(MASTER)],
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(FIND)],
+                    },
+                ),
+                // After the block: the local "Height" is untouched by the lookup.
+                ins(
+                    12,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(LOCAL)],
+                        rhs: rd(vec![Ref::Obj(FIND)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        st.board
+            .insert(MASTER, HashMap::from([("state".into(), Value::Int(2))]));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.board[&MASTER]["state"], Value::Int(3));
+        assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), Some(&Value::Int(3)));
+
+        // Not on the board (actor without that variable): the block is skipped.
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.board.is_empty());
     }
 
     #[test]
