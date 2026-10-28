@@ -128,8 +128,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   script-less templates are static. Clones draw their template's model: `IgbModel::template_geometries`
   (inactive `tfbActorInfo` -> `tfbPhysicsModel` geometry, keyed by the object offset `OpSpawn`
   points at) is built into `TemplateMeshes` with the level; `spawned_actor_mesh_system` adds one
-  child part per material to each `SpawnedActor`. Not done: clones at other objects, particle/sprite templates (`tfbParticleInfo` x64),
-  parenting (clones do not follow the parent).
+  child part per material to each `SpawnedActor`. Rigged templates (`ActorModel.skeleton`, keyed by
+  `ActorModel.offset`) go to `TemplateRigs` instead: joints at bind pose, skinned parts, articulated
+  parts rigid on their joint (`mesh_bones`), and a `CharacterAnimator` whose graph is the template's
+  `tfbAnimationStateData` states (`tfbPhysicsModel` +0x20 -> +0x0c list; state `_animations` +0x14 ->
+  first `AnimationClip` +0x38 -> `tfbPhysicsAnimation` +0x08 path, matched to the clip on the
+  template's own rig first, since rigs share paths). `OpStartSequence` state -> `ActorAnimation.state`
+  -> that clip. Hub rigged templates with states: Tessa, Mabu_Warrior, T-Bone/skaletones, Lobber,
+  BackgroundBird, Pennant, Earth gate boulders (rigid). Not done: clones at other objects,
+  particle/sprite templates (`tfbParticleInfo` x64), parenting (clones do not follow the parent),
+  per-template transitions (`tfbAnimationStateData` +0x10 `tfbAnimationTransitionList`; states switch
+  clips directly), the default state of a clone with no `OpStartSequence` (plays `idle` or the first clip).
 - Hub templates: 185 `tfbActorInfo` (82 with a script: level up tokens, baubles, `Hub_Coins.ai`,
   `2D_Coin.ai`, ...), 64 `tfbParticleInfo`, 1 `tfbSpriteInfo`.
 - Hub: 485 spawns. `2D_Coin.ai` spawns `Coin_Art_01#0` at `my`, block = reference + `"Value" = 1`.

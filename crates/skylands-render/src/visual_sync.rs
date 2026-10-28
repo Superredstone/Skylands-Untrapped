@@ -340,13 +340,39 @@ fn rigid_parts(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) -> Vec<SubmeshVisual> {
+    model_parts(
+        model,
+        mesh_indices,
+        loader,
+        bld_name,
+        false,
+        meshes,
+        materials,
+        images,
+    )
+}
+
+/// Meshes of `model` with their own textures; `skinned` keeps the joint attributes.
+#[allow(clippy::too_many_arguments)]
+fn model_parts(
+    model: &skylands_formats::igb::IgbModel,
+    mesh_indices: &[usize],
+    loader: &skylands_formats::AssetLoader,
+    bld_name: &str,
+    skinned: bool,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> Vec<SubmeshVisual> {
     mesh_indices
         .iter()
         .filter_map(|&i| model.meshes.get(i))
         .map(|m| {
             let mut mesh = crate::mesh_conversion::igb_mesh_to_bevy(m);
-            mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
-            mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+            if !skinned {
+                mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_INDEX);
+                mesh.remove_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT);
+            }
             let mut alpha_mode = AlphaMode::Opaque;
             let texture = m
                 .image_index
@@ -427,6 +453,126 @@ pub struct TemplateMeshes(pub HashMap<usize, Vec<MeshPart>>);
 /// A `SpawnedActor` that has been given its template's model.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SpawnedActorVisual;
+
+/// Rigged `OpSpawn` templates by `tfbActorInfo` offset, drawn skinned and animated
+/// from their `tfbAnimationState`s instead of from `TemplateMeshes`.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct TemplateRigs(pub HashMap<usize, TemplateRig>);
+
+/// `ActorModel` rig (`tfbPhysicsCombinerLink` skeleton) with its states and parts.
+#[derive(Debug, Clone)]
+pub struct TemplateRig {
+    pub skeleton: skylands_formats::Skeleton,
+    /// Clips of the template's states, named uniquely.
+    pub clips: Vec<skylands_formats::AnimationClip>,
+    /// State id -> clip name. No transitions: a request switches clips directly.
+    pub graph: skylands_formats::AnimationGraph,
+    pub parts: Vec<TemplateRigPart>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TemplateRigPart {
+    pub mesh: Handle<Mesh>,
+    pub material: Handle<StandardMaterial>,
+    pub attach: RigAttach,
+}
+
+/// How a template part follows the rig.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RigAttach {
+    /// Skinned by its vertex joint weights.
+    Skinned,
+    /// Articulated drawable: rigid on this joint (`ActorModel::mesh_bones`).
+    Joint(usize),
+    /// Neither: stays in the actor's space.
+    Static,
+}
+
+/// Rig of template `actor`, `None` without a skeleton or a state clip on it.
+#[allow(clippy::too_many_arguments)]
+fn template_rig(
+    model: &skylands_formats::IgbModel,
+    actor: &skylands_formats::igb::ActorModel,
+    loader: &skylands_formats::AssetLoader,
+    path: &str,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) -> Option<TemplateRig> {
+    let skel = actor.skeleton?;
+    let skeleton = model.skeletons.get(skel)?.clone();
+    let mut ids: Vec<_> = actor.animation_states.iter().collect();
+    ids.sort();
+    // Different clips can share a name ("open"): the animator looks clips up by name.
+    let mut names: HashMap<usize, String> = HashMap::new();
+    let mut clips = Vec::new();
+    let mut states = Vec::new();
+    for (&id, &c) in ids {
+        let Some(clip) = model
+            .animations
+            .get(c)
+            .filter(|a| a.skeleton.is_none_or(|s| s == skel))
+        else {
+            continue;
+        };
+        let name = names
+            .entry(c)
+            .or_insert_with(|| {
+                let mut clip = clip.clone();
+                if clips
+                    .iter()
+                    .any(|k: &skylands_formats::AnimationClip| k.name == clip.name)
+                {
+                    clip.name = format!("{}#{c}", clip.name);
+                }
+                let name = clip.name.clone();
+                clips.push(clip);
+                name
+            })
+            .clone();
+        states.push((id, name));
+    }
+    if clips.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for (i, &m) in actor.meshes.iter().enumerate() {
+        let Some(mesh) = model.meshes.get(m) else {
+            continue;
+        };
+        let attach = match actor.mesh_bones.get(i).copied().flatten() {
+            Some(bone) if bone < skeleton.bones.len() => RigAttach::Joint(bone),
+            _ if mesh.skeleton == Some(skel) => RigAttach::Skinned,
+            _ => RigAttach::Static,
+        };
+        let skinned = attach == RigAttach::Skinned;
+        for (mesh, material) in model_parts(
+            model,
+            &[m],
+            loader,
+            path,
+            skinned,
+            meshes,
+            materials,
+            images,
+        ) {
+            parts.push(TemplateRigPart {
+                mesh,
+                material,
+                attach,
+            });
+        }
+    }
+    Some(TemplateRig {
+        skeleton,
+        clips,
+        graph: skylands_formats::AnimationGraph {
+            states,
+            transitions: Vec::new(),
+        },
+        parts,
+    })
+}
 
 /// Part of the level's sky layer, seen only by `SkyCamera`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -653,6 +799,16 @@ pub fn spawn_level_render_mesh(
         }
     }
     commands.insert_resource(TemplateMeshes(template_meshes));
+    let rigs = model
+        .actor_models
+        .iter()
+        .filter(|a| model.template_geometries.contains_key(&a.offset))
+        .filter_map(|a| {
+            let rig = template_rig(&model, a, loader, &path, meshes, materials, images)?;
+            Some((a.offset, rig))
+        })
+        .collect();
+    commands.insert_resource(TemplateRigs(rigs));
 
     spawned_any
 }
@@ -768,12 +924,19 @@ pub fn scripted_actor_mesh_follow_system(
 pub fn spawned_actor_mesh_system(
     mut commands: Commands,
     templates: Option<Res<TemplateMeshes>>,
+    rigs: Option<Res<TemplateRigs>>,
+    mut ibp_assets: Option<ResMut<Assets<SkinnedMeshInverseBindposes>>>,
     clones: Query<(Entity, &SpawnedActor), Without<SpawnedActorVisual>>,
 ) {
     let Some(templates) = templates else { return };
     for (entity, clone) in &clones {
         let mut e = commands.entity(entity);
         e.insert((SpawnedActorVisual, Visibility::default()));
+        let rig = rigs.as_ref().and_then(|r| r.0.get(&clone.template_offset));
+        if let (Some(rig), Some(ibp_assets)) = (rig, ibp_assets.as_mut()) {
+            spawn_template_rig(&mut commands, entity, rig, ibp_assets);
+            continue;
+        }
         if let Some(parts) = templates.0.get(&clone.template_offset) {
             e.with_children(|c| {
                 for (mesh, material) in parts {
@@ -786,6 +949,78 @@ pub fn spawned_actor_mesh_system(
             });
         }
     }
+}
+
+/// Joints at their bind pose, the parts on them and a `CharacterAnimator`, which
+/// `character_animation_system` drives from the clone's `ActorAnimation.state`.
+fn spawn_template_rig(
+    commands: &mut Commands,
+    entity: Entity,
+    rig: &TemplateRig,
+    ibp_assets: &mut Assets<SkinnedMeshInverseBindposes>,
+) {
+    let ibp: Vec<Mat4> = rig
+        .skeleton
+        .bones
+        .iter()
+        .map(|b| Mat4::from_cols_array(&b.inverse_bind_pose))
+        .collect();
+    let joints: Vec<Entity> = rig
+        .skeleton
+        .bones
+        .iter()
+        .map(|b| {
+            let bind = skylands_formats::igb::mat4_affine_inverse(&b.inverse_bind_pose);
+            commands
+                .spawn((
+                    Transform::from_matrix(Mat4::from_cols_array(&bind)),
+                    Visibility::default(),
+                ))
+                .id()
+        })
+        .collect();
+    let ibp_handle = ibp_assets.add(SkinnedMeshInverseBindposes::from(ibp.clone()));
+    for part in &rig.parts {
+        let mesh = (
+            Mesh3d(part.mesh.clone()),
+            MeshMaterial3d(part.material.clone()),
+            Visibility::default(),
+        );
+        match part.attach {
+            RigAttach::Skinned => {
+                let child = commands
+                    .spawn((
+                        mesh,
+                        SkinnedMesh {
+                            inverse_bindposes: ibp_handle.clone(),
+                            joints: joints.clone(),
+                        },
+                    ))
+                    .id();
+                commands.entity(entity).add_child(child);
+            }
+            // Vertices are in bind space: the joint's inverse bind pose undoes it.
+            RigAttach::Joint(bone) => {
+                let child = commands
+                    .spawn((mesh, Transform::from_matrix(ibp[bone])))
+                    .id();
+                commands.entity(joints[bone]).add_child(child);
+            }
+            RigAttach::Static => {
+                let child = commands.spawn((mesh, Transform::IDENTITY)).id();
+                commands.entity(entity).add_child(child);
+            }
+        }
+    }
+    commands
+        .entity(entity)
+        .add_children(&joints)
+        .insert(CharacterAnimator::new(
+            rig.skeleton.clone(),
+            rig.clips.clone(),
+            rig.graph.clone(),
+            joints,
+        ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2632,6 +2867,74 @@ mod tests {
         // A template without a model gets no parts.
         assert!(app.world().get::<SpawnedActorVisual>(bare).is_some());
         assert!(app.world().get::<Children>(bare).is_none());
+    }
+
+    #[test]
+    fn test_spawned_actor_rigged_template_animates_from_state() {
+        use skylands_formats::igb::{AnimationClip, AnimationGraph, Bone, Skeleton};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<Assets<SkinnedMeshInverseBindposes>>();
+        app.insert_resource(TemplateMeshes::default());
+        let part = |attach| TemplateRigPart {
+            mesh: Handle::default(),
+            material: Handle::default(),
+            attach,
+        };
+        app.insert_resource(TemplateRigs(HashMap::from_iter([(
+            0x60,
+            TemplateRig {
+                skeleton: Skeleton::new(vec![Bone::default(), Bone::default()], 0),
+                clips: vec![
+                    AnimationClip::new("idle", 1.0, vec![]),
+                    AnimationClip::new("open", 1.0, vec![]),
+                ],
+                graph: AnimationGraph {
+                    states: vec![(0, "idle".into()), (4, "open".into())],
+                    transitions: vec![],
+                },
+                parts: vec![part(RigAttach::Skinned), part(RigAttach::Joint(1))],
+            },
+        )])));
+        app.add_systems(
+            Update,
+            (spawned_actor_mesh_system, character_animation_system).chain(),
+        );
+        let spawner = app.world_mut().spawn_empty().id();
+        let gate = app
+            .world_mut()
+            .spawn((
+                SpawnedActor {
+                    parent: spawner,
+                    serial: 0,
+                    template: "Gate".into(),
+                    template_offset: 0x60,
+                },
+                Transform::IDENTITY,
+                ActorAnimation {
+                    state: Some(4),
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+
+        let anim = app
+            .world()
+            .get::<CharacterAnimator>(gate)
+            .expect("animator");
+        assert_eq!(anim.joints.len(), 2);
+        // `OpStartSequence` state 4 plays its clip.
+        assert_eq!((anim.playing.as_str(), anim.state), ("open", Some(4)));
+        let children = app.world().get::<Children>(gate).unwrap();
+        let skinned = children
+            .iter()
+            .filter(|&&c| app.world().get::<SkinnedMesh>(c).is_some())
+            .count();
+        assert_eq!(skinned, 1);
+        let on_joint = app.world().get::<Children>(anim.joints[1]).unwrap();
+        assert!(app.world().get::<Mesh3d>(on_joint[0]).is_some());
     }
 
     #[test]

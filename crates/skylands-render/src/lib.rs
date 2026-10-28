@@ -42,7 +42,7 @@ pub use visual_sync::{
     scripted_actor_mesh_follow_system, setup_environment_and_assets, spawn_level_render_mesh,
     spawned_actor_mesh_system, CharacterAnimator, CharacterAssetServer, CharacterVisualRegistry,
     LevelRenderMesh, LevelSkyMesh, ModelVisualRegistry, RenderMeshAssets, ScriptedActorMesh,
-    SpawnedActorVisual, TemplateMeshes,
+    SpawnedActorVisual, TemplateMeshes, TemplateRigs,
 };
 
 use bevy::prelude::*;

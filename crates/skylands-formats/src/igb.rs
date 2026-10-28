@@ -1944,6 +1944,8 @@ pub struct IgbModel {
 /// `tfbActorInfo` (`+0x08` name, `+0xec` `tfbPhysicsModel`) and its model.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ActorModel {
+    /// `tfbActorInfo` object offset (`IgbModel::template_geometries` key).
+    pub offset: usize,
     pub actor: String,
     /// `tfbPhysicsModel` `.mdl` path.
     pub model: String,
@@ -3744,17 +3746,19 @@ impl IgbModel {
                             let Some(id) = rd(state + 0x0c).map(|i| i as i32) else {
                                 continue;
                             };
+                            // `_animations` (`AnimationClipList`) -> first `AnimationClip`
+                            // -> `+0x38` `tfbPhysicsAnimation` -> `+0x08` path.
                             let clip_source = ptr(state + 0x14)
-                                .filter(|&l| rd(l + 0x08).unwrap_or(0) > 0)
-                                .and_then(&ptr)
-                                .and_then(&ptr)
+                                .and_then(|l| list_items(l).first().copied())
                                 .and_then(|c| ptr(c + 0x38))
-                                .and_then(|a| ptr(a + 0x08))
-                                .map(cstr);
+                                .map(|a| cstr(a + 0x08));
                             if let Some(src) = clip_source {
+                                // Rigs can share a clip path: take the copy on this rig.
+                                let same = |a: &AnimationClip| a.source.eq_ignore_ascii_case(&src);
                                 if let Some(clip_idx) = animations
                                     .iter()
-                                    .position(|a| a.source.eq_ignore_ascii_case(&src))
+                                    .position(|a| same(a) && a.skeleton == skeleton)
+                                    .or_else(|| animations.iter().position(same))
                                 {
                                     animation_states.insert(id, clip_idx);
                                 }
@@ -3763,6 +3767,7 @@ impl IgbModel {
                     }
                 }
                 Some(ActorModel {
+                    offset: actor.offset,
                     actor: cstr(actor.offset + 0x08),
                     model: cstr(model + 0x08),
                     meshes,
@@ -8653,6 +8658,20 @@ mod tests {
             "{parts:?}"
         );
         assert!(!parts.is_empty());
+
+        // Rigged templates keep their `tfbAnimationStateData` states, with clips on
+        // their own rig.
+        let tessa = model
+            .actor_models
+            .iter()
+            .find(|a| a.actor == "Tessa")
+            .expect("Tessa template");
+        let skel = tessa.skeleton.expect("Tessa rig");
+        assert!(tessa.animation_states.len() >= 5, "{tessa:?}");
+        assert!(tessa
+            .animation_states
+            .values()
+            .all(|&c| model.animations[c].skeleton.is_none_or(|s| s == skel)));
 
         // Model-space prop geometry used to sit at the origin (13 placed instances).
         let placed = instances
