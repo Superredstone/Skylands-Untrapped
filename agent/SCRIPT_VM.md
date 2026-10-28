@@ -106,9 +106,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   placed actors and `OpSpawn` clones (template copy) instead of an unset 0. Core publishes
   `my.tint.alpha / 255` as `ActorTint`; render `actor_tint_system` draws the actor's parts
   (`ScriptedActorMesh` of its marker, `SpawnedActor` descendants) with a blended copy of their
-  material at that alpha, and restores the material at 255. Not done: `tint` on other objects
-  (`"my Prop".tint.alpha`, `@clone.tint.alpha` in spawn blocks: engine paths of other actors),
-  whole-colour `tint` slides (`slide my.tint -> "tint normal"`, an `Other` value), tint RGB.
+  material at that alpha, and restores the material at 255.
+- Clones by reference: `OpSetReference "My Lid" = @spawn` stores `RefTarget::Spawned(serial)`.
+  After the setup block, writes and effects through that variable (`set "My Lid".tint.alpha`,
+  `slide`, `remove`, `displace`, `turn`, `start sequence`) resolve to `Target::Spawned` and leave
+  the VM as `Effect::ForClone { serial, effect }` (keys as the clone's `my` path; writes are also
+  kept locally so the spawner reads them back). Core `clone_effect_system` hands them to the
+  `SpawnedActor` with that parent and serial: scripted clones `apply` them to their state
+  (`Set`, `Slide` included), script-less ones take only `tint.alpha` and `remove`. A slide on the
+  clone inside its setup block (`slide @spawn.tint.alpha -> 255`) is a setup effect, run by the
+  clone. A slide's `from` through a reference is the spawner's local copy, not the clone's
+  current value. Not done: other actors than the script's own clones (`"tr data ref"."glow"`,
+  placed props, macro outputs: `RefTarget::Unknown`), whole-colour `tint` slides
+  (`slide my.tint -> "tint normal"`, an `Other` value), tint RGB, sliders on script-less clones.
 
 ## `OpSpawn` (`Op::Spawn`)
 - Class size 0x30. Fields: template +0x20, a reference path stored as an `AbstractPlacementList`

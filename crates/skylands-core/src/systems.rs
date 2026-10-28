@@ -1933,7 +1933,7 @@ fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Op
 /// tilt = X, roll = Z, composed `Rz * Ry * Rx` like placements), `vertical offset`,
 /// `OpDisplace` and `scale.uniform`. `OpRemove my` despawns the actor. `OpSpawn`
 /// clones become `SpawnedActor`s (`spawn_script_clone`).
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn actor_script_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -1941,6 +1941,7 @@ pub fn actor_script_system(
     dialogue: Option<Res<ActiveDialogue>>,
     campaign: Option<Res<CampaignProgress>>,
     mut save: Option<ResMut<crate::save_game::SaveGame>>,
+    mut clone_effects: Option<ResMut<CloneEffects>>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -1967,6 +1968,11 @@ pub fn actor_script_system(
         actor.state.save = save.as_mut().map(|s| s.view() as _);
         scripts.0.tick(actor.script, &mut actor.state, dt);
         let spawns = std::mem::take(&mut actor.state.spawns);
+        let for_clones = std::mem::take(&mut actor.state.clone_effects);
+        if let Some(buf) = clone_effects.as_mut() {
+            buf.0
+                .extend(for_clones.into_iter().map(|(s, e)| (entity, s, e)));
+        }
         // "Set Save Param" lands in the save; it is written to disk on the next save.
         if let Some(save) = save.as_mut() {
             for (param, index, value) in actor.state.save_writes.drain(..) {
@@ -2012,6 +2018,58 @@ pub fn actor_script_system(
             } else {
                 anim.state = st.anim_state;
             }
+        }
+    }
+}
+
+/// Delivers `CloneEffects` to the `SpawnedActor` with that spawner and serial. A
+/// scripted clone applies them to its own script state; a script-less one only takes
+/// `tint.alpha` and `remove`. Clones of templates the VM could not resolve never
+/// exist, so their effects are dropped.
+pub fn clone_effect_system(
+    mut commands: Commands,
+    mut pending: ResMut<CloneEffects>,
+    mut clones: Query<(
+        Entity,
+        &SpawnedActor,
+        Option<&mut ActorScript>,
+        Option<&mut ActorTint>,
+    )>,
+) {
+    use skylands_formats::script::Effect;
+    use skylands_formats::script_runtime::field::*;
+    if pending.0.is_empty() {
+        return;
+    }
+    let by_serial: std::collections::HashMap<(Entity, u32), Entity> = clones
+        .iter()
+        .map(|(e, c, ..)| ((c.parent, c.serial), e))
+        .collect();
+    for (parent, serial, effect) in pending.0.drain(..) {
+        let Some((entity, _, script, tint)) = by_serial
+            .get(&(parent, serial))
+            .and_then(|&e| clones.get_mut(e).ok())
+        else {
+            continue;
+        };
+        if let Some(mut script) = script {
+            script.state.apply(effect);
+            continue;
+        }
+        match effect {
+            Effect::Remove { target } if target == [MY] => {
+                commands.entity(entity).despawn_recursive();
+            }
+            Effect::Set { key, value } if key == [MY, TINT, ALPHA] => {
+                let alpha = (value.as_f32() / 255.0).clamp(0.0, 1.0);
+                match tint {
+                    Some(mut t) => t.alpha = alpha,
+                    None => {
+                        commands.entity(entity).insert(ActorTint { alpha });
+                    }
+                }
+            }
+            other => debug!("Effect on script-less clone skipped: {other:?}"),
         }
     }
 }
@@ -3857,6 +3915,52 @@ mod tests {
                 base,
             ))
             .id()
+    }
+
+    #[test]
+    fn test_clone_effects_reach_the_clone_by_serial() {
+        use skylands_formats::script::{Effect, Value};
+        use skylands_formats::script_runtime::field::*;
+        let mut app = App::new();
+        app.init_resource::<CloneEffects>();
+        app.add_systems(Update, clone_effect_system);
+        let spawner = app.world_mut().spawn_empty().id();
+        let clone = |serial| SpawnedActor {
+            parent: spawner,
+            serial,
+            template: "Lid".into(),
+            template_offset: 0,
+        };
+        let plain = app.world_mut().spawn(clone(0)).id();
+        let scripted = app
+            .world_mut()
+            .spawn((
+                clone(1),
+                ActorScript {
+                    script: 0,
+                    marker_node: usize::MAX,
+                    state: Default::default(),
+                    base: Transform::IDENTITY,
+                },
+            ))
+            .id();
+        let set = |value| Effect::Set {
+            key: vec![MY, TINT, ALPHA],
+            value: Value::Float(value),
+        };
+        app.world_mut().resource_mut::<CloneEffects>().0 = vec![
+            (spawner, 0, set(51.0)),
+            (spawner, 1, set(0.0)),
+            // A clone that was never made (unresolved template): dropped.
+            (spawner, 7, set(0.0)),
+        ];
+        app.update();
+
+        let tint = app.world().get::<ActorTint>(plain).unwrap();
+        assert!((tint.alpha - 0.2).abs() < 1e-6);
+        let st = &app.world().get::<ActorScript>(scripted).unwrap().state;
+        assert_eq!(st.get(&[MY, TINT, ALPHA]), Some(0.0));
+        assert!(app.world().resource::<CloneEffects>().0.is_empty());
     }
 
     #[test]

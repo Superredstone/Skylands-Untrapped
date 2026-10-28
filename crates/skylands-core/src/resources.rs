@@ -486,6 +486,11 @@ pub struct PortalAudioStreaming {
     pub sink: PortalSpeakerSink,
 }
 
+/// Script effects on `OpSpawn` clones through reference variables, by spawner and
+/// serial (`Effect::ForClone`), for `clone_effect_system`.
+#[derive(Resource, Debug, Default)]
+pub struct CloneEffects(pub Vec<(Entity, u32, skylands_formats::script::Effect)>);
+
 /// The active level's scripts, shared by every `ActorScript`.
 #[derive(Resource, Clone)]
 pub struct LevelScripts(pub std::sync::Arc<skylands_formats::ScriptProgram>);

@@ -1042,11 +1042,13 @@ const NULL_HASH: u32 = 0x7707_4ba4;
 /// Name hash of `my`, the actor running the script.
 const MY_HASH: u32 = 0x4c2d_fe93;
 
-/// Object an effect acts on: an engine object of this actor, or a clone being set up
-/// (index into `Vm::spawning`, key as the clone's own `my` path).
+/// Object an effect acts on: an engine object of this actor, a clone being set up
+/// (index into `Vm::spawning`, key as the clone's own `my` path), or an earlier clone
+/// through a reference variable (`serial`, key as its `my` path).
 enum Target {
     Engine(Vec<u32>),
     Clone(usize, Vec<u32>),
+    Spawned(u32, Vec<u32>),
 }
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
@@ -1086,6 +1088,11 @@ pub enum Effect {
     StartSequence { group: Vec<u32>, state: i32 },
     /// `OpTurnTo` of the engine object `target`: face `facing` degrees.
     TurnTo { target: Vec<u32>, facing: f32 },
+    /// Write of `value` to the engine field `key` (a clone's own `my` path).
+    Set { key: Vec<u32>, value: Value },
+    /// `effect` (targets as the clone's own `my` paths) on the actor's `serial`-th clone,
+    /// reached through a reference variable after its setup block (`"My Lid".tint.alpha`).
+    ForClone { serial: u32, effect: Box<Effect> },
     /// `OpSpawn` at op `op`: clone `template` at the engine object `at`, facing `facing`
     /// degrees. `serial` numbers the actor's spawns (`RefTarget::Spawned`). The setup block's
     /// writes to the clone are in `seed` (keys as the clone's own `my` paths) and its
@@ -1214,19 +1221,56 @@ impl<'a> Vm<'a> {
         Some((i, [MY_HASH].into_iter().chain(rest).collect()))
     }
 
+    /// A path through a reference variable that holds one of this actor's clones
+    /// (`OpSetReference "My Lid" = @spawn`): the clone's serial and own `my` path.
+    fn spawned_key(&self, p: &[Ref]) -> Option<(u32, Vec<u32>)> {
+        let first @ Ref::Obj(_) = p.first()? else {
+            return None;
+        };
+        let Some(RefTarget::Spawned(serial)) = self.refs.get(std::slice::from_ref(first)) else {
+            return None;
+        };
+        let rest = match &p[1..] {
+            [] => Vec::new(),
+            rest => self.set.engine_key(rest)?,
+        };
+        Some((*serial, [MY_HASH].into_iter().chain(rest).collect()))
+    }
+
     fn target(&self, path: &[Ref]) -> Option<Target> {
         if let Some(k) = self.set.engine_key(path) {
             return Some(Target::Engine(k));
         }
         let p = self.canon(path).ok()?;
-        self.clone_key(&p).map(|(i, k)| Target::Clone(i, k))
+        if let Some((i, k)) = self.clone_key(&p) {
+            return Some(Target::Clone(i, k));
+        }
+        self.spawned_key(&p).map(|(s, k)| Target::Spawned(s, k))
     }
 
     fn emit(&mut self, t: Target, effect: impl FnOnce(Vec<u32>) -> Effect) {
         match t {
             Target::Engine(k) => self.effects.push(effect(k)),
             Target::Clone(i, k) => self.spawning[i].setup.push(effect(k)),
+            Target::Spawned(serial, k) => self.effects.push(Effect::ForClone {
+                serial,
+                effect: Box::new(effect(k)),
+            }),
         }
+    }
+
+    /// `key` (a `my` path) as script refs of this set, for a slider the clone runs.
+    fn my_refs(&self, key: &[u32]) -> Option<Vec<Ref>> {
+        key.iter()
+            .map(|&id| {
+                (0..self.set.handle_ids.len())
+                    .find(|&i| {
+                        self.set.handle_ids[i] == id
+                            && self.set.engine_key(&[Ref::Handle(i as u32)]).is_some()
+                    })
+                    .map(|i| Ref::Handle(i as u32))
+            })
+            .collect()
     }
 
     /// Evaluate `rhs` against the current variable store.
@@ -1529,16 +1573,35 @@ impl<'a> Vm<'a> {
                     let seconds = opt(seconds)?;
                     let ease_out = 0.02 * opt(ease_out)?;
                     let ease_in = 0.02 * opt(ease_in)?;
-                    if let Ok(lhs) = self.canon(lhs) {
-                        self.effects.push(Effect::Slide {
-                            op: ins.offset,
-                            lhs,
-                            from,
-                            to,
-                            seconds,
-                            ease_out,
-                            ease_in,
-                        });
+                    let slide = |lhs| Effect::Slide {
+                        op: ins.offset,
+                        lhs,
+                        from,
+                        to,
+                        seconds,
+                        ease_out,
+                        ease_in,
+                    };
+                    // A clone's field slides on the clone (it runs the slider itself).
+                    match self.target(lhs) {
+                        Some(Target::Clone(i, k)) => {
+                            if let Some(refs) = self.my_refs(&k) {
+                                self.spawning[i].setup.push(slide(refs));
+                            }
+                        }
+                        Some(Target::Spawned(serial, k)) => {
+                            if let Some(refs) = self.my_refs(&k) {
+                                self.effects.push(Effect::ForClone {
+                                    serial,
+                                    effect: Box::new(slide(refs)),
+                                });
+                            }
+                        }
+                        _ => {
+                            if let Ok(lhs) = self.canon(lhs) {
+                                self.effects.push(slide(lhs));
+                            }
+                        }
                     }
                 }
                 Op::Displace {
@@ -1828,6 +1891,13 @@ impl<'a> Vm<'a> {
             if let Some((i, k)) = self.clone_key(&p) {
                 self.spawning[i].seed.insert(k, v);
                 return;
+            }
+            // Kept here too, so the script reads back what it wrote.
+            if let Some((serial, key)) = self.spawned_key(&p) {
+                self.effects.push(Effect::ForClone {
+                    serial,
+                    effect: Box::new(Effect::Set { key, value: v }),
+                });
             }
             match self.set.engine_key(&p) {
                 Some(k) => {

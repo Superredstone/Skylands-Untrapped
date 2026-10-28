@@ -59,6 +59,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<GameAssetServer>()
             .init_resource::<ActivePortal>()
             .init_resource::<MagicMoment>()
+            .init_resource::<CloneEffects>()
             .add_systems(Startup, systems::setup_default_scene)
             .add_systems(FixedFirst, interpolation::restore_tick_transform)
             .add_systems(FixedPostUpdate, interpolation::record_tick_transform)
@@ -80,6 +81,8 @@ impl Plugin for SkylandsCorePlugin {
                     systems::hero_combat_system,
                     systems::enemy_ai_system,
                     systems::actor_script_system,
+                    apply_deferred,
+                    systems::clone_effect_system,
                     save_game::save_progress_system,
                 )
                     .chain(),

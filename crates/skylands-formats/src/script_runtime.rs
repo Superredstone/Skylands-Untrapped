@@ -124,6 +124,9 @@ pub struct ActorScriptState {
     pub save: Option<std::sync::Arc<dyn crate::script::SaveParams>>,
     /// "Set Save Param" writes since the engine last drained them.
     pub save_writes: Vec<(String, i32, i64)>,
+    /// Effects on earlier clones by serial (`Effect::ForClone`), for the engine to
+    /// deliver after the tick.
+    pub clone_effects: Vec<(u32, Effect)>,
     /// `OpSpawn` clones made so far (next `Effect::Spawn::serial`).
     pub spawned: u32,
     /// `Effect::Spawn`s since the engine last drained them.
@@ -140,10 +143,35 @@ impl ActorScriptState {
 
     /// Apply an engine effect aimed at `my` (others are ignored): `OpDisplace` moves,
     /// `OpRemove` despawns, `OpStartSequence` on the `animation palette` picks the
-    /// animation state, `OpTurnTo` sets the facing. Also used for the setup effects of
-    /// an `OpSpawn` clone (`Effect::Spawn::setup`).
+    /// animation state, `OpTurnTo` sets the facing, `Set` writes a field and `Slide`
+    /// starts a slider. Also used for the effects on an `OpSpawn` clone
+    /// (`Effect::Spawn::setup`, `clone_effects`).
     pub fn apply(&mut self, effect: Effect) {
         match effect {
+            Effect::Slide {
+                op,
+                lhs,
+                from,
+                to,
+                seconds,
+                ease_out,
+                ease_in,
+            } => {
+                self.sliders.retain(|s| s.op != op);
+                self.sliders.push(Slider {
+                    op,
+                    lhs,
+                    from,
+                    to,
+                    seconds,
+                    ease_out,
+                    ease_in,
+                    t: 0.0,
+                });
+            }
+            Effect::Set { key, value } if key.first() == Some(&field::MY) => {
+                self.engine.insert(key, value);
+            }
             Effect::Displace {
                 target,
                 len,
@@ -278,28 +306,8 @@ impl ScriptProgram {
         st.engine = std::mem::take(&mut vm.engine);
         for effect in std::mem::take(&mut vm.effects) {
             match effect {
-                Effect::Slide {
-                    op,
-                    lhs,
-                    from,
-                    to,
-                    seconds,
-                    ease_out,
-                    ease_in,
-                } => {
-                    st.sliders.retain(|s| s.op != op);
-                    st.sliders.push(Slider {
-                        op,
-                        lhs,
-                        from,
-                        to,
-                        seconds,
-                        ease_out,
-                        ease_in,
-                        t: 0.0,
-                    });
-                }
                 spawn @ Effect::Spawn { .. } => st.spawns.push(spawn),
+                Effect::ForClone { serial, effect } => st.clone_effects.push((serial, *effect)),
                 effect => st.apply(effect),
             }
         }
@@ -422,7 +430,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 9] = [
+    const NAMES: [u32; 11] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -432,6 +440,8 @@ mod tests {
         LOOPING,
         PLAYBACK_MODE,
         TILT,
+        TINT,
+        ALPHA,
     ];
     fn h(id: u32) -> Ref {
         Ref::Handle(NAMES.iter().position(|&n| n == id).unwrap() as u32)
@@ -559,6 +569,102 @@ mod tests {
             st.refs.get(&vec![Ref::Obj(LOCAL)]),
             Some(&RefTarget::Spawned(0))
         );
+    }
+
+    #[test]
+    fn clone_tint_through_spawn_op_and_reference() {
+        // `UI_TheatricalReports_Hat.ai` / `Bauble_Pickup.ai`: the setup block hides the
+        // clone and slides it in; later the spawner fades it through "My Lid".
+        let alpha = [h(TINT), h(ALPHA)];
+        let clone = |rest: &[Ref]| [Ref::Obj(SPAWN)].iter().chain(rest).copied().collect();
+        let lid = |rest: &[Ref]| [Ref::Obj(LOCAL)].iter().chain(rest).copied().collect();
+        let slide = |lhs, to| Op::SlideValue {
+            lhs,
+            target: lit(to),
+            seconds: Some(lit(0.5)),
+            ease_out: None,
+            ease_in: None,
+        };
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    3,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![h(MY)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetValue {
+                        lhs: clone(&alpha),
+                        rhs: lit(0.0),
+                    },
+                ),
+                ins(12, 0, slide(clone(&alpha), 255.0)),
+                ins(
+                    13,
+                    0,
+                    Op::SetRef {
+                        lhs: lid(&[]),
+                        rhs: clone(&[]),
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    14,
+                    0,
+                    Op::SetValue {
+                        lhs: lid(&alpha),
+                        rhs: lit(128.0),
+                    },
+                ),
+                ins(15, 0, slide(lid(&alpha), 0.0)),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let key = vec![MY, TINT, ALPHA];
+        let my_alpha = vec![h(MY), h(TINT), h(ALPHA)];
+        let Effect::Spawn { seed, setup, .. } = &st.spawns[0] else {
+            panic!()
+        };
+        // In the block: the write seeds the clone, the slide runs on the clone.
+        assert_eq!(seed.get(&key), Some(&Value::Float(0.0)));
+        assert!(
+            matches!(&setup[..], [Effect::Slide { lhs, to, .. }] if *lhs == my_alpha && *to == 255.0)
+        );
+        // After it, through the reference: delivered to clone 0, not kept as a spawner slide.
+        assert_eq!(st.clone_effects.len(), 2);
+        assert_eq!(
+            st.clone_effects[0],
+            (
+                0,
+                Effect::Set {
+                    key,
+                    value: Value::Float(128.0)
+                }
+            )
+        );
+        assert!(
+            matches!(&st.clone_effects[1], (0, Effect::Slide { lhs, from, to, .. })
+            if *lhs == my_alpha && *from == 128.0 && *to == 0.0)
+        );
+        assert!(st.sliders.is_empty());
+
+        // Applied to the clone's own state: the write lands, the slider runs there.
+        let mut clone_st = ActorScriptState::default();
+        for (_, e) in std::mem::take(&mut st.clone_effects) {
+            clone_st.apply(e);
+        }
+        assert_eq!(clone_st.get(&[MY, TINT, ALPHA]), Some(128.0));
+        assert_eq!(clone_st.sliders.len(), 1);
     }
 
     #[test]

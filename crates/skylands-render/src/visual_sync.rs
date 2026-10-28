@@ -931,7 +931,7 @@ pub struct TintBase(pub Handle<StandardMaterial>);
 pub fn actor_tint_system(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    actors: Query<(Entity, &ActorScript, &ActorTint)>,
+    actors: Query<(Entity, Option<&ActorScript>, &ActorTint)>,
     changed: Query<(), Or<(Changed<ActorTint>, Added<SpawnedActorVisual>)>>,
     new_level_parts: Query<(), Added<ScriptedActorMesh>>,
     children: Query<&Children>,
@@ -943,9 +943,10 @@ pub fn actor_tint_system(
         if !all && !changed.contains(entity) {
             continue;
         }
+        let marker = script.map_or(usize::MAX, |s| s.marker_node);
         let owned = level_parts
             .iter()
-            .filter(|(_, p)| p.marker_node == script.marker_node)
+            .filter(|(_, p)| p.marker_node == marker)
             .map(|(e, _)| e)
             .chain(children.iter_descendants(entity));
         for part in owned {
