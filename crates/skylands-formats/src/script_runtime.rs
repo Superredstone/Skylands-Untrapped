@@ -644,7 +644,7 @@ mod tests {
             vec![Effect::Spawn {
                 op: SPAWN,
                 template: coin(),
-                at: vec![MY],
+                at: crate::script::SpawnAt::Engine(vec![MY]),
                 facing: Some(0.0),
                 serial: 0,
                 seed: HashMap::from([(vec![MY, ORIENTATION, FACING], Value::Float(90.0))]),
@@ -969,6 +969,33 @@ mod tests {
                 }
             )]
         );
+    }
+
+    #[test]
+    fn spawn_at_a_placement_uses_that_placement() {
+        // `BattleMaster.ai` "Start BattleMaster": `spawn "_BattleMaster" at _BattleMaster`.
+        let spawn = |at| Op::Spawn {
+            template: vec![Ref::Obj(0x400)],
+            actor: Some(coin()),
+            at: vec![Ref::Obj(at)],
+            facing: Some(lit(0.0)),
+        };
+        let mut p = program(
+            vec![ins(SPAWN, 0, spawn(0x880)), ins(11, 0, spawn(0x881))],
+            vec![],
+        );
+        p.set.placements.insert(0x880);
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        // 0x881 is not a placement (a reference variable, a macro param): skipped.
+        assert_eq!(st.spawns.len(), 1);
+        assert!(matches!(
+            &st.spawns[0],
+            Effect::Spawn {
+                at: crate::script::SpawnAt::Placement(0x880),
+                ..
+            }
+        ));
     }
 
     #[test]

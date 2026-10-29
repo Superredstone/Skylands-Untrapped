@@ -1945,6 +1945,9 @@ pub struct IgbModel {
     pub marker_tints: std::collections::HashMap<usize, [u8; 4]>,
     /// Marker node -> placing `tfbActorInfo` offset (what `OpFindVariable` targets).
     pub marker_placements: std::collections::HashMap<usize, usize>,
+    /// Every `tfbActorInfo` placement transform (no scale), inactive templates included,
+    /// by object offset: where `OpSpawn ... at <actor>` puts a clone.
+    pub placement_transforms: std::collections::HashMap<usize, [f32; 16]>,
     /// `tfbActorInfo` templates with a model (what scripts `OpSpawn`).
     pub actor_models: Vec<ActorModel>,
     /// `tfbAnimationState`s: the ids `OpStartSequence` on the `animation palette` plays.
@@ -2141,6 +2144,7 @@ impl Default for IgbModel {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -2307,6 +2311,7 @@ impl IgbModel {
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
                 marker_placements: Default::default(),
+                placement_transforms: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2353,6 +2358,7 @@ impl IgbModel {
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
                 marker_placements: Default::default(),
+                placement_transforms: Default::default(),
                 actor_models: Vec::new(),
                 animation_states: Vec::new(),
                 animation_transitions: Vec::new(),
@@ -2547,6 +2553,7 @@ impl IgbModel {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -6022,6 +6029,10 @@ impl IgbModel {
             marker_scripts,
             marker_tints,
             marker_placements,
+            placement_transforms: actor_placements
+                .iter()
+                .map(|a| (a.offset, a.transform()))
+                .collect(),
             actor_models,
             animation_states,
             animation_transitions: animation_transitions.into_iter().map(|(_, t)| t).collect(),
@@ -7012,6 +7023,7 @@ mod tests {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7141,6 +7153,7 @@ mod tests {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),
@@ -7424,6 +7437,7 @@ mod tests {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),

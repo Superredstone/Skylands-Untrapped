@@ -671,6 +671,7 @@ mod tests {
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
             marker_placements: Default::default(),
+            placement_transforms: Default::default(),
             actor_models: Vec::new(),
             animation_states: Vec::new(),
             animation_transitions: Vec::new(),

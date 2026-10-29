@@ -1912,6 +1912,13 @@ pub fn spawn_level_content(
         Some(s) => commands.insert_resource(s),
         None => commands.remove_resource::<LevelScripts>(),
     }
+    commands.insert_resource(PlacementTransforms(
+        model
+            .placement_transforms
+            .iter()
+            .map(|(&o, m)| (o, Transform::from_matrix(Mat4::from_cols_array(m))))
+            .collect(),
+    ));
 
     if !has_spawn {
         if let Some(ref mut env) = env_col {
@@ -1975,6 +1982,7 @@ pub fn actor_script_system(
     mut save: Option<ResMut<crate::save_game::SaveGame>>,
     mut clone_effects: Option<ResMut<CloneEffects>>,
     mut board: Local<ScriptVarBoard>,
+    placements: Option<Res<PlacementTransforms>>,
     heroes: Query<(), With<Hero>>,
     mut actors: Query<(
         Entity,
@@ -2069,7 +2077,14 @@ pub fn actor_script_system(
         }
         // Clones are made before a removal in the same tick takes effect.
         for spawn in spawns {
-            spawn_script_clone(&mut commands, &scripts.0, entity, &transform, spawn);
+            spawn_script_clone(
+                &mut commands,
+                &scripts.0,
+                placements.as_deref(),
+                entity,
+                &transform,
+                spawn,
+            );
         }
         if st.removed {
             continue;
@@ -2152,13 +2167,14 @@ fn placed_script_state(tint: Option<[u8; 4]>) -> skylands_formats::ActorScriptSt
     state
 }
 
-/// Start an `OpSpawn` clone (`0x8007a158`): it takes the spawner's current transform
-/// (only `at = my` is known here), the yaw `facing` when given, and the template's
-/// scale, then runs the template's script with the setup block's writes and effects.
-/// No model is drawn for it yet.
+/// Start an `OpSpawn` clone (`0x8007a158`): it takes the transform of `at` (the
+/// spawner's current one for `my`, a placement's for a `tfbActorInfo`), the yaw
+/// `facing` when given, and the template's scale, then runs the template's script with
+/// the setup block's writes and effects.
 fn spawn_script_clone(
     commands: &mut Commands,
     program: &skylands_formats::ScriptProgram,
+    placements: Option<&PlacementTransforms>,
     parent: Entity,
     parent_tf: &Transform,
     spawn: skylands_formats::script::Effect,
@@ -2176,10 +2192,16 @@ fn spawn_script_clone(
     else {
         return;
     };
-    if at != [MY] {
-        debug!("Spawn of {} at another object skipped", template.name);
+    use skylands_formats::script::SpawnAt;
+    let at_tf = match &at {
+        SpawnAt::Engine(k) if *k == [MY] => Some(*parent_tf),
+        SpawnAt::Placement(o) => placements.and_then(|p| p.0.get(o)).copied(),
+        SpawnAt::Engine(_) => None,
+    };
+    let Some(at_tf) = at_tf else {
+        debug!("Spawn of {} at {at:?} skipped", template.name);
         return;
-    }
+    };
     let mut state = skylands_formats::ActorScriptState::default();
     state.engine = seed;
     for effect in setup {
@@ -2189,10 +2211,8 @@ fn spawn_script_clone(
         return;
     }
     let base = Transform {
-        translation: parent_tf.translation,
-        rotation: facing.map_or(parent_tf.rotation, |f| {
-            Quat::from_rotation_y(f.to_radians())
-        }),
+        translation: at_tf.translation,
+        rotation: facing.map_or(at_tf.rotation, |f| Quat::from_rotation_y(f.to_radians())),
         scale: Vec3::from(template.scale) / 100.0,
     };
     let script = template.script.as_deref().and_then(|s| program.find(s));
@@ -4304,6 +4324,7 @@ mod tests {
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
+            placements: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4394,6 +4415,7 @@ mod tests {
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
+            placements: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4703,6 +4725,30 @@ mod tests {
             })
             .collect();
         eprintln!("{controllers:#?}");
+        let mut q = world.query::<(&SpawnedActor, Option<&ActorScript>, &Transform)>();
+        let clones: Vec<_> = q
+            .iter(world)
+            .map(|(c, a, t)| {
+                let behavior = a.and_then(|a| program.behavior_name(a.script, a.state.behavior()?));
+                (
+                    c.template.clone(),
+                    a.map(|a| a.state.error.clone()),
+                    behavior,
+                    t.translation,
+                )
+            })
+            .collect();
+        eprintln!("{clones:#?}");
+        // Spawned at their own placements (`spawn "_BattleMaster" at _BattleMaster`), with
+        // their scripts running.
+        for name in ["_BattleMaster", "Audience_Controller", "ArenaMaster_Brock"] {
+            assert!(
+                clones
+                    .iter()
+                    .any(|(t, err, ..)| t == name && *err == Some(None)),
+                "{name}: {clones:?}"
+            );
+        }
         // `_ArenaMaster2`, `Arena_Rules`, the camera, the nests... run without a model.
         assert!(controllers.len() >= 5, "{controllers:?}");
         assert!(controllers.iter().all(|(_, _, e)| e.is_none()));

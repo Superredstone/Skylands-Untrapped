@@ -486,6 +486,11 @@ pub struct PortalAudioStreaming {
     pub sink: PortalSpeakerSink,
 }
 
+/// Placement transform of every `tfbActorInfo` in the level, inactive templates
+/// included (`IgbModel::placement_transforms`), for clones spawned at a placement.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct PlacementTransforms(pub std::collections::HashMap<usize, Transform>);
+
 /// Variables of placed actors that scripts reach with `OpFindVariable`, by
 /// `tfbActorInfo` offset (`targets`), for the level's `program`.
 #[derive(Debug, Default)]

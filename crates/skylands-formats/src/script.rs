@@ -3,7 +3,7 @@
 
 use crate::igb::{IgbEndian, IgbModel, IgzFile};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 /// Script-visible number. Bools are `Int` 0/1.
@@ -254,6 +254,8 @@ pub struct ScriptSet {
     /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
     /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
     pub sets: HashMap<usize, Vec<String>>,
+    /// `tfbActorInfo` objects in the file (what `OpSpawn ... at` can name).
+    pub placements: HashSet<usize>,
     /// `ScriptSet` object -> its `+0x08` name (`global.bld` `$51a` = "Minions").
     pub set_names: HashMap<usize, String>,
     /// Name of every `OpDefineMacro` object, including stubs of macros defined in other
@@ -688,6 +690,11 @@ impl ScriptSet {
             };
             vars.insert(o.offset, info);
         }
+        let placements = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
+            .map(|o| o.offset)
+            .collect();
         let set_names = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
@@ -773,6 +780,7 @@ impl ScriptSet {
             export_base: file.external_types.len(),
             opaque_operands,
             sets,
+            placements,
             set_names,
             macro_names,
         })
@@ -1189,12 +1197,22 @@ pub enum Effect {
     Spawn {
         op: usize,
         template: SpawnTemplate,
-        at: Vec<u32>,
+        at: SpawnAt,
         facing: Option<f32>,
         serial: u32,
         seed: HashMap<Vec<u32>, Value>,
         setup: Vec<Effect>,
     },
+}
+
+/// Where an `OpSpawn` clone starts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpawnAt {
+    /// An engine object of the spawner (`[MY]`: its current transform).
+    Engine(Vec<u32>),
+    /// A placed `tfbActorInfo` (`spawn "_BattleMaster" at _BattleMaster`): its placement
+    /// transform, inactive templates included.
+    Placement(usize),
 }
 
 /// A clone whose `OpSpawn` setup block is running.
@@ -1846,7 +1864,14 @@ impl<'a> Vm<'a> {
                 Op::Spawn {
                     actor, at, facing, ..
                 } => {
-                    let (Some(template), Some(at)) = (actor, self.set.engine_key(at)) else {
+                    let at = match (self.set.engine_key(at), &at[..]) {
+                        (Some(k), _) => Some(SpawnAt::Engine(k)),
+                        (None, [Ref::Obj(o)]) if self.set.placements.contains(o) => {
+                            Some(SpawnAt::Placement(*o))
+                        }
+                        _ => None,
+                    };
+                    let (Some(template), Some(at)) = (actor, at) else {
                         pc += skip;
                         continue;
                     };
