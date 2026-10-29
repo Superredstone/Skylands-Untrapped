@@ -173,6 +173,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   Arena transport: weight 100, its scripts set `velocity.length = 0`; it does not fly yet because
   "Navigate Waypoints" steers to `"Nav - next wp"` from the "Transport Path" `waypoints`
   (`ActorWaypointList`, `tfbActorInfo` +0xf4), which the engine does not supply yet.
+- Waypoints (no reflected fields): `tfbActorInfo` +0xf4 -> `ActorWaypointList` (0x18; count +0x08,
+  array +0x14) -> `ActorWaypoint` (0x38): position +0x1c/+0x20/+0x24 (small values, likely local to
+  the owning placement), +0x28..+0x34 zero in the arena paths (likely the orientation scripts read
+  as `<wp>.$c545bc21.roll` = stop type, `.tilt` = wait seconds, `.facing`). Arena 300/000: 26 owners
+  (`Arena_DS_Path_01..04`, `Arena_DS_Path_Center_Mech`, 14 `landingQueue(n)`, some enemies and rule
+  controllers); the first dropship's "Transport Path" is `Arena_DS_Path_04` (4 waypoints).
+  `Transport_Macros.ai` keeps navigation in an `"info"` record: `"Nav - wp index"` steps through
+  `"Nav - Flight Path".waypoints` (`.count`), `"Nav - next wp"` is set by an `OpSetReference` whose
+  right side ends in a handle (`[info, "Nav - Flight Path", $71]`: indexed access, not reversed),
+  and steering reads the waypoint's `heading` / `pitch` / `distance` from the transport. Needed
+  next: waypoint lists as script objects, that indexed reference, and reading fields of a
+  referenced object (relative and its own orientation).
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
