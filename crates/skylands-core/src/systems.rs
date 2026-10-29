@@ -1986,7 +1986,7 @@ pub fn actor_script_system(
     mut new_refs: ResMut<PendingPlacementRefs>,
     mut board: Local<ScriptVarBoard>,
     placements: Option<Res<PlacementTransforms>>,
-    heroes: Query<(), With<Hero>>,
+    heroes: Query<(Entity, &Transform), (With<Hero>, Without<ActorScript>)>,
     clones: Query<(Entity, &SpawnedActor)>,
     mut actors: Query<(
         Entity,
@@ -2020,6 +2020,20 @@ pub fn actor_script_system(
     // Where `spawn ... at <another actor>` puts a clone.
     let actor_tfs: std::collections::HashMap<Entity, Transform> =
         actors.iter().map(|(e, _, t, ..)| (e, *t)).collect();
+    // `global.bld` "Minions" (the players' Skylanders) and the engine fields scripts read
+    // of other actors (`OpFindSubSet`), as of this tick's start.
+    let minions: Vec<skylands_formats::script::RefTarget> = heroes
+        .iter()
+        .map(|(e, _)| skylands_formats::script::RefTarget::Actor(e.to_bits()))
+        .collect();
+    let fields: std::sync::Arc<dyn skylands_formats::script::MemberFields> =
+        std::sync::Arc::new(ActorFieldSnapshot(
+            actor_tfs
+                .iter()
+                .map(|(e, t)| (e.to_bits(), t.translation))
+                .chain(heroes.iter().map(|(e, t)| (e.to_bits(), t.translation)))
+                .collect(),
+        ));
     let board_key =
         |e: Entity, placed: Option<&PlacementOffset>| placed.map_or(e.to_bits() as usize, |p| p.0);
     for (e, actor, .., placed) in &actors {
@@ -2046,7 +2060,13 @@ pub fn actor_script_system(
         actor
             .state
             .set_counts
-            .insert("Minions".to_string(), heroes.iter().count() as i32);
+            .insert("Minions".to_string(), minions.len() as i32);
+        actor
+            .state
+            .engine_sets
+            .insert("Minions".to_string(), minions.clone());
+        actor.state.self_id = Some(entity.to_bits());
+        actor.state.fields = Some(fields.clone());
         actor.state.save = save.as_mut().map(|s| s.view() as _);
         let key = board_key(entity, placed);
         let on_board = (board.targets.contains(&key) || held.contains(&entity)).then_some(key);
@@ -2155,6 +2175,25 @@ pub fn actor_script_system(
             } else {
                 anim.state = st.anim_state;
             }
+        }
+    }
+}
+
+/// Positions of scripted actors and heroes by engine id, answering `MemberFields`:
+/// `distance` (`2eb31462`), `horizontal distance` (`9059dae4`, XZ) and `heading`
+/// (`9f481715`, degrees from `me` towards the member, 0 = +Z like `OpDisplace`; the
+/// engine's own definition is not reversed yet).
+#[derive(Debug)]
+struct ActorFieldSnapshot(std::collections::HashMap<u64, Vec3>);
+
+impl skylands_formats::script::MemberFields for ActorFieldSnapshot {
+    fn field(&self, me: u64, member: u64, field: u32) -> Option<f32> {
+        let d = *self.0.get(&member)? - *self.0.get(&me)?;
+        match field {
+            0x2eb3_1462 => Some(d.length()),
+            0x9059_dae4 => Some(Vec2::new(d.x, d.z).length()),
+            0x9f48_1715 => Some(d.x.atan2(d.z).to_degrees()),
+            _ => None,
         }
     }
 }
@@ -4085,6 +4124,22 @@ mod tests {
                 base,
             ))
             .id()
+    }
+
+    #[test]
+    fn test_actor_field_snapshot_measures_from_me() {
+        use skylands_formats::script::MemberFields;
+        let snap = ActorFieldSnapshot(std::collections::HashMap::from([
+            (1, Vec3::new(0.0, 0.0, 0.0)),
+            (2, Vec3::new(3.0, 4.0, 0.0)),
+            (3, Vec3::new(0.0, 0.0, 5.0)),
+        ]));
+        assert_eq!(snap.field(1, 2, 0x2eb3_1462), Some(5.0));
+        assert_eq!(snap.field(1, 2, 0x9059_dae4), Some(3.0));
+        // Heading 0 = +Z, 90 = +X (as `OpDisplace`).
+        assert_eq!(snap.field(1, 3, 0x9f48_1715), Some(0.0));
+        assert_eq!(snap.field(1, 2, 0x9f48_1715), Some(90.0));
+        assert_eq!(snap.field(1, 9, 0x2eb3_1462), None);
     }
 
     #[test]

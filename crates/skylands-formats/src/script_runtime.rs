@@ -111,6 +111,11 @@ pub struct ActorScriptState {
     pub globals: HashMap<String, Value>,
     /// Engine-filled `global.bld` set sizes by name (`Vm::set_counts`).
     pub set_counts: HashMap<String, i32>,
+    /// Engine-filled `global.bld` set members, this actor's engine id and the engine's
+    /// member fields (`Vm::engine_sets`, `Vm::self_id`, `Vm::fields`).
+    pub engine_sets: HashMap<String, Vec<RefTarget>>,
+    pub self_id: Option<u64>,
+    pub fields: Option<std::sync::Arc<dyn crate::script::MemberFields>>,
     /// Other actors' variables for `OpFindVariable`; the engine moves its board in for
     /// the tick and takes it back after.
     pub board: VarBoard,
@@ -375,6 +380,9 @@ impl ScriptProgram {
         vm.engine = std::mem::take(&mut st.engine);
         vm.globals = st.globals.clone();
         vm.set_counts = st.set_counts.clone();
+        vm.engine_sets = st.engine_sets.clone();
+        vm.self_id = st.self_id;
+        vm.fields = st.fields.clone();
         vm.board = std::mem::take(&mut st.board);
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
@@ -556,7 +564,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 14] = [
+    const NAMES: [u32; 15] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -571,8 +579,10 @@ mod tests {
         SCALE,
         UNIFORM,
         COUNT,
+        DISTANCE,
     ];
     const COUNT: u32 = 0x39b1_ddf4;
+    const DISTANCE: u32 = 0x2eb3_1462;
     fn h(id: u32) -> Ref {
         Ref::Handle(NAMES.iter().position(|&n| n == id).unwrap() as u32)
     }
@@ -1169,6 +1179,99 @@ mod tests {
             &st.spawns[..],
             [Effect::Spawn { template, .. }] if template.name == "Enemy_S4_NatureHeavy_"
         ));
+    }
+
+    /// Engine distances by member id, from any `me`.
+    #[derive(Debug)]
+    struct Distances(HashMap<u64, f32>);
+
+    impl crate::script::MemberFields for Distances {
+        fn field(&self, _me: u64, member: u64, field: u32) -> Option<f32> {
+            (field == DISTANCE)
+                .then(|| self.0.get(&member).copied())
+                .flatten()
+        }
+    }
+
+    #[test]
+    fn find_subset_keeps_members_the_engine_measures_in_range() {
+        // `Transport_Macros.ai`: `find subset of "Minions" where .distance < 40 { ... }`,
+        // here over a script set of two clones, 25 and 90 away.
+        const SET: usize = 0x700;
+        const SUB: usize = 0x640;
+        const N: usize = 0x710;
+        let spawn = |off| {
+            ins(
+                off,
+                1,
+                Op::Spawn {
+                    template: vec![Ref::Obj(0x400)],
+                    actor: Some(coin()),
+                    at: vec![h(MY)],
+                    facing: None,
+                },
+            )
+        };
+        let keep = |off| {
+            ins(
+                off,
+                0,
+                Op::ChangeMembership {
+                    set: vec![Ref::Obj(SET)],
+                    op: 0,
+                    group: vec![Ref::Obj(off - 1)],
+                },
+            )
+        };
+        let subset = |within: f32| {
+            vec![
+                ins(
+                    SUB,
+                    1,
+                    Op::FindSubSet {
+                        set: vec![Ref::Obj(SET)],
+                        field: vec![h(DISTANCE)],
+                        rel: 3,
+                        rhs: Some(lit(within)),
+                    },
+                ),
+                ins(
+                    20,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(N)],
+                        rhs: rd(vec![Ref::Obj(SUB), h(COUNT)]),
+                    },
+                ),
+            ]
+        };
+        let run = |within| {
+            let mut startup = vec![spawn(0x300), keep(0x301), spawn(0x310), keep(0x311)];
+            startup.extend(subset(within));
+            let p = program(startup, vec![]);
+            let mut st = ActorScriptState {
+                self_id: Some(1),
+                clone_ids: HashMap::from([(0, 10), (1, 11)]),
+                fields: Some(std::sync::Arc::new(Distances(HashMap::from([
+                    (10, 25.0),
+                    (11, 90.0),
+                ])))),
+                ..Default::default()
+            };
+            p.tick(0, &mut st, 1.0 / 60.0);
+            assert!(st.error.is_none(), "{:?}", st.error);
+            (
+                st.vars.get(&vec![Ref::Obj(N)]).copied(),
+                st.reference(SUB).cloned(),
+            )
+        };
+        // Only the near clone; the op also refers to it.
+        assert_eq!(
+            run(40.0),
+            (Some(Value::Int(1)), Some(RefTarget::Spawned(0)))
+        );
+        // Nothing in range: the block is skipped.
+        assert_eq!(run(10.0), (None, None));
     }
 
     #[test]

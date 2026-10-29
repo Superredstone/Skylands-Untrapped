@@ -192,6 +192,15 @@ pub enum Op {
         set: Vec<Ref>,
         order: i32,
     },
+    /// `OpFindSubSet` (`0x800901c8`): the members of `set` whose `field` compares `rel`
+    /// (`RelOp`) to `rhs`; with none the `br` block is skipped, else it runs with the op
+    /// meaning that subset. `+0x1c` = set path, a null entry, the member field path.
+    FindSubSet {
+        set: Vec<Ref>,
+        field: Vec<Ref>,
+        rel: i32,
+        rhs: Option<Rhs>,
+    },
     /// Anything else (movement, sound...): skipped by the evaluator.
     Other(String),
 }
@@ -552,6 +561,27 @@ impl Reader<'_> {
                 op: self.u32(o + 0x20).unwrap_or(0) as i32,
                 group: self.lhs(o + 0x24),
             },
+            "OpFindSubSet" => {
+                let words = self.ptr(o + 0x1c).map(|s| self.list(s)).unwrap_or_default();
+                let split = words.iter().position(|&w| w == 0).unwrap_or(words.len());
+                let refs = |ws: &[u32]| -> Vec<Ref> {
+                    ws.iter()
+                        .filter_map(|&w| {
+                            if w & 0x8000_0000 != 0 {
+                                Some(Ref::Handle(w & 0x7FFF_FFFF))
+                            } else {
+                                self.decode_ptr(w).map(Ref::Obj)
+                            }
+                        })
+                        .collect()
+                };
+                Op::FindSubSet {
+                    set: refs(&words[..split]),
+                    field: refs(words.get(split + 1..).unwrap_or_default()),
+                    rel: self.u32(o + 0x20).unwrap_or(0) as i32,
+                    rhs: self.rhs_at(o + 0x24),
+                }
+            }
             "OpForEach" => Op::ForEach {
                 set: self.lhs(o + 0x20),
                 order: self.u32(o + 0x28).unwrap_or(0) as i32,
@@ -975,6 +1005,17 @@ impl ScriptSet {
                 Op::ForEach { set, order } => {
                     format!("for each in {} order={order}", self.path_str(set))
                 }
+                Op::FindSubSet {
+                    set,
+                    field,
+                    rel,
+                    rhs,
+                } => format!(
+                    "find subset of {} where .{} [{rel}] {}",
+                    self.path_str(set),
+                    self.path_str(field),
+                    rhs.as_ref().map_or("-".into(), |r| self.rhs_str(r))
+                ),
                 Op::SlideValue {
                     lhs,
                     target,
@@ -1129,6 +1170,11 @@ pub struct Vm<'a> {
     pub(crate) refs: HashMap<Vec<Ref>, RefTarget>,
     /// Save data for "Get Save Param" calls; `None` leaves their `val` at its literal.
     pub save: Option<std::sync::Arc<dyn SaveParams>>,
+    /// Members of `global.bld` sets the engine fills (`"Minions"`: the heroes), by name.
+    pub engine_sets: HashMap<String, Vec<RefTarget>>,
+    /// Engine id of the running actor, and the engine's answers for member fields.
+    pub self_id: Option<u64>,
+    pub fields: Option<std::sync::Arc<dyn MemberFields>>,
     /// "Set Save Param" calls, in order: (save param, field index, value). Later reads in
     /// the same run see them.
     pub save_writes: Vec<(String, i32, i64)>,
@@ -1183,6 +1229,13 @@ enum Target {
     Clone(usize, Vec<u32>),
     Spawned(u32, Vec<u32>),
     Actor(u64, Vec<u32>),
+}
+
+/// Engine fields of an actor as seen from another (`distance`, `heading`...), for
+/// `OpFindSubSet`: `field` (name hash) of actor `member` relative to actor `me` (engine
+/// ids, `RefTarget::Actor`).
+pub trait MemberFields: Send + Sync + std::fmt::Debug {
+    fn field(&self, me: u64, member: u64, field: u32) -> Option<f32>;
 }
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
@@ -1330,6 +1383,9 @@ impl<'a> Vm<'a> {
             behavior: None,
             refs: HashMap::new(),
             save: None,
+            engine_sets: HashMap::new(),
+            self_id: None,
+            fields: None,
             save_writes: Vec::new(),
             spawned: 0,
             global_index: None,
@@ -1379,9 +1435,29 @@ impl<'a> Vm<'a> {
         if let Some(s) = self.canon(group).ok().and_then(|k| self.sets.get(&k)) {
             return s.clone();
         }
+        if let Some(s) = self.engine_set(group) {
+            return s.clone();
+        }
         match self.ref_target(group) {
             RefTarget::Null | RefTarget::Unknown => Vec::new(),
             t => vec![t],
+        }
+    }
+
+    /// Members the engine put in the `global.bld` set `group` names.
+    fn engine_set(&self, group: &[Ref]) -> Option<&Vec<RefTarget>> {
+        let [Ref::Handle(h)] = group else { return None };
+        let name = self.set.global_set_name(*h, self.global?)?;
+        self.engine_sets.get(name)
+    }
+
+    /// Engine id of a member (`None`: a placement, `null`, what only the engine knows).
+    fn member_id(&self, m: &RefTarget) -> Option<u64> {
+        match m {
+            RefTarget::Actor(id) => Some(*id),
+            RefTarget::Spawned(s) => self.clone_ids.get(s).copied(),
+            RefTarget::Engine(k) if *k == [MY_HASH] => self.self_id,
+            _ => None,
         }
     }
 
@@ -1628,6 +1704,9 @@ impl<'a> Vm<'a> {
         sub.clone_ids = std::mem::take(&mut self.clone_ids);
         sub.self_key = self.self_key;
         sub.save = self.save.clone();
+        sub.engine_sets = std::mem::take(&mut self.engine_sets);
+        sub.self_id = self.self_id;
+        sub.fields = self.fields.clone();
         sub.rng = self.rng;
         sub.spawned = self.spawned;
         sub.steps = self.steps;
@@ -1650,6 +1729,7 @@ impl<'a> Vm<'a> {
         self.set_counts = std::mem::take(&mut sub.set_counts);
         self.globals = std::mem::take(&mut sub.globals);
         self.clone_ids = std::mem::take(&mut sub.clone_ids);
+        self.engine_sets = std::mem::take(&mut sub.engine_sets);
         self.rng = sub.rng;
         self.spawned = sub.spawned;
         self.steps = sub.steps;
@@ -2008,13 +2088,48 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
+                // Members compared through the engine (`MemberFields`); one it cannot answer
+                // for does not match. Order: the set's (sorting by value is unconfirmed).
+                Op::FindSubSet {
+                    set,
+                    field,
+                    rel,
+                    rhs,
+                } => {
+                    let threshold = match rhs {
+                        Some(r) => self.eval(r)?,
+                        None => Value::Int(0),
+                    };
+                    let field = self.set.engine_key(field);
+                    let matches: Vec<RefTarget> = self
+                        .members(set)
+                        .into_iter()
+                        .filter(|m| {
+                            let (Some(me), Some(id), Some([f])) =
+                                (self.self_id, self.member_id(m), field.as_deref())
+                            else {
+                                return false;
+                            };
+                            self.fields
+                                .as_ref()
+                                .and_then(|q| q.field(me, id, *f))
+                                .is_some_and(|v| {
+                                    compare(Value::Float(v), *rel, threshold).unwrap_or(false)
+                                })
+                        })
+                        .collect();
+                    match matches.first() {
+                        None => pc += skip,
+                        Some(first) => {
+                            let me = vec![Ref::Obj(ins.offset)];
+                            self.refs.insert(me.clone(), first.clone());
+                            self.sets.insert(me, matches);
+                        }
+                    }
+                }
                 Op::ForEach { set, order } => {
                     let end = (pc + skip).min(to);
-                    let mut members = self
-                        .canon(set)
-                        .ok()
-                        .and_then(|k| self.sets.get(&k).cloned())
-                        .unwrap_or_default();
+                    let mut members = self.members(set);
                     match order {
                         1 => members.reverse(),
                         2 => {
@@ -2436,10 +2551,13 @@ impl<'a> Vm<'a> {
             {
                 self.global.and_then(|g| {
                     let name = self.set.global_set_name(h, g)?;
-                    Some(Value::Int(match self.set_counts.get(name) {
-                        Some(&n) => n,
-                        None => self.set.global_set(h, g)?.len() as i32,
-                    }))
+                    Some(Value::Int(
+                        match (self.engine_sets.get(name), self.set_counts.get(name)) {
+                            (Some(m), _) => m.len() as i32,
+                            (None, Some(&n)) => n,
+                            _ => self.set.global_set(h, g)?.len() as i32,
+                        },
+                    ))
                 })
             }
             _ => None,
