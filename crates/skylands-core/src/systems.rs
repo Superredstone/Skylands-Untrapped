@@ -1741,7 +1741,7 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint),
+                            state: placed_script_state(marker.tint, marker.weight),
                             base,
                         },
                         base,
@@ -1796,7 +1796,7 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint),
+                            state: placed_script_state(marker.tint, marker.weight),
                             base,
                         },
                         base,
@@ -1892,7 +1892,7 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint),
+                            state: placed_script_state(marker.tint, marker.weight),
                             base,
                         },
                         base,
@@ -2099,6 +2099,23 @@ pub fn actor_script_system(
         actor.state.board = std::mem::take(&mut board.vars);
         scripts.0.tick(actor.script, &mut actor.state, dt);
         board.vars = std::mem::take(&mut actor.state.board);
+        // The engine mover: `velocity.length` units per second along `velocity.heading` /
+        // `pitch` (degrees; heading 0 = +Z, pitch 90 = up, as `OpDisplace`).
+        let speed = actor.state.get(&[MY, VELOCITY, LENGTH]).unwrap_or(0.0);
+        if speed != 0.0 {
+            let heading = actor.state.get(&[MY, VELOCITY, HEADING]).unwrap_or(0.0);
+            let pitch = actor.state.get(&[MY, VELOCITY, PITCH]).unwrap_or(0.0);
+            let (sh, ch) = heading.to_radians().sin_cos();
+            let (sp, cp) = pitch.to_radians().sin_cos();
+            for (d, v) in actor
+                .state
+                .displacement
+                .iter_mut()
+                .zip([cp * sh, sp, cp * ch])
+            {
+                *d += speed * dt * v;
+            }
+        }
         if let Some(p) = on_board {
             let vars = scripts.0.export_vars(actor.script, &actor.state);
             board.vars.insert(p, vars);
@@ -2273,13 +2290,14 @@ pub fn clone_effect_system(
     }
 }
 
-/// Engine state a placed actor's script starts with: `scale.uniform` 100 and
-/// `tint.alpha` from its `Placement._tint`.
-fn placed_script_state(tint: Option<[u8; 4]>) -> skylands_formats::ActorScriptState {
+/// Engine state a placed actor's script starts with: `scale.uniform` 100, `tint.alpha`
+/// from its `Placement._tint` and `collision volume.weight` from its `CollisionInfo`.
+fn placed_script_state(tint: Option<[u8; 4]>, weight: f32) -> skylands_formats::ActorScriptState {
     use skylands_formats::script_runtime::field::*;
     let mut state = skylands_formats::ActorScriptState::default();
     state.set(&[MY, SCALE, UNIFORM], 100.0);
     state.set(&[MY, TINT, ALPHA], tint.map_or(255.0, |t| t[3] as f32));
+    state.set(&[MY, COLLISION_VOLUME, WEIGHT], weight);
     state
 }
 
@@ -2352,9 +2370,13 @@ fn spawn_script_clone(
         if state.get(&[MY, SCALE, UNIFORM]).is_none() {
             state.set(&[MY, SCALE, UNIFORM], 100.0);
         }
-        // The clone copies the template's `_tint`; the setup block may have set alpha.
+        // The clone copies the template's `_tint` and collision; the setup block may
+        // have set them.
         if state.get(&[MY, TINT, ALPHA]).is_none() {
             state.set(&[MY, TINT, ALPHA], template.tint[3] as f32);
+        }
+        if state.get(&[MY, COLLISION_VOLUME, WEIGHT]).is_none() {
+            state.set(&[MY, COLLISION_VOLUME, WEIGHT], template.weight);
         }
         clone.insert((
             ActorScript {
@@ -4192,6 +4214,34 @@ mod tests {
     }
 
     #[test]
+    fn test_script_velocity_moves_the_actor() {
+        use skylands_formats::script_runtime::field::*;
+        // `global.bld` "Movement - Set Velocity" leaves `my.velocity.*`; the engine moves.
+        let mut app = build_test_app();
+        let base = Transform::from_xyz(1.0, 2.0, 3.0);
+        let mover = spawn_scripted(&mut app, scripted_level(vec![]), base);
+        {
+            let mut a = app.world_mut().get_mut::<ActorScript>(mover).unwrap();
+            a.state.set(&[MY, VELOCITY, LENGTH], 60.0);
+            a.state.set(&[MY, VELOCITY, HEADING], 90.0);
+        }
+        // 1 s at 60 Hz: 60 units towards heading 90 (+X).
+        for _ in 0..60 {
+            step_fixed(&mut app);
+        }
+        let t = app.world().get::<Transform>(mover).unwrap().translation;
+        assert!((t - Vec3::new(61.0, 2.0, 3.0)).length() < 1e-2, "{t}");
+    }
+
+    #[test]
+    fn test_placed_script_state_seeds_tint_and_weight() {
+        use skylands_formats::script_runtime::field::*;
+        let st = placed_script_state(Some([0x80, 0x80, 0x80, 0x40]), 100.0);
+        assert_eq!(st.get(&[MY, TINT, ALPHA]), Some(64.0));
+        assert_eq!(st.get(&[MY, COLLISION_VOLUME, WEIGHT]), Some(100.0));
+    }
+
+    #[test]
     fn test_actor_script_fades_from_placement_tint() {
         use skylands_formats::script::{NumKind, Op, Operand, Ref, Rhs, Value};
         // Every tick: `my.tint.alpha = my.tint.alpha - 51`.
@@ -4215,7 +4265,7 @@ mod tests {
             .entity_mut(prop)
             .insert(ActorTint::default());
         app.world_mut().get_mut::<ActorScript>(prop).unwrap().state =
-            placed_script_state(Some([0x80, 0x80, 0x80, 0xff]));
+            placed_script_state(Some([0x80, 0x80, 0x80, 0xff]), 0.0);
         step_fixed(&mut app);
         step_fixed(&mut app);
         // Starts at the placement's 255, not at an unset 0.
@@ -4289,6 +4339,7 @@ mod tests {
                         script: Some("Mill.ai".into()),
                         scale: [200.0; 3],
                         tint: [0x80, 0x80, 0x80, 0xff],
+                        weight: 0.0,
                     }),
                     at: vec![Ref::Handle(0)],
                     facing: None,

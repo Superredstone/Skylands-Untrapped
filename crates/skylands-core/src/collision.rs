@@ -670,6 +670,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),

@@ -699,6 +699,8 @@ pub struct ActorPlacement {
     pub model: Option<usize>,
     /// `_tint` RGBA (scripts' `tint.alpha` starts from it).
     pub tint: [u8; 4],
+    /// `CollisionInfo._weight` (0 without collision info).
+    pub weight: f32,
 }
 
 impl ActorPlacement {
@@ -759,6 +761,8 @@ pub struct LevelMarker {
     pub actor_model_index: Option<usize>,
     /// Placing actor's `Placement._tint` RGBA, when placed by a `tfbActorInfo`.
     pub tint: Option<[u8; 4]>,
+    /// Placing actor's `CollisionInfo._weight` (0 without one).
+    pub weight: f32,
     /// Placing `tfbActorInfo` offset.
     pub placement: Option<usize>,
 }
@@ -1943,6 +1947,8 @@ pub struct IgbModel {
     pub marker_scripts: std::collections::HashMap<usize, String>,
     /// Marker node -> placing actor's `Placement._tint`.
     pub marker_tints: std::collections::HashMap<usize, [u8; 4]>,
+    /// Marker node -> placing actor's `CollisionInfo._weight`.
+    pub marker_weights: std::collections::HashMap<usize, f32>,
     /// Marker node -> placing `tfbActorInfo` offset (what `OpFindVariable` targets).
     pub marker_placements: std::collections::HashMap<usize, usize>,
     /// Every `tfbActorInfo` placement transform (no scale), inactive templates included,
@@ -2143,6 +2149,7 @@ impl Default for IgbModel {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),
@@ -2310,6 +2317,7 @@ impl IgbModel {
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
+                marker_weights: Default::default(),
                 marker_placements: Default::default(),
                 placement_transforms: Default::default(),
                 actor_models: Vec::new(),
@@ -2357,6 +2365,7 @@ impl IgbModel {
                 template_geometries: Default::default(),
                 marker_scripts: Default::default(),
                 marker_tints: Default::default(),
+                marker_weights: Default::default(),
                 marker_placements: Default::default(),
                 placement_transforms: Default::default(),
                 actor_models: Vec::new(),
@@ -2552,6 +2561,7 @@ impl IgbModel {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),
@@ -4592,6 +4602,13 @@ impl IgbModel {
                     .get(o.offset + meta_fields::placement::TINT..)
                     .and_then(|b| b.get(..4))
                     .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]);
+                // Scripts' `collision volume.weight` (`Movement - Set Velocity` moves only
+                // actors whose weight is not 0).
+                let weight = ptr(o.offset + meta_fields::placement::COLLISION)
+                    .filter(|p| col_info_offsets.contains(p))
+                    .map(|c| c + meta_fields::collision_info::WEIGHT)
+                    .filter(|&w| w + 4 <= data.len())
+                    .map_or(0.0, |w| f32::from_bits(Self::read_u32(data, w, endian)));
                 let collision = ptr(o.offset + meta_fields::placement::COLLISION)
                     .filter(|p| col_info_offsets.contains(p))
                     .and_then(|col_off| {
@@ -4665,6 +4682,7 @@ impl IgbModel {
                         scale,
                         model,
                         tint,
+                        weight,
                     },
                 )
             })
@@ -4898,6 +4916,7 @@ impl IgbModel {
                 drawn_by_level: self.level_drawn_markers.contains(&node_idx),
                 script: self.marker_scripts.get(&node_idx).cloned(),
                 tint: self.marker_tints.get(&node_idx).copied(),
+                weight: self.marker_weights.get(&node_idx).copied().unwrap_or(0.0),
                 placement: self.marker_placements.get(&node_idx).copied(),
                 animated: self.animated_markers.contains(&node_idx),
                 actor_model_index,
@@ -5471,6 +5490,7 @@ impl IgbModel {
         let mut template_geometries = std::collections::HashMap::new();
         let mut marker_scripts = std::collections::HashMap::new();
         let mut marker_tints = std::collections::HashMap::new();
+        let mut marker_weights = std::collections::HashMap::new();
         let mut marker_placements = std::collections::HashMap::new();
         let mut animated_actor_marker = std::collections::HashMap::new();
         if !actor_placements.is_empty() {
@@ -5503,6 +5523,7 @@ impl IgbModel {
                     marker_scripts.insert(nodes.len(), script.clone());
                 }
                 marker_tints.insert(nodes.len(), actor.tint);
+                marker_weights.insert(nodes.len(), actor.weight);
                 marker_placements.insert(nodes.len(), actor.offset);
                 if (animated && kind == MarkerKind::Prop) || kind == MarkerKind::Npc {
                     animated_markers.insert(nodes.len());
@@ -6028,6 +6049,7 @@ impl IgbModel {
             template_geometries,
             marker_scripts,
             marker_tints,
+            marker_weights,
             marker_placements,
             placement_transforms: actor_placements
                 .iter()
@@ -6534,6 +6556,7 @@ mod tests {
             scale: [100.0; 3],
             model: None,
             tint: [0x80, 0x80, 0x80, 0xff],
+            weight: 0.0,
         };
         let s = "C:/tfb/Content/Levels/Level_Hub_2014/Scripts/";
         let crystal = actor("Transit_01", Some(&format!("{s}TransitCrystal.ai")));
@@ -7022,6 +7045,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),
@@ -7152,6 +7176,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),
@@ -7436,6 +7461,7 @@ mod tests {
             template_geometries: Default::default(),
             marker_scripts: Default::default(),
             marker_tints: Default::default(),
+            marker_weights: Default::default(),
             marker_placements: Default::default(),
             placement_transforms: Default::default(),
             actor_models: Vec::new(),
@@ -8623,6 +8649,7 @@ mod tests {
             scale: [100.0; 3],
             model,
             tint: [0x80, 0x80, 0x80, 0xff],
+            weight: 0.0,
         };
         assert!(actor(None, true, Some(1)).draws_level_model());
         assert!(!actor(None, false, Some(1)).draws_level_model());

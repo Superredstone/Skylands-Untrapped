@@ -218,6 +218,8 @@ pub struct SpawnTemplate {
     pub script: Option<String>,
     pub scale: [f32; 3],
     pub tint: [u8; 4],
+    /// `CollisionInfo._weight` (+0xc4 -> +0x40), 0 without one.
+    pub weight: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -374,6 +376,11 @@ impl Reader<'_> {
                 .data
                 .get(a + 0xc8..a + 0xcc)
                 .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]),
+            weight: self
+                .ptr(a + 0xc4)
+                .filter(|&c| self.ty(c) == "CollisionInfo")
+                .and_then(|c| self.u32(c + 0x40))
+                .map_or(0.0, f32::from_bits),
         }
     }
 
@@ -1523,11 +1530,30 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// A path through a reference that holds an engine object (`"mover" = my`, then
+    /// `"mover".velocity.length`): that object's engine path.
+    fn engine_ref_key(&self, p: &[Ref]) -> Option<Vec<u32>> {
+        let first @ Ref::Obj(_) = p.first()? else {
+            return None;
+        };
+        let Some(RefTarget::Engine(k)) = self.refs.get(std::slice::from_ref(first)) else {
+            return None;
+        };
+        let rest = match &p[1..] {
+            [] => Vec::new(),
+            rest => self.set.engine_key(rest)?,
+        };
+        Some(k.iter().copied().chain(rest).collect())
+    }
+
     fn target(&self, path: &[Ref]) -> Option<Target> {
         if let Some(k) = self.set.engine_key(path) {
             return Some(Target::Engine(k));
         }
         let p = self.canon(path).ok()?;
+        if let Some(k) = self.engine_ref_key(&p) {
+            return Some(Target::Engine(k));
+        }
         if let Some((i, k)) = self.clone_key(&p) {
             return Some(Target::Clone(i, k));
         }
@@ -2509,6 +2535,9 @@ impl<'a> Vm<'a> {
         if let Some((a, name)) = self.found_slot(&path) {
             return self.board[&a][&name];
         }
+        if let Some(v) = self.engine_ref_key(&path).and_then(|k| self.engine.get(&k)) {
+            return *v;
+        }
         if let Some(v) = self.vars.get(&path) {
             return *v;
         }
@@ -2575,6 +2604,10 @@ impl<'a> Vm<'a> {
         if let Ok(p) = self.canon(path) {
             if let Some((a, name)) = self.found_slot(&p) {
                 self.board.entry(a).or_default().insert(name, v);
+                return;
+            }
+            if let Some(k) = self.engine_ref_key(&p) {
+                self.engine.insert(k, v);
                 return;
             }
             match self.target(&p) {

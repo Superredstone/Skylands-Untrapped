@@ -32,6 +32,15 @@ pub mod field {
     /// `my.tint.alpha`: 0..255, starts at `Placement._tint` alpha.
     pub const TINT: u32 = 0x5c35_de8c;
     pub const ALPHA: u32 = 0x5d8b_6dab;
+    /// `my.collision volume.weight`: `CollisionInfo._weight`.
+    pub const COLLISION_VOLUME: u32 = 0xdad6_4577;
+    pub const WEIGHT: u32 = 0x50a0_9eb9;
+    /// `my.velocity.length / heading / pitch` (`global.bld` "Movement - Set Velocity"):
+    /// the engine moves the actor by it every tick (units per second, degrees).
+    pub const VELOCITY: u32 = 0x3274_1c32;
+    pub const LENGTH: u32 = 0x83d0_3615;
+    pub const HEADING: u32 = 0x9f48_1715;
+    pub const PITCH: u32 = 0xbd32_4ab1;
 }
 
 /// `my` fields that move, turn, scale or remove the actor.
@@ -564,7 +573,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 15] = [
+    const NAMES: [u32; 17] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -580,6 +589,8 @@ mod tests {
         UNIFORM,
         COUNT,
         DISTANCE,
+        VELOCITY,
+        LENGTH,
     ];
     const COUNT: u32 = 0x39b1_ddf4;
     const DISTANCE: u32 = 0x2eb3_1462;
@@ -628,6 +639,7 @@ mod tests {
             script: Some("Coin_Art.ai".into()),
             scale: [100.0; 3],
             tint: [0x80, 0x80, 0x80, 0xff],
+            weight: 0.0,
         }
     }
 
@@ -1272,6 +1284,39 @@ mod tests {
         );
         // Nothing in range: the block is skipped.
         assert_eq!(run(10.0), (None, None));
+    }
+
+    #[test]
+    fn path_through_a_reference_to_my_reaches_my_engine_state() {
+        // "Movement - Set Velocity": `"mover to set velocity of".velocity.length = 70`,
+        // called with the mover being `my`.
+        let mover = |rest: &[Ref]| [Ref::Obj(LOCAL)].iter().chain(rest).copied().collect();
+        let p = program(
+            vec![
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: mover(&[]),
+                        rhs: vec![h(MY)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::SetValue {
+                        lhs: mover(&[h(VELOCITY), h(LENGTH)]),
+                        rhs: lit(70.0),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.get(&[MY, VELOCITY, LENGTH]), Some(70.0));
     }
 
     #[test]

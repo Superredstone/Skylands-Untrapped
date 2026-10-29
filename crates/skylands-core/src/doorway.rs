@@ -167,6 +167,7 @@ mod tests {
                 animated: false,
                 actor_model_index: None,
                 tint: None,
+                weight: 0.0,
                 placement: None,
             },
             LevelMarker {
@@ -182,6 +183,7 @@ mod tests {
                 animated: false,
                 actor_model_index: None,
                 tint: None,
+                weight: 0.0,
                 placement: None,
             },
         ];

@@ -158,6 +158,21 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   definition not reversed) from this tick's actor and hero positions. Reading a field of a
   member through the op (`@subset.<x>.heading`) is not answered yet. Dumps list its operands;
   `tools/rea-bridge/ppcdis.py` disassembles such Gekko code.
+- Engine names cracked against `main.dol` strings (hash every printable string): `collision volume`
+  `dad64577`, `weight` `50a09eb9`, `waypoints` `7a0abb2b` (`first` `4881d841`, `last` `63e1d819`),
+  `collision` `2176db8f`, `facing` `86d05dcf`, `tilt` `603a6206`, `ID` `37386ae0`, `shadow cast`
+  `414b070c`, `Normalized Angle` `e000decb`; `velocity` `32741c32` / `length` `83d03615` /
+  `heading` `9f481715` / `pitch` `bd324ab1`, `vertical difference` `ecfb5226`, `horizontal length`
+  `faa02963`.
+- Movement: `global.bld` "Movement - Set Velocity" (`movementUpdate.ai`) ends at once when the
+  mover's `collision volume.weight == 0`, else writes `<mover>.velocity.length / heading / pitch`.
+  Core seeds `weight` from `CollisionInfo._weight` (+0x40; templates via +0xc4) and moves every
+  scripted actor by `velocity.length` units/s along heading/pitch (degrees; heading 0 = +Z, pitch
+  90 = up, as `OpDisplace`; the engine mover itself is not reversed). A path through a reference
+  that holds an engine object (`"mover" = my`) is that object's engine path (`engine_ref_key`).
+  Arena transport: weight 100, its scripts set `velocity.length = 0`; it does not fly yet because
+  "Navigate Waypoints" steers to `"Nav - next wp"` from the "Transport Path" `waypoints`
+  (`ActorWaypointList`, `tfbActorInfo` +0xf4), which the engine does not supply yet.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):

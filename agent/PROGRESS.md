@@ -254,8 +254,9 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
   - [x] `global.bld` macros run from level scripts (nested VM, `agent/SCRIPT_VM.md` "Macro calls").
   - [ ] Next: transport flight along "Transport Path" (`GroupTransport_Helecopter.ai` "Move" -> `Transport_Macros.ai`
     "Transport - Navigate Waypoints": `OpFindSubSet` (runs: `Minions` = heroes, engine distance/heading; reading a member's
-    field through the subset not yet) for the next waypoint, global "set velocity" macro, a script mover in
-    core and the engine fields it reads back such as `$2eb31462`, waypoint path data); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    field through the subset not yet) for the next waypoint; "Movement - Set Velocity" + core mover (done: weight seeded,
+    velocity moves scripted actors); next: waypoint path data (`ActorWaypointList`, `waypoints.first/last`) and the
+    "info" fields Navigate reads); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
