@@ -1105,6 +1105,57 @@ mod tests {
     }
 
     #[test]
+    fn spawn_of_a_template_held_in_a_reference() {
+        // `ArenaScript_300_000.ai` startup: `"natureHeavy" = Enemy_S4_NatureHeavy_`; later
+        // "BattleMaster - Spawn Dropship" runs `spawn "Left 1"` with it as the argument.
+        const ENEMY: usize = 0x880;
+        let p = {
+            let mut p = program(
+                vec![
+                    ins(
+                        11,
+                        0,
+                        Op::SetRef {
+                            lhs: vec![Ref::Obj(LOCAL)],
+                            rhs: vec![Ref::Obj(ENEMY)],
+                            desc: String::new(),
+                        },
+                    ),
+                    ins(
+                        SPAWN,
+                        0,
+                        Op::Spawn {
+                            template: vec![Ref::Obj(LOCAL)],
+                            actor: None,
+                            at: vec![h(MY)],
+                            facing: None,
+                        },
+                    ),
+                ],
+                vec![],
+            );
+            p.set.placements.insert(ENEMY);
+            p.set.templates.insert(
+                ENEMY,
+                crate::script::SpawnTemplate {
+                    offset: ENEMY,
+                    name: "Enemy_S4_NatureHeavy_".into(),
+                    ..coin()
+                },
+            );
+            p
+        };
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.reference(LOCAL), Some(&RefTarget::Placement(ENEMY)));
+        assert!(matches!(
+            &st.spawns[..],
+            [Effect::Spawn { template, .. }] if template.name == "Enemy_S4_NatureHeavy_"
+        ));
+    }
+
+    #[test]
     fn spawn_of_unresolved_template_skips_its_block() {
         // Template behind a variable reference: `0x8007c6bc` skips the setup block.
         let p = program(

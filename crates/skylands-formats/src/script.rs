@@ -256,6 +256,9 @@ pub struct ScriptSet {
     pub sets: HashMap<usize, Vec<String>>,
     /// `tfbActorInfo` objects in the file (what `OpSpawn ... at` can name).
     pub placements: HashSet<usize>,
+    /// Every `tfbActorInfo` as an `OpSpawn` template, for spawns whose template is a
+    /// reference (`spawn "Left 1"`, a macro param holding an enemy template).
+    pub templates: HashMap<usize, SpawnTemplate>,
     /// `PlacementReference` objects: level-wide references (`Current_BattleMaster`) that
     /// one actor's `OpSetReference` sets and every script reads.
     pub placement_refs: HashSet<usize>,
@@ -345,6 +348,25 @@ impl Reader<'_> {
             .map_or("", String::as_str)
     }
     /// `igDataList` (`_count` +0x08, `_data` +0x14) of raw words.
+    /// What an `OpSpawn` clone copies from the placement `a`.
+    fn template(&self, a: usize) -> SpawnTemplate {
+        SpawnTemplate {
+            offset: a,
+            ty: self.ty(a).into(),
+            name: self.cstr(a + 0x08),
+            id: self.u32(a + 0x20).unwrap_or(0),
+            script: self
+                .ptr(a + 0xa8)
+                .filter(|&p| self.ty(p) == "tfbScriptInfo")
+                .map(|p| self.cstr(p + 0x08)),
+            scale: [0, 4, 8].map(|k| f32::from_bits(self.u32(a + 0xb8 + k).unwrap_or(0x42c8_0000))),
+            tint: self
+                .data
+                .get(a + 0xc8..a + 0xcc)
+                .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]),
+        }
+    }
+
     fn list(&self, o: usize) -> Vec<u32> {
         let n = self.u32(o + 0x08).unwrap_or(0).min(4096) as usize;
         let Some(arr) = self.ptr(o + 0x14) else {
@@ -580,22 +602,7 @@ impl Reader<'_> {
                 let template = self.lhs(o + 0x20);
                 // Ops and variables in the path hold references; resolved at run time.
                 let actor = match template[..] {
-                    [Ref::Obj(a)] if !self.ty(a).starts_with("Op") => Some(SpawnTemplate {
-                        offset: a,
-                        ty: self.ty(a).into(),
-                        name: self.cstr(a + 0x08),
-                        id: self.u32(a + 0x20).unwrap_or(0),
-                        script: self
-                            .ptr(a + 0xa8)
-                            .filter(|&p| self.ty(p) == "tfbScriptInfo")
-                            .map(|p| self.cstr(p + 0x08)),
-                        scale: [0, 4, 8]
-                            .map(|k| f32::from_bits(self.u32(a + 0xb8 + k).unwrap_or(0x42c8_0000))),
-                        tint: self
-                            .data
-                            .get(a + 0xc8..a + 0xcc)
-                            .map_or([0x80, 0x80, 0x80, 0xff], |b| [b[0], b[1], b[2], b[3]]),
-                    }),
+                    [Ref::Obj(a)] if !self.ty(a).starts_with("Op") => Some(self.template(a)),
                     _ => None,
                 };
                 Op::Spawn {
@@ -700,7 +707,8 @@ impl ScriptSet {
                 .map(|o| o.offset)
                 .collect()
         };
-        let placements = of_type("tfbActorInfo");
+        let placements: HashSet<usize> = of_type("tfbActorInfo");
+        let templates = placements.iter().map(|&a| (a, r.template(a))).collect();
         let placement_refs = of_type("PlacementReference");
         let set_names = objects
             .iter()
@@ -788,6 +796,7 @@ impl ScriptSet {
             opaque_operands,
             sets,
             placements,
+            templates,
             placement_refs,
             set_names,
             macro_names,
@@ -1143,6 +1152,9 @@ pub enum RefTarget {
     /// Another actor, by the engine's id for it (a level `PlacementReference` such as
     /// `Current_BattleMaster` that another script set).
     Actor(u64),
+    /// A placement object itself (`tfbActorInfo` offset): an enemy or transport template
+    /// held in a reference variable (`"natureHeavy" = Enemy_S4_NatureHeavy_`).
+    Placement(usize),
     /// Something only the live engine knows (macro output...).
     Unknown,
 }
@@ -1324,6 +1336,11 @@ impl<'a> Vm<'a> {
         let Ok(p) = self.canon(path) else {
             return RefTarget::Unknown;
         };
+        if let [Ref::Obj(o)] = p[..] {
+            if self.set.placements.contains(&o) {
+                return RefTarget::Placement(o);
+            }
+        }
         if let Some((i, k)) = self.clone_key(&p) {
             if k == [MY_HASH] {
                 return RefTarget::Spawned(self.spawning[i].serial);
@@ -1545,6 +1562,19 @@ impl<'a> Vm<'a> {
     }
 
     fn run_macro(&mut self, si: usize, oi: usize, args: &[(String, Value)]) -> Result<(), VmError> {
+        self.run_macro_with(si, oi, args, None)
+    }
+
+    /// `run_macro` with a script call's reference arguments by parameter name; there,
+    /// reference parameters without one start `null` (not what the previous call left).
+    /// Calls from the engine side (`None`) leave them unknown.
+    fn run_macro_with(
+        &mut self,
+        si: usize,
+        oi: usize,
+        args: &[(String, Value)],
+        ref_args: Option<&[(String, RefTarget)]>,
+    ) -> Result<(), VmError> {
         if self.depth >= MAX_DEPTH {
             return Err(VmError::Budget);
         }
@@ -1561,6 +1591,17 @@ impl<'a> Vm<'a> {
         for (name, v) in args {
             if let Some(&(var, ..)) = params.iter().find(|p| self.set.var_name(p.0) == name) {
                 self.write(&[Ref::Obj(var)], *v);
+            }
+        }
+        for &(var, _, rhs) in params.iter().filter(|_| ref_args.is_some()) {
+            if rhs.is_none() {
+                let name = self.set.var_name(var);
+                let ref_args = ref_args.unwrap_or_default();
+                let t = ref_args
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(RefTarget::Null, |(_, t)| t.clone());
+                self.refs.insert(vec![Ref::Obj(var)], t);
             }
         }
         self.depth += 1;
@@ -1646,12 +1687,31 @@ impl<'a> Vm<'a> {
             return Ok(after);
         };
         let mut args = Vec::new();
+        let mut ref_args = Vec::new();
         for &(var, flags, rhs) in &site {
-            if let (0, Some(rhs)) = (flags & PARAM_OUTPUT, rhs) {
-                args.push((self.set.var_name(var).to_string(), self.eval(rhs)?));
+            match (flags & PARAM_OUTPUT, rhs) {
+                (0, Some(rhs)) => args.push((self.set.var_name(var).to_string(), self.eval(rhs)?)),
+                // A reference argument: the call site's `RHSReferenceStack` (+0x30).
+                (0, None) => {
+                    let path = self.set.opaque_operands.get(&var).and_then(|ops| {
+                        ops.iter().find_map(|(f, o)| match o {
+                            OpaqueOperand::Path { stack, path }
+                                if *f == 0x30 && stack == "RHSReferenceStack" =>
+                            {
+                                Some(path.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    if let Some(path) = path {
+                        let t = self.ref_target(&path);
+                        ref_args.push((self.set.var_name(var).to_string(), t));
+                    }
+                }
+                _ => {}
             }
         }
-        self.run_macro(tsi, toi, &args)?;
+        self.run_macro_with(tsi, toi, &args, Some(&ref_args))?;
         let (defs, _) = self.params(tsi, toi);
         for &(var, ..) in &site {
             let name = self.set.var_name(var);
@@ -1928,10 +1988,13 @@ impl<'a> Vm<'a> {
                 // Blocks of ops that need live objects (find variable, spawn, for each):
                 // skipped, as if nothing was found.
                 // `0x8007c6bc`: an unresolved template or position skips the setup block.
-                // Templates behind references (variables, macro params, other spawns) and
-                // `global.bld` / engine handles are not known here.
+                // A template behind a reference that holds a placement (variables, macro
+                // params) resolves; `global.bld` / engine handles do not.
                 Op::Spawn {
-                    actor, at, facing, ..
+                    template,
+                    actor,
+                    at,
+                    facing,
                 } => {
                     let at = match (self.set.engine_key(at), &at[..]) {
                         (Some(k), _) => Some(SpawnAt::Engine(k)),
@@ -1944,10 +2007,18 @@ impl<'a> Vm<'a> {
                                 self.clone_ids.get(&s).map(|&id| SpawnAt::Actor(id))
                             }
                             RefTarget::Engine(k) => Some(SpawnAt::Engine(k)),
+                            RefTarget::Placement(o) => Some(SpawnAt::Placement(o)),
                             _ => None,
                         },
                     };
-                    let (Some(template), Some(at)) = (actor, at) else {
+                    let referenced = match actor {
+                        Some(_) => None,
+                        None => match self.ref_target(template) {
+                            RefTarget::Placement(o) => self.set.templates.get(&o),
+                            _ => None,
+                        },
+                    };
+                    let (Some(template), Some(at)) = (actor.as_ref().or(referenced), at) else {
                         pc += skip;
                         continue;
                     };

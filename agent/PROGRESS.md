@@ -247,8 +247,11 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     references across scripts (`RefTarget::Actor`, `Effect::ForActor`, core `PlacementRefs`; see `agent/SCRIPT_VM.md`).
     Arena 300/000: `Current_BattleMaster` -> `_BattleMaster`, `Active _Audience` -> `Audience_Controller`,
     `Active_Brock` -> `ArenaMaster_Brock`.
-  - [ ] Next: spawns from templates held in
-    macro params ("Transport Template", "Left 1"...); transport flight along "Transport Path"; `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+  - [x] Spawns from templates held in references and macro params: a reference to a `tfbActorInfo` is
+    `RefTarget::Placement`, `spawn <reference>` uses `ScriptSet::templates`, script macro calls bind reference arguments
+    (call-site `RHSReferenceStack` +0x30). Stage 1 now spawns `GroupTransport_Helecopter` ("Move") and its Sporeasaur /
+    armored BirdCopter passengers ("disabled", waiting at the BattleMaster), plus their part clones.
+  - [ ] Next: transport flight along "Transport Path" (`GroupTransport_Helecopter.ai` "Move"); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).

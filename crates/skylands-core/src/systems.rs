@@ -4411,6 +4411,7 @@ mod tests {
             set_names: Default::default(),
             placements: Default::default(),
             placement_refs: Default::default(),
+            templates: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4503,6 +4504,7 @@ mod tests {
             set_names: Default::default(),
             placements: Default::default(),
             placement_refs: Default::default(),
+            templates: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4843,7 +4845,16 @@ mod tests {
         }
         // Spawned at their own placements (`spawn "_BattleMaster" at _BattleMaster`), with
         // their scripts running.
-        for name in ["_BattleMaster", "Audience_Controller", "ArenaMaster_Brock"] {
+        // Stage 1's "BattleMaster - Spawn Dropship" spawns the transport and its passengers
+        // from templates passed as reference arguments ("Transport Template", "Left 1"...).
+        for name in [
+            "_BattleMaster",
+            "Audience_Controller",
+            "ArenaMaster_Brock",
+            "GroupTransport_Helecopter",
+            "Enemy_S4_Sporeasaur_",
+            "Enemy_S4_BirdCopter_(armored)",
+        ] {
             assert!(
                 clones
                     .iter()

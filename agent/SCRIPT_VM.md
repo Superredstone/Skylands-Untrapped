@@ -204,6 +204,11 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   BackgroundBird, Pennant, Earth gate boulders (rigid). Not done: clones at other objects,
   particle/sprite templates (`tfbParticleInfo` x64), parenting (clones do not follow the parent),
   the default state of a clone with no `OpStartSequence` (plays `idle` or the first clip).
+- The template may be a reference that holds a placement (`RefTarget::Placement`: a reference
+  variable or macro param set to a `tfbActorInfo`); it spawns `ScriptSet::templates[offset]`.
+  Script macro calls bind reference arguments by name from the call site's `RHSReferenceStack`
+  (param +0x30), resolved in the caller; reference params without an argument start `null`.
+  Engine-side calls (`Vm::call`) leave reference params unknown (enemy stats rely on that).
 - `at` may also name a placed `tfbActorInfo` (`ScriptSet::placements`): `SpawnAt::Placement`, the clone
   starts at that placement's transform (arena controllers spawn templates at their own placement).
   Any other object path (reference variables, macro params) still skips the spawn.
