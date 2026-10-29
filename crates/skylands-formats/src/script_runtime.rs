@@ -125,6 +125,8 @@ pub struct ActorScriptState {
     pub engine_sets: HashMap<String, Vec<RefTarget>>,
     pub self_id: Option<u64>,
     pub fields: Option<std::sync::Arc<dyn crate::script::MemberFields>>,
+    /// Debugging: when `Some`, the ops each tick runs are appended (`Vm::trace`).
+    pub trace: Option<Vec<(bool, usize)>>,
     /// Other actors' variables for `OpFindVariable`; the engine moves its board in for
     /// the tick and takes it back after.
     pub board: VarBoard,
@@ -392,6 +394,7 @@ impl ScriptProgram {
         vm.engine_sets = st.engine_sets.clone();
         vm.self_id = st.self_id;
         vm.fields = st.fields.clone();
+        vm.trace = st.trace.take();
         vm.board = std::mem::take(&mut st.board);
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
@@ -436,6 +439,7 @@ impl ScriptProgram {
         st.refs = std::mem::take(&mut vm.refs);
         st.sets = std::mem::take(&mut vm.sets);
         st.global_vars = std::mem::take(&mut vm.global_vars);
+        st.trace = vm.trace.take();
         st.global_refs = std::mem::take(&mut vm.global_refs);
         st.clone_ids = std::mem::take(&mut vm.clone_ids);
         st.save_writes.append(&mut vm.save_writes);

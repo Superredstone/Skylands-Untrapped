@@ -284,6 +284,9 @@ pub struct ScriptSet {
     /// `OpSetReference._indexRHS` (+0x24) by op offset: the element of a list the
     /// reference takes (`.waypoints[i]`).
     pub ref_index: HashMap<usize, Rhs>,
+    /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
+    /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
+    pub use_paths: HashMap<usize, Vec<Ref>>,
     /// `PlacementReference` objects: level-wide references (`Current_BattleMaster`) that
     /// one actor's `OpSetReference` sets and every script reads.
     pub placement_refs: HashSet<usize>,
@@ -785,6 +788,17 @@ impl ScriptSet {
             .filter(|o| o.type_name.as_deref() == Some("OpSetReference"))
             .filter_map(|o| Some((o.offset, r.rhs_at(o.offset + 0x24)?)))
             .collect();
+        let use_paths = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("OpUseMacro"))
+            .filter_map(|o| {
+                let path = r.lhs(o.offset + 0x1c);
+                let literal = path
+                    .iter()
+                    .any(|p| matches!(p, Ref::Obj(x) if r.ty(*x).starts_with("OpDefineMacro")));
+                (!literal && !path.is_empty()).then_some((o.offset, path))
+            })
+            .collect();
         let placement_refs = of_type("PlacementReference");
         let set_names = objects
             .iter()
@@ -875,6 +889,7 @@ impl ScriptSet {
             templates,
             waypoints,
             ref_index,
+            use_paths,
             placement_refs,
             set_names,
             macro_names,
@@ -1219,6 +1234,8 @@ pub struct Vm<'a> {
     pub save: Option<std::sync::Arc<dyn SaveParams>>,
     /// Members of `global.bld` sets the engine fills (`"Minions"`: the heroes), by name.
     pub engine_sets: HashMap<String, Vec<RefTarget>>,
+    /// Debugging: when set, every op run is appended as (`global.bld`?, op offset).
+    pub trace: Option<Vec<(bool, usize)>>,
     /// Engine id of the running actor, and the engine's answers for member fields.
     pub self_id: Option<u64>,
     pub fields: Option<std::sync::Arc<dyn MemberFields>>,
@@ -1254,6 +1271,12 @@ pub enum RefTarget {
     /// Another actor, by the engine's id for it (a level `PlacementReference` such as
     /// `Current_BattleMaster` that another script set).
     Actor(u64),
+    /// A macro parameter that stands for the caller's variable (a record such as the
+    /// transport's `"My Info"` passed as `"info"`): paths through it are that path.
+    Alias(Vec<Ref>),
+    /// A macro definition (`OpDefineMacro[Specialization]` offset) held in a variable,
+    /// called by a dynamic `use` (`"Transport Type"."Movement" = "Airship - Movement"`).
+    Macro(usize),
     /// Waypoint `index` of the placement `owner`'s `ActorWaypointList`
     /// (`"Nav - next wp" = "Nav - Flight Path".waypoints[i]`).
     Waypoint {
@@ -1455,6 +1478,7 @@ impl<'a> Vm<'a> {
             engine_sets: HashMap::new(),
             self_id: None,
             fields: None,
+            trace: None,
             save_writes: Vec::new(),
             spawned: 0,
             global_index: None,
@@ -1481,6 +1505,9 @@ impl<'a> Vm<'a> {
             if self.set.placements.contains(&o) {
                 return RefTarget::Placement(o);
             }
+            if self.index.macros.contains_key(&o) {
+                return RefTarget::Macro(o);
+            }
         }
         if let Some((i, k)) = self.clone_key(&p) {
             if k == [MY_HASH] {
@@ -1492,6 +1519,19 @@ impl<'a> Vm<'a> {
         }
         match p.first() {
             Some(Ref::Obj(_)) if self.refs.get(&p[..1]) == Some(&RefTarget::Null) => {
+                RefTarget::Null
+            }
+            // A script's own variable that no `OpSetReference` ever pointed anywhere (nor
+            // any record it is part of) is `null`: `Sky_Traps.ai` asks
+            // `"trapping data".<defeat sequence> != null`, which only the trap sequence sets.
+            Some(Ref::Obj(v))
+                if self.set.vars.get(v).is_some_and(|i| {
+                    matches!(
+                        i.type_name.as_str(),
+                        "ValueInfo" | "OpCreateVariable" | "ScriptStructure"
+                    )
+                }) && (1..=p.len()).all(|k| !self.refs.contains_key(&p[..k])) =>
+            {
                 RefTarget::Null
             }
             _ => RefTarget::Unknown,
@@ -1796,6 +1836,18 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// The macro a call at `at` runs when its target path names none (a dynamic `use ?`):
+    /// the definition its call-site params belong to (`OpMacroParameter` +0x38).
+    fn site_macro(&self, si: usize, at: usize) -> Option<usize> {
+        let (_, end) = self.params(si, at);
+        self.set.scripts[si].ops[(at + 1).min(end)..end]
+            .iter()
+            .find_map(|i| match i.op {
+                Op::Param { macro_def, .. } => macro_def,
+                _ => None,
+            })
+    }
+
     fn param_rhs(&self, si: usize, at: usize) -> Vec<(usize, u16, Option<&'a Rhs>)> {
         let set: &'a ScriptSet = self.set;
         let ops = &set.scripts[si].ops;
@@ -1863,6 +1915,7 @@ impl<'a> Vm<'a> {
         sub.engine_sets = std::mem::take(&mut self.engine_sets);
         sub.self_id = self.self_id;
         sub.fields = self.fields.clone();
+        sub.trace = self.trace.take();
         sub.rng = self.rng;
         sub.spawned = self.spawned;
         sub.steps = self.steps;
@@ -1886,6 +1939,7 @@ impl<'a> Vm<'a> {
         self.globals = std::mem::take(&mut sub.globals);
         self.clone_ids = std::mem::take(&mut sub.clone_ids);
         self.engine_sets = std::mem::take(&mut sub.engine_sets);
+        self.trace = sub.trace.take();
         self.rng = sub.rng;
         self.spawned = sub.spawned;
         self.steps = sub.steps;
@@ -2113,7 +2167,19 @@ impl<'a> Vm<'a> {
                 // A reference argument: the call site's `RHSReferenceStack` (+0x30).
                 (0, None) => {
                     if let Some(path) = self.ref_arg_path(var) {
-                        let t = self.ref_target(&path);
+                        // A variable no reference was stored in is passed as itself.
+                        let t = match self.ref_target(&path) {
+                            t @ (RefTarget::Null | RefTarget::Unknown) => match self.canon(&path) {
+                                Ok(p)
+                                    if matches!(p.first(), Some(Ref::Obj(v))
+                                        if self.set.vars.contains_key(v)) =>
+                                {
+                                    RefTarget::Alias(p)
+                                }
+                                _ => t,
+                            },
+                            t => t,
+                        };
                         ref_args.push((self.set.var_name(var).to_string(), t));
                     }
                 }
@@ -2150,6 +2216,9 @@ impl<'a> Vm<'a> {
                 return Err(VmError::Budget);
             }
             let ins = &ops[pc];
+            if let Some(t) = self.trace.as_mut() {
+                t.push((self.home.is_some(), ins.offset));
+            }
             let skip = ins.br as usize;
             pc += 1;
             match &ins.op {
@@ -2229,7 +2298,18 @@ impl<'a> Vm<'a> {
                     }
                     pc = end;
                 }
-                Op::UseMacro { target } => pc = self.use_macro(si, pc - 1, *target)?,
+                Op::UseMacro { target } => {
+                    // A dynamic call runs the macro its target variable holds; failing
+                    // that, the base its call-site params belong to.
+                    let held = self.set.use_paths.get(&ins.offset).and_then(|p| {
+                        match self.ref_target(p) {
+                            RefTarget::Macro(m) => Some(m),
+                            _ => None,
+                        }
+                    });
+                    let target = target.or(held).or_else(|| self.site_macro(si, pc - 1));
+                    pc = self.use_macro(si, pc - 1, target)?
+                }
                 Op::ChangeMembership { set, op, group } => {
                     if let Ok(key) = self.canon(set) {
                         let group = self.members(group);
@@ -2603,6 +2683,10 @@ impl<'a> Vm<'a> {
         let mut p = path.to_vec();
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
+            if let Some(RefTarget::Alias(a)) = self.refs.get(&p[..1]) {
+                p = a.iter().chain(&p[1..]).copied().collect();
+                continue;
+            }
             let alias = self
                 .index
                 .aliases
@@ -3553,6 +3637,125 @@ mod tests {
         // Without `global.bld`'s index the call keeps its literals, as before.
         let mut vm = Vm::new(&l, Some(&g));
         assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(-1));
+    }
+
+    #[test]
+    fn vm_never_set_record_reference_is_null() {
+        // `Sky_Traps.ai`: `"trapping data"."defeat data"."defeated actor" != null` is false
+        // until the trap sequence sets it (it used to count as set).
+        let (rec, f1, f2, r) = (0x100, 0x110, 0x120, 0x130);
+        let mut s = script_set(
+            vec![
+                ins(1, 4, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    1,
+                    Op::CheckRef {
+                        rel: 5,
+                        desc: "OpCheckReference".into(),
+                        lhs: vec![Ref::Obj(rec), Ref::Obj(f1), Ref::Obj(f2)],
+                        rhs: vec![Ref::Handle(0)],
+                    },
+                ),
+                ins(4, 0, set(r, lit(I(1)))),
+            ],
+            &[
+                (rec, "trapping data"),
+                (f1, "defeat data"),
+                (f2, "defeated actor"),
+                (r, "r"),
+            ],
+        );
+        s.vars.get_mut(&rec).unwrap().type_name = "ScriptStructure".into();
+        s.handle_ids = vec![NULL_HASH];
+        s.handle_ns = vec![name_hash("level.bld")];
+        assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(0));
+    }
+
+    #[test]
+    fn vm_dynamic_use_runs_the_held_macro_on_the_callers_record() {
+        // `Transport_Macros.ai`: `"My Info"."Transport Type" = "Airship - Movement"`, then
+        // `use "info"."Transport Type" (info = "My Info")`: the specialization runs, and its
+        // `"info".x = 7` lands in the caller's record.
+        let (rec, tt, x, r) = (0x100, 0x110, 0x120, 0x130);
+        let (site_info, def_info, spec, call) = (0x200, 0x210, 0x300, 0x400);
+        let mut s = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(rec), Ref::Obj(tt)],
+                        rhs: vec![Ref::Obj(spec)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(call, 2, Op::UseMacro { target: None }),
+                ins(5, 1, Op::Interface),
+                param(site_info, 0, None),
+                ins(
+                    6,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(rec), Ref::Obj(x)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+                ins(
+                    spec,
+                    3,
+                    Op::DefineMacro {
+                        name: "Airship - Movement".into(),
+                    },
+                ),
+                ins(7, 1, Op::Interface),
+                param(def_info, PARAM_OUTPUT, None),
+                ins(
+                    8,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(def_info), Ref::Obj(x)],
+                        rhs: lit(I(7)),
+                    },
+                ),
+            ],
+            &[(rec, "My Info"), (tt, "Transport Type"), (x, "x"), (r, "r")],
+        );
+        for (v, n) in [(site_info, "info"), (def_info, "info")] {
+            s.vars.insert(
+                v,
+                VarInfo {
+                    name: n.into(),
+                    type_name: "OpMacroParameter".into(),
+                    init: None,
+                },
+            );
+        }
+        s.use_paths.insert(call, vec![Ref::Obj(rec), Ref::Obj(tt)]);
+        s.opaque_operands.insert(
+            site_info,
+            vec![(
+                0x30,
+                OpaqueOperand::Path {
+                    stack: "RHSReferenceStack".into(),
+                    path: vec![Ref::Obj(rec)],
+                },
+            )],
+        );
+        assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(7));
     }
 
     #[test]

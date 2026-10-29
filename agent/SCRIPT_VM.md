@@ -189,9 +189,26 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   reads that object's field (`referenced_field`): a waypoint's `orientation.facing/tilt/roll` from
   its angles (order assumed facing = +0x2c, tilt = +0x28, roll = +0x30, all zero in the arena),
   `distance/horizontal distance/heading/pitch` of a waypoint (core: owner placement transform x
-  local position) or an actor from the engine (`MemberFields`). Arena 300/000: the transport still
-  keeps `velocity.length = 0` for 10 s of life; which branch of "Navigate Waypoints" fails is not
-  traced yet (next: an op trace for one actor's scripts).
+  local position) or an actor from the engine (`MemberFields`).
+- Debugging: `ActorScriptState::trace = Some(vec![])` records the ops one actor's scripts run
+  (`(global.bld?, op offset)`, nested `global.bld` runs included); map offsets to the
+  `dump_scripts` listings (`@offset`).
+- Found with it in the arena transport ("Navigate Waypoints"), each fixed and tested:
+  1. `Sky_Traps.ai` "Capture Sequence - Check State" asks `"trapping data"."defeat data".
+     "defeated actor" != null`; the old "an unknown reference is set" fallback made every
+     transport think a defeat sequence was running (velocity 0, end). Now a path from a script's
+     own `ValueInfo` / `OpCreateVariable` / `ScriptStructure` variable that no reference was ever
+     stored in (nor in a prefix) is `null`. Macro params keep the old fallback.
+  2. Dynamic `use ?`: the target is a `ScriptGroupStack` path to a variable holding a macro
+     (`"info"."Transport Type".<macro>`, `_editType` +0x18 = the empty base such as "Transport -
+     Movement"); the override ("Airship - Movement", an `OpDefineMacroSpecialization`) is stored
+     there with `OpSetReference`. `ScriptSet::use_paths` keeps such paths, a reference to a macro
+     definition is `RefTarget::Macro`, and the call runs the held macro (else the base its
+     call-site params belong to, `OpMacroParameter` +0x38).
+  3. Records passed by reference: a reference argument whose path is a plain variable no reference
+     was stored in (`"My Info"` passed as `"info"`) becomes `RefTarget::Alias(path)`; `canon`
+     rewrites paths through the param to the caller's variable.
+  The transport still keeps `velocity.length = 0` after these (not traced further yet).
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
