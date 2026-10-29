@@ -180,11 +180,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   (`Arena_DS_Path_01..04`, `Arena_DS_Path_Center_Mech`, 14 `landingQueue(n)`, some enemies and rule
   controllers); the first dropship's "Transport Path" is `Arena_DS_Path_04` (4 waypoints).
   `Transport_Macros.ai` keeps navigation in an `"info"` record: `"Nav - wp index"` steps through
-  `"Nav - Flight Path".waypoints` (`.count`), `"Nav - next wp"` is set by an `OpSetReference` whose
-  right side ends in a handle (`[info, "Nav - Flight Path", $71]`: indexed access, not reversed),
-  and steering reads the waypoint's `heading` / `pitch` / `distance` from the transport. Needed
-  next: waypoint lists as script objects, that indexed reference, and reading fields of a
-  referenced object (relative and its own orientation).
+  `"Nav - Flight Path".waypoints` (`.count`), `"Nav - next wp"` is set by an `OpSetReference` with
+  an index: `OpSetReference._indexRHS` +0x24 (`OpCheckReference._indexRHS` +0x28) picks element
+  `i` of the list the right side names (`[info, "Nav - Flight Path", waypoints]`), and steering
+  reads the waypoint's `heading` / `pitch` / `distance` from the transport.
+  VM: `ScriptSet::waypoints` (by placement), `ScriptSet::ref_index` (by op), `RefTarget::Waypoint
+  { owner, index }`; `<placement ref>.waypoints.count`; a path whose prefix is a stored reference
+  reads that object's field (`referenced_field`): a waypoint's `orientation.facing/tilt/roll` from
+  its angles (order assumed facing = +0x2c, tilt = +0x28, roll = +0x30, all zero in the arena),
+  `distance/horizontal distance/heading/pitch` of a waypoint (core: owner placement transform x
+  local position) or an actor from the engine (`MemberFields`). Arena 300/000: the transport still
+  keeps `velocity.length = 0` for 10 s of life; which branch of "Navigate Waypoints" fails is not
+  traced yet (next: an op trace for one actor's scripts).
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):

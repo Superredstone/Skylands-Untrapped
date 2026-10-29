@@ -205,6 +205,15 @@ pub enum Op {
     Other(String),
 }
 
+/// `ActorWaypoint` (0x38, no reflected fields): `+0x1c` position, likely in the owning
+/// placement's space, and `+0x28` three angles (zero in the arena paths; scripts read
+/// them as `orientation.facing / tilt / roll`, order not confirmed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Waypoint {
+    pub local: [f32; 3],
+    pub angles: [f32; 3],
+}
+
 /// Placement an `OpSpawn` clones: object offset, type, `+0x08` name and
 /// `AbstractPlacement._ID` (+0x20). The clone copies the template's fields
 /// (`0x80156328`), so also its `Placement._script` (+0xa8, `.ai` path),
@@ -270,6 +279,11 @@ pub struct ScriptSet {
     /// Every `tfbActorInfo` as an `OpSpawn` template, for spawns whose template is a
     /// reference (`spawn "Left 1"`, a macro param holding an enemy template).
     pub templates: HashMap<usize, SpawnTemplate>,
+    /// `tfbActorInfo` +0xf4 `ActorWaypointList`s, by placement.
+    pub waypoints: HashMap<usize, Vec<Waypoint>>,
+    /// `OpSetReference._indexRHS` (+0x24) by op offset: the element of a list the
+    /// reference takes (`.waypoints[i]`).
+    pub ref_index: HashMap<usize, Rhs>,
     /// `PlacementReference` objects: level-wide references (`Current_BattleMaster`) that
     /// one actor's `OpSetReference` sets and every script reads.
     pub placement_refs: HashSet<usize>,
@@ -747,6 +761,30 @@ impl ScriptSet {
         };
         let placements: HashSet<usize> = of_type("tfbActorInfo");
         let templates = placements.iter().map(|&a| (a, r.template(a))).collect();
+        let f32_at = |o: usize| r.u32(o).map_or(0.0, f32::from_bits);
+        let waypoints = placements
+            .iter()
+            .filter_map(|&a| {
+                let list = r
+                    .ptr(a + 0xf4)
+                    .filter(|&l| r.ty(l) == "ActorWaypointList")?;
+                let wps = r
+                    .list(list)
+                    .into_iter()
+                    .filter_map(|w| r.decode_ptr(w))
+                    .map(|w| Waypoint {
+                        local: [0x1c, 0x20, 0x24].map(|k| f32_at(w + k)),
+                        angles: [0x28, 0x2c, 0x30].map(|k| f32_at(w + k)),
+                    })
+                    .collect();
+                Some((a, wps))
+            })
+            .collect();
+        let ref_index = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("OpSetReference"))
+            .filter_map(|o| Some((o.offset, r.rhs_at(o.offset + 0x24)?)))
+            .collect();
         let placement_refs = of_type("PlacementReference");
         let set_names = objects
             .iter()
@@ -835,6 +873,8 @@ impl ScriptSet {
             sets,
             placements,
             templates,
+            waypoints,
+            ref_index,
             placement_refs,
             set_names,
             macro_names,
@@ -1214,6 +1254,12 @@ pub enum RefTarget {
     /// Another actor, by the engine's id for it (a level `PlacementReference` such as
     /// `Current_BattleMaster` that another script set).
     Actor(u64),
+    /// Waypoint `index` of the placement `owner`'s `ActorWaypointList`
+    /// (`"Nav - next wp" = "Nav - Flight Path".waypoints[i]`).
+    Waypoint {
+        owner: usize,
+        index: usize,
+    },
     /// A placement object itself (`tfbActorInfo` offset): an enemy or transport template
     /// held in a reference variable (`"natureHeavy" = Enemy_S4_NatureHeavy_`).
     Placement(usize),
@@ -1227,6 +1273,12 @@ const NULL_HASH: u32 = 0x7707_4ba4;
 const MY_HASH: u32 = 0x4c2d_fe93;
 /// Name hash of a set's `count` field.
 const SET_COUNT: u32 = 0x39b1_ddf4;
+/// `waypoints` (a placement's `ActorWaypointList`), and `orientation.facing/tilt/roll`.
+const WAYPOINTS: u32 = 0x7a0a_bb2b;
+const ORIENTATION_HASH: u32 = 0xc545_bc21;
+const FACING_HASH: u32 = 0x86d0_5dcf;
+const TILT_HASH: u32 = 0x603a_6206;
+const ROLL_HASH: u32 = 0x16ff_3d1e;
 
 /// Object an effect acts on: an engine object of this actor, a clone being set up
 /// (index into `Vm::spawning`, key as the clone's own `my` path), or an earlier clone
@@ -1243,6 +1295,16 @@ enum Target {
 /// ids, `RefTarget::Actor`).
 pub trait MemberFields: Send + Sync + std::fmt::Debug {
     fn field(&self, me: u64, member: u64, field: u32) -> Option<f32>;
+    /// `field` of a waypoint of placement `owner` at `local` (its own space), from `me`.
+    fn waypoint_field(
+        &self,
+        _me: u64,
+        _owner: usize,
+        _local: [f32; 3],
+        _field: u32,
+    ) -> Option<f32> {
+        None
+    }
 }
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
@@ -1496,6 +1558,74 @@ impl<'a> Vm<'a> {
             rest => self.set.engine_key(rest)?,
         };
         Some((*serial, [MY_HASH].into_iter().chain(rest).collect()))
+    }
+
+    /// Element `i` of the list a path names: `<placement>.waypoints[i]`.
+    fn indexed_target(&self, path: &[Ref], i: i64) -> RefTarget {
+        let Some((Ref::Handle(h), owner)) = path.split_last() else {
+            return RefTarget::Unknown;
+        };
+        if self.set.engine_key(&[Ref::Handle(*h)]) != Some(vec![WAYPOINTS]) {
+            return RefTarget::Unknown;
+        }
+        match self.ref_target(owner) {
+            RefTarget::Placement(o)
+                if usize::try_from(i)
+                    .is_ok_and(|i| i < self.home_waypoints(o).map_or(0, Vec::len)) =>
+            {
+                RefTarget::Waypoint {
+                    owner: o,
+                    index: i as usize,
+                }
+            }
+            _ => RefTarget::Null,
+        }
+    }
+
+    /// Waypoints of placement `o` (in this file, or the level a `global.bld` run was
+    /// called from).
+    fn home_waypoints(&self, o: usize) -> Option<&Vec<Waypoint>> {
+        self.set
+            .waypoints
+            .get(&o)
+            .or_else(|| self.home?.waypoints.get(&o))
+    }
+
+    /// A field of the object a reference prefix of `p` holds (`"info"."Nav - next wp".
+    /// heading`): waypoint data and engine answers relative to this actor. `None` when
+    /// no prefix is such a reference or the field is not known.
+    fn referenced_field(&self, p: &[Ref]) -> Option<Value> {
+        let (k, target) = (1..p.len())
+            .rev()
+            .find_map(|k| Some((k, self.refs.get(&p[..k])?.clone())))?;
+        let rest = self.set.engine_key(&p[k..])?;
+        match (target, &rest[..]) {
+            (RefTarget::Placement(o), [WAYPOINTS, SET_COUNT]) => {
+                Some(Value::Int(self.home_waypoints(o).map_or(0, Vec::len) as i32))
+            }
+            (RefTarget::Waypoint { owner, index }, [ORIENTATION_HASH, angle]) => {
+                let wp = self.home_waypoints(owner)?.get(index)?;
+                let i = [FACING_HASH, TILT_HASH, ROLL_HASH]
+                    .iter()
+                    .position(|a| a == angle)?;
+                // Order assumed like placements (facing = y, tilt = x, roll = z).
+                Some(Value::Float(wp.angles[[1, 0, 2][i]]))
+            }
+            (RefTarget::Waypoint { owner, index }, [f]) => {
+                let wp = self.home_waypoints(owner)?.get(index)?;
+                let v = self
+                    .fields
+                    .as_ref()?
+                    .waypoint_field(self.self_id?, owner, wp.local, *f)?;
+                Some(Value::Float(v))
+            }
+            (t, [f]) => {
+                let id = self.member_id(&t)?;
+                let v = self.fields.as_ref()?.field(self.self_id?, id, *f)?;
+                Some(Value::Float(v))
+            }
+            _ => None,
+        }
     }
 
     /// A path through a reference to another actor (`Current_BattleMaster.x`): its id and
@@ -2044,7 +2174,13 @@ impl<'a> Vm<'a> {
                     }
                 }
                 Op::SetRef { lhs, rhs, .. } => {
-                    let t = self.ref_target(rhs);
+                    let t = match self.set.ref_index.get(&ins.offset) {
+                        Some(i) => {
+                            let i = self.eval(i)?.as_f32() as i64;
+                            self.indexed_target(rhs, i)
+                        }
+                        None => self.ref_target(rhs),
+                    };
                     if let Ok(p) = self.canon(lhs) {
                         self.refs.insert(p, t);
                     }
@@ -2537,6 +2673,9 @@ impl<'a> Vm<'a> {
         }
         if let Some(v) = self.engine_ref_key(&path).and_then(|k| self.engine.get(&k)) {
             return *v;
+        }
+        if let Some(v) = self.referenced_field(&path) {
+            return v;
         }
         if let Some(v) = self.vars.get(&path) {
             return *v;

@@ -573,7 +573,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 17] = [
+    const NAMES: [u32; 19] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -591,7 +591,10 @@ mod tests {
         DISTANCE,
         VELOCITY,
         LENGTH,
+        WAYPOINTS,
+        ROLL,
     ];
+    const WAYPOINTS: u32 = 0x7a0a_bb2b;
     const COUNT: u32 = 0x39b1_ddf4;
     const DISTANCE: u32 = 0x2eb3_1462;
     fn h(id: u32) -> Ref {
@@ -1317,6 +1320,93 @@ mod tests {
         p.tick(0, &mut st, 1.0 / 60.0);
         assert!(st.error.is_none(), "{:?}", st.error);
         assert_eq!(st.get(&[MY, VELOCITY, LENGTH]), Some(70.0));
+    }
+
+    /// Distance to a waypoint = its local x (placement at the origin).
+    #[derive(Debug)]
+    struct WaypointX;
+
+    impl crate::script::MemberFields for WaypointX {
+        fn field(&self, _: u64, _: u64, _: u32) -> Option<f32> {
+            None
+        }
+        fn waypoint_field(&self, _: u64, _: usize, local: [f32; 3], f: u32) -> Option<f32> {
+            (f == DISTANCE).then_some(local[0])
+        }
+    }
+
+    #[test]
+    fn indexed_reference_takes_a_waypoint_of_the_path() {
+        // `Transport_Macros.ai`: `"Nav - next wp" = "Nav - Flight Path".waypoints["wp index"]`,
+        // then `.waypoints.count`, `"Nav - next wp".orientation.roll`, `.distance`.
+        const PATH: usize = 0x880;
+        let (fp, next, setref) = (0x790, 0x7a0, 0x7b0);
+        let (count_v, roll_v, dist_v) = (0x7c0, 0x7d0, 0x7e0);
+        let set = |n: usize, path: Vec<Ref>| Op::SetValue {
+            lhs: vec![Ref::Obj(n)],
+            rhs: rd(path),
+        };
+        let mut p = program(
+            vec![
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(fp)],
+                        rhs: vec![Ref::Obj(PATH)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    setref,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(next)],
+                        rhs: vec![Ref::Obj(fp), h(WAYPOINTS)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    set(count_v, vec![Ref::Obj(fp), h(WAYPOINTS), h(COUNT)]),
+                ),
+                ins(
+                    13,
+                    0,
+                    set(roll_v, vec![Ref::Obj(next), h(ORIENTATION), h(ROLL)]),
+                ),
+                ins(14, 0, set(dist_v, vec![Ref::Obj(next), h(DISTANCE)])),
+            ],
+            vec![],
+        );
+        p.set.placements.insert(PATH);
+        let wp = |x, roll| crate::script::Waypoint {
+            local: [x, 0.0, 0.0],
+            angles: [0.0, 0.0, roll],
+        };
+        p.set
+            .waypoints
+            .insert(PATH, vec![wp(1.0, 0.0), wp(7.0, 2.0), wp(3.0, 0.0)]);
+        p.set.ref_index.insert(setref, lit(1.0));
+        let mut st = ActorScriptState {
+            self_id: Some(1),
+            fields: Some(std::sync::Arc::new(WaypointX)),
+            ..Default::default()
+        };
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.reference(next),
+            Some(&RefTarget::Waypoint {
+                owner: PATH,
+                index: 1
+            })
+        );
+        let var = |n| st.vars.get(&vec![Ref::Obj(n)]).copied();
+        assert_eq!(var(count_v), Some(Value::Int(3)));
+        assert_eq!(var(roll_v), Some(Value::Float(2.0)));
+        assert_eq!(var(dist_v), Some(Value::Float(7.0)));
     }
 
     #[test]

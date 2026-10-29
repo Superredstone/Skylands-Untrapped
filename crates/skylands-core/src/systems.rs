@@ -2027,13 +2027,14 @@ pub fn actor_script_system(
         .map(|(e, _)| skylands_formats::script::RefTarget::Actor(e.to_bits()))
         .collect();
     let fields: std::sync::Arc<dyn skylands_formats::script::MemberFields> =
-        std::sync::Arc::new(ActorFieldSnapshot(
-            actor_tfs
+        std::sync::Arc::new(ActorFieldSnapshot {
+            actors: actor_tfs
                 .iter()
                 .map(|(e, t)| (e.to_bits(), t.translation))
                 .chain(heroes.iter().map(|(e, t)| (e.to_bits(), t.translation)))
                 .collect(),
-        ));
+            placements: placements.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
+        });
     let board_key =
         |e: Entity, placed: Option<&PlacementOffset>| placed.map_or(e.to_bits() as usize, |p| p.0);
     for (e, actor, .., placed) in &actors {
@@ -2196,22 +2197,41 @@ pub fn actor_script_system(
     }
 }
 
-/// Positions of scripted actors and heroes by engine id, answering `MemberFields`:
-/// `distance` (`2eb31462`), `horizontal distance` (`9059dae4`, XZ) and `heading`
-/// (`9f481715`, degrees from `me` towards the member, 0 = +Z like `OpDisplace`; the
-/// engine's own definition is not reversed yet).
-#[derive(Debug)]
-struct ActorFieldSnapshot(std::collections::HashMap<u64, Vec3>);
+/// Positions of scripted actors and heroes by engine id (and placement transforms, for
+/// waypoints), answering `MemberFields`: `distance` (`2eb31462`), `horizontal distance`
+/// (`9059dae4`, XZ), `heading` (`9f481715`, degrees from `me` towards the target, 0 = +Z)
+/// and `pitch` (`bd324ab1`, degrees up), as `OpDisplace` uses them; the engine's own
+/// definitions are not reversed yet.
+#[derive(Debug, Default)]
+struct ActorFieldSnapshot {
+    actors: std::collections::HashMap<u64, Vec3>,
+    placements: std::collections::HashMap<usize, Transform>,
+}
+
+impl ActorFieldSnapshot {
+    fn towards(d: Vec3, field: u32) -> Option<f32> {
+        let flat = Vec2::new(d.x, d.z).length();
+        match field {
+            0x2eb3_1462 => Some(d.length()),
+            0x9059_dae4 => Some(flat),
+            0x9f48_1715 => Some(d.x.atan2(d.z).to_degrees()),
+            0xbd32_4ab1 => Some(d.y.atan2(flat).to_degrees()),
+            _ => None,
+        }
+    }
+}
 
 impl skylands_formats::script::MemberFields for ActorFieldSnapshot {
     fn field(&self, me: u64, member: u64, field: u32) -> Option<f32> {
-        let d = *self.0.get(&member)? - *self.0.get(&me)?;
-        match field {
-            0x2eb3_1462 => Some(d.length()),
-            0x9059_dae4 => Some(Vec2::new(d.x, d.z).length()),
-            0x9f48_1715 => Some(d.x.atan2(d.z).to_degrees()),
-            _ => None,
-        }
+        Self::towards(*self.actors.get(&member)? - *self.actors.get(&me)?, field)
+    }
+
+    fn waypoint_field(&self, me: u64, owner: usize, local: [f32; 3], field: u32) -> Option<f32> {
+        let at = self
+            .placements
+            .get(&owner)?
+            .transform_point(Vec3::from(local));
+        Self::towards(at - *self.actors.get(&me)?, field)
     }
 }
 
@@ -4151,17 +4171,32 @@ mod tests {
     #[test]
     fn test_actor_field_snapshot_measures_from_me() {
         use skylands_formats::script::MemberFields;
-        let snap = ActorFieldSnapshot(std::collections::HashMap::from([
-            (1, Vec3::new(0.0, 0.0, 0.0)),
-            (2, Vec3::new(3.0, 4.0, 0.0)),
-            (3, Vec3::new(0.0, 0.0, 5.0)),
-        ]));
+        let snap = ActorFieldSnapshot {
+            actors: std::collections::HashMap::from([
+                (1, Vec3::new(0.0, 0.0, 0.0)),
+                (2, Vec3::new(3.0, 4.0, 0.0)),
+                (3, Vec3::new(0.0, 0.0, 5.0)),
+            ]),
+            placements: std::collections::HashMap::from([(
+                0x40,
+                Transform::from_xyz(0.0, 0.0, 10.0),
+            )]),
+        };
         assert_eq!(snap.field(1, 2, 0x2eb3_1462), Some(5.0));
         assert_eq!(snap.field(1, 2, 0x9059_dae4), Some(3.0));
         // Heading 0 = +Z, 90 = +X (as `OpDisplace`).
         assert_eq!(snap.field(1, 3, 0x9f48_1715), Some(0.0));
         assert_eq!(snap.field(1, 2, 0x9f48_1715), Some(90.0));
         assert_eq!(snap.field(1, 9, 0x2eb3_1462), None);
+        // A waypoint in its placement's space: (0, 10, 0) from a placement at z = 10.
+        assert_eq!(
+            snap.waypoint_field(1, 0x40, [0.0, 10.0, 0.0], 0xbd32_4ab1),
+            Some(45.0)
+        );
+        assert_eq!(
+            snap.waypoint_field(1, 0x40, [0.0, 0.0, 0.0], 0x9f48_1715),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -4518,6 +4553,8 @@ mod tests {
             placements: Default::default(),
             placement_refs: Default::default(),
             templates: Default::default(),
+            waypoints: Default::default(),
+            ref_index: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4611,6 +4648,8 @@ mod tests {
             placements: Default::default(),
             placement_refs: Default::default(),
             templates: Default::default(),
+            waypoints: Default::default(),
+            ref_index: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
