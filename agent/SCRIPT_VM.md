@@ -41,7 +41,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
 - Interface params with flag `0x8000` are declarations with defaults. At a call site, `0x8000`
   params are the definition's own objects (so outputs need no copy), `0x0000` params are
   arguments with their own objects, matched to the definition by name and copied back after.
-- Target in another file (`use ?`): every call-site param keeps its literal.
+- Target in another file (`use ?`, a stub `OpDefineMacro` with only a name): when it is a
+  `global.bld` macro, it runs in a nested `Vm` over `global.bld` (`Vm::call_global`, index built
+  once per `ScriptProgram`). The nested VM shares the actor's engine state, board, set counts,
+  globals, rng, spawn counter and step budget; arguments go in by parameter name (values from
+  call-site RHS, references from the call-site `RHSReferenceStack` +0x30), outputs (values and
+  references) come back by name. `global.bld` locals/references persist per actor
+  (`global_vars` / `global_refs`). Effects come back with slider paths re-expressed through the
+  level's handles (a slide of a `global.bld` local is dropped). If the nested run errors (an op
+  the VM does not model), nothing is kept and the call falls back: every call-site param keeps
+  its literal. Save-param macros keep their own handling. Hub: 5832 calls / 44 macros, arena
+  300/000: 1007 / 28, none falling back (2 s / 5 s runs).
 
 ## Handles
 - `EXID` entry = (id, namespace). Namespace = FNV-1a of the lower-case file name (`global.bld`

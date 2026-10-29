@@ -1133,6 +1133,14 @@ pub struct Vm<'a> {
     pub save_writes: Vec<(String, i32, i64)>,
     /// `OpSpawn` clones made so far by this actor (next `Effect::Spawn::serial`).
     pub spawned: u32,
+    /// `global.bld`'s index, to run its macros when a script calls them (`use ?`).
+    pub global_index: Option<&'a VmIndex>,
+    /// Locals and references of `global.bld` macros run for this actor (kept across
+    /// calls and ticks, like a macro's own variables).
+    pub global_vars: HashMap<Vec<Ref>, Value>,
+    pub global_refs: HashMap<Vec<Ref>, RefTarget>,
+    /// The file that called into this one (`global.bld` runs: the level), for templates.
+    home: Option<&'a ScriptSet>,
     /// Setup blocks being run, innermost last.
     spawning: Vec<Spawning>,
 }
@@ -1262,6 +1270,8 @@ pub struct VmIndex {
     /// A path through a check op means its LHS; through a loop op, its counter.
     aliases: HashMap<usize, (usize, usize)>,
     macros: HashMap<usize, (usize, usize)>,
+    /// Macro definitions by name (calls from other files name them).
+    by_name: HashMap<String, (usize, usize)>,
 }
 
 impl VmIndex {
@@ -1273,8 +1283,9 @@ impl VmIndex {
                     Op::CheckValue { .. } | Op::LoopValue { .. } | Op::FindVariable { .. } => {
                         index.aliases.insert(ins.offset, (si, oi));
                     }
-                    Op::DefineMacro { .. } => {
+                    Op::DefineMacro { name } => {
                         index.macros.entry(ins.offset).or_insert((si, oi));
+                        index.by_name.entry(name.clone()).or_insert((si, oi));
                     }
                     _ => {}
                 }
@@ -1320,6 +1331,10 @@ impl<'a> Vm<'a> {
             save: None,
             save_writes: Vec::new(),
             spawned: 0,
+            global_index: None,
+            global_vars: HashMap::new(),
+            global_refs: HashMap::new(),
+            home: None,
             spawning: Vec::new(),
         }
     }
@@ -1565,6 +1580,170 @@ impl<'a> Vm<'a> {
         self.run_macro_with(si, oi, args, None)
     }
 
+    /// Run the `global.bld` macro a stub `target` names, in a VM over `global.bld` that
+    /// shares this actor's engine state, effects and budget. Arguments go in by parameter
+    /// name (values; references from the call site's `RHSReferenceStack`), outputs come
+    /// back by name. `false` (nothing changed): not a `global.bld` macro, or it hit
+    /// something the VM does not model.
+    fn call_global(&mut self, target: Option<usize>, site: &[(usize, u16, Option<&Rhs>)]) -> bool {
+        let (Some(g), Some(gi)) = (self.global, self.global_index) else {
+            return false;
+        };
+        let Some(name) = target.and_then(|t| self.set.macro_names.get(&t)) else {
+            return false;
+        };
+        if matches!(name.as_str(), GET_SAVE_PARAM | SET_SAVE_PARAM) {
+            return false;
+        }
+        let Some(&(gsi, goi)) = gi.by_name.get(name) else {
+            return false;
+        };
+        let mut args = Vec::new();
+        let mut ref_args = Vec::new();
+        for &(var, _, rhs) in site {
+            let pname = self.set.var_name(var).to_string();
+            match rhs {
+                Some(rhs) => match self.eval(rhs) {
+                    Ok(v) => args.push((pname, v)),
+                    Err(_) => return false,
+                },
+                None => {
+                    if let Some(path) = self.ref_arg_path(var) {
+                        let t = self.ref_target(&path);
+                        ref_args.push((pname, t));
+                    }
+                }
+            }
+        }
+        let mut sub = Vm::with_index(g, None, Cow::Borrowed(gi));
+        sub.home = Some(self.home.unwrap_or(self.set));
+        sub.global_index = None;
+        sub.vars = std::mem::take(&mut self.global_vars);
+        sub.refs = std::mem::take(&mut self.global_refs);
+        sub.engine = std::mem::take(&mut self.engine);
+        sub.board = std::mem::take(&mut self.board);
+        sub.set_counts = std::mem::take(&mut self.set_counts);
+        sub.globals = std::mem::take(&mut self.globals);
+        sub.clone_ids = std::mem::take(&mut self.clone_ids);
+        sub.self_key = self.self_key;
+        sub.save = self.save.clone();
+        sub.rng = self.rng;
+        sub.spawned = self.spawned;
+        sub.steps = self.steps;
+        sub.depth = self.depth + 1;
+        let result = sub.run_macro_with(gsi, goi, &args, Some(&ref_args));
+        // Outputs by name, read before the sub VM gives its state back.
+        let (defs, _) = sub.params(gsi, goi);
+        let outputs: Vec<(String, Value, Option<RefTarget>)> = defs
+            .iter()
+            .map(|&d| {
+                let v = sub.read(&[Ref::Obj(d)]);
+                let r = sub.refs.get(&vec![Ref::Obj(d)]).cloned();
+                (g.var_name(d).to_string(), v, r)
+            })
+            .collect();
+        self.global_vars = std::mem::take(&mut sub.vars);
+        self.global_refs = std::mem::take(&mut sub.refs);
+        self.engine = std::mem::take(&mut sub.engine);
+        self.board = std::mem::take(&mut sub.board);
+        self.set_counts = std::mem::take(&mut sub.set_counts);
+        self.globals = std::mem::take(&mut sub.globals);
+        self.clone_ids = std::mem::take(&mut sub.clone_ids);
+        self.rng = sub.rng;
+        self.spawned = sub.spawned;
+        self.steps = sub.steps;
+        if result.is_err() {
+            return false;
+        }
+        for effect in std::mem::take(&mut sub.effects) {
+            if let Some(e) = self.localize_global(g, effect) {
+                self.effects.push(e);
+            }
+        }
+        for &(var, ..) in site {
+            let pname = self.set.var_name(var);
+            if let Some((_, v, r)) = outputs.iter().find(|(n, ..)| n == pname) {
+                match r {
+                    Some(r) => {
+                        self.refs.insert(vec![Ref::Obj(var)], r.clone());
+                    }
+                    None => self.write(&[Ref::Obj(var)], *v),
+                }
+            }
+        }
+        true
+    }
+
+    /// Call-site reference argument of param `var` (`RHSReferenceStack` at +0x30).
+    fn ref_arg_path(&self, var: usize) -> Option<Vec<Ref>> {
+        self.set
+            .opaque_operands
+            .get(&var)?
+            .iter()
+            .find_map(|(f, o)| match o {
+                OpaqueOperand::Path { stack, path }
+                    if *f == 0x30 && stack == "RHSReferenceStack" =>
+                {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+    }
+
+    /// An effect made by a `global.bld` macro, in this file's terms: slider paths are
+    /// script refs of the file that made them, so they are re-expressed through this
+    /// file's handles (engine fields only; a slide of a `global.bld` local is dropped).
+    fn localize_global(&self, g: &ScriptSet, effect: Effect) -> Option<Effect> {
+        Some(match effect {
+            Effect::Slide {
+                op,
+                lhs,
+                from,
+                to,
+                seconds,
+                ease_out,
+                ease_in,
+            } => Effect::Slide {
+                op,
+                lhs: self.my_refs(&g.engine_key(&lhs)?)?,
+                from,
+                to,
+                seconds,
+                ease_out,
+                ease_in,
+            },
+            Effect::ForClone { serial, effect } => Effect::ForClone {
+                serial,
+                effect: Box::new(self.localize_global(g, *effect)?),
+            },
+            Effect::ForActor { id, effect } => Effect::ForActor {
+                id,
+                effect: Box::new(self.localize_global(g, *effect)?),
+            },
+            Effect::Spawn {
+                op,
+                template,
+                at,
+                facing,
+                serial,
+                seed,
+                setup,
+            } => Effect::Spawn {
+                op,
+                template,
+                at,
+                facing,
+                serial,
+                seed,
+                setup: setup
+                    .into_iter()
+                    .filter_map(|e| self.localize_global(g, e))
+                    .collect(),
+            },
+            e => e,
+        })
+    }
+
     /// `run_macro` with a script call's reference arguments by parameter name; there,
     /// reference parameters without one start `null` (not what the previous call left).
     /// Calls from the engine side (`None`) leave them unknown.
@@ -1662,7 +1841,10 @@ impl<'a> Vm<'a> {
         let (_, after) = self.params(si, at);
         let site = self.param_rhs(si, at);
         let Some(&(tsi, toi)) = target.and_then(|t| self.index.macros.get(&t)) else {
-            // Defined in another file: every parameter keeps its literal.
+            if self.call_global(target, &site) {
+                return Ok(after);
+            }
+            // Defined in another file we cannot run: every parameter keeps its literal.
             let what = format!("macro @{:x}", target.unwrap_or(0));
             if !self.unbound.contains(&what) {
                 self.unbound.push(what);
@@ -1693,17 +1875,7 @@ impl<'a> Vm<'a> {
                 (0, Some(rhs)) => args.push((self.set.var_name(var).to_string(), self.eval(rhs)?)),
                 // A reference argument: the call site's `RHSReferenceStack` (+0x30).
                 (0, None) => {
-                    let path = self.set.opaque_operands.get(&var).and_then(|ops| {
-                        ops.iter().find_map(|(f, o)| match o {
-                            OpaqueOperand::Path { stack, path }
-                                if *f == 0x30 && stack == "RHSReferenceStack" =>
-                            {
-                                Some(path.clone())
-                            }
-                            _ => None,
-                        })
-                    });
-                    if let Some(path) = path {
+                    if let Some(path) = self.ref_arg_path(var) {
                         let t = self.ref_target(&path);
                         ref_args.push((self.set.var_name(var).to_string(), t));
                     }
@@ -2014,7 +2186,11 @@ impl<'a> Vm<'a> {
                     let referenced = match actor {
                         Some(_) => None,
                         None => match self.ref_target(template) {
-                            RefTarget::Placement(o) => self.set.templates.get(&o),
+                            RefTarget::Placement(o) => self
+                                .set
+                                .templates
+                                .get(&o)
+                                .or_else(|| self.home?.templates.get(&o)),
                             _ => None,
                         },
                     };
@@ -3016,6 +3192,76 @@ mod tests {
             vm.unbound,
             vec!["macro @dead".to_string(), "$00000000".into()]
         );
+    }
+
+    #[test]
+    fn vm_runs_global_macros_by_name() {
+        // `global.bld` "Double": `out = in * 2`, and it writes `my.<0x77>` (engine state).
+        let (gin, gout) = (0x500, 0x510);
+        let mut g = script_set(
+            vec![
+                ins(
+                    1,
+                    5,
+                    Op::DefineMacro {
+                        name: "Double".into(),
+                    },
+                ),
+                ins(2, 2, Op::Interface),
+                param(gin, 0, Some(lit(I(0)))),
+                param(gout, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(3, 0, set(gout, bin(rd(gin), 2, Operand::Lit(I(2))))),
+                ins(
+                    4,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Handle(0), Ref::Handle(1)],
+                        rhs: lit(I(5)),
+                    },
+                ),
+            ],
+            &[(gin, "in"), (gout, "out")],
+        );
+        g.handle_ids = vec![MY_HASH, 0x77];
+        g.handle_ns = vec![name_hash("level.bld"); 2];
+        // The level calls it through a stub (`use ?`): its own params, matched by name.
+        let (stub, lin, lout, r) = (0xd00, 0x100, 0x110, 0x120);
+        let mut l = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(3, 3, Op::UseMacro { target: Some(stub) }),
+                ins(4, 2, Op::Interface),
+                param(lin, 0, Some(lit(I(21)))),
+                param(lout, PARAM_OUTPUT, Some(lit(I(-1)))),
+                ins(
+                    5,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: rd(lout),
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[(lin, "in"), (lout, "out"), (r, "r")],
+        );
+        l.macro_names.insert(stub, "Double".into());
+        let gi = VmIndex::new(&g);
+        let mut vm = Vm::new(&l, Some(&g));
+        vm.global_index = Some(&gi);
+        assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(42));
+        assert_eq!(vm.engine.get(&vec![MY_HASH, 0x77]), Some(&I(5)));
+        assert!(vm.unbound.is_empty(), "{:?}", vm.unbound);
+
+        // Without `global.bld`'s index the call keeps its literals, as before.
+        let mut vm = Vm::new(&l, Some(&g));
+        assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(-1));
     }
 
     #[test]

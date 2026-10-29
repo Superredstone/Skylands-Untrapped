@@ -57,6 +57,8 @@ pub struct ScriptProgram {
     pub set: ScriptSet,
     pub global: Option<ScriptSet>,
     index: VmIndex,
+    /// `global.bld`'s index, to run its macros from level scripts.
+    global_index: Option<VmIndex>,
 }
 
 /// `OpSlideValue` in flight: `lhs` moves `from` -> `to` over `seconds`.
@@ -125,6 +127,9 @@ pub struct ActorScriptState {
     refs: HashMap<Vec<Ref>, RefTarget>,
     /// The script's sets (`OpChangeMembership`), by canonical path.
     sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
+    /// Locals and references of the `global.bld` macros this actor's scripts call.
+    global_vars: HashMap<Vec<Ref>, Value>,
+    global_refs: HashMap<Vec<Ref>, RefTarget>,
     /// The script hit an op the VM does not model; it no longer runs.
     pub error: Option<VmError>,
     /// Save slot read by "Get Save Param" (set by the engine each tick).
@@ -229,7 +234,13 @@ impl ActorScriptState {
 impl ScriptProgram {
     pub fn new(set: ScriptSet, global: Option<ScriptSet>) -> Self {
         let index = VmIndex::new(&set);
-        Self { set, global, index }
+        let global_index = global.as_ref().map(VmIndex::new);
+        Self {
+            set,
+            global,
+            index,
+            global_index,
+        }
     }
 
     /// Variables script `si` declares (`_masterVarList`): object and name.
@@ -370,6 +381,9 @@ impl ScriptProgram {
         vm.rng = st.rng;
         vm.refs = std::mem::take(&mut st.refs);
         vm.sets = std::mem::take(&mut st.sets);
+        vm.global_index = self.global_index.as_ref();
+        vm.global_vars = std::mem::take(&mut st.global_vars);
+        vm.global_refs = std::mem::take(&mut st.global_refs);
         vm.clone_ids = std::mem::take(&mut st.clone_ids);
         vm.self_key = st.self_key;
         vm.save = st.save.clone();
@@ -404,6 +418,8 @@ impl ScriptProgram {
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
         st.sets = std::mem::take(&mut vm.sets);
+        st.global_vars = std::mem::take(&mut vm.global_vars);
+        st.global_refs = std::mem::take(&mut vm.global_refs);
         st.clone_ids = std::mem::take(&mut vm.clone_ids);
         st.save_writes.append(&mut vm.save_writes);
         st.spawned = vm.spawned;
