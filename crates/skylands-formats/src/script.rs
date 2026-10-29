@@ -275,6 +275,7 @@ const OPAQUE_LISTED: &[&str] = &[
     "OpChangeMembership",
     "OpForEach",
     "OpFindVariable",
+    "OpFindSubSet",
 ];
 
 /// Field of an op without an `Op` variant, for listings.

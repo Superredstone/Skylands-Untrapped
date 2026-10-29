@@ -141,6 +141,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   reference uses the held actor's board key (placement offset for placed actors, else entity
   bits); actors held by a `PlacementReference` are on the board. `OpSpawn ... at <reference>` is
   `SpawnAt::Actor`, the clone starts at that actor's current transform.
+- `OpFindSubSet` (0x30, object vtable `0x80506bc4`; not run yet). `+0x1c` path = set, a null
+  entry, then a member field (`"Minions".distance`); `+0x20` comparison, values 0-4 in the arena
+  file (`RelOp` range; "distance < influence radius" is 3 = LT); `+0x24` RHS threshold;
+  `_setRemainder` +0x28 = number of path entries after the null, computed by the init slot
+  (+0x24 `0x800900c4`), 0 in the file. Execute (+0x60 `0x800901c8`): remainder 0 -> `pc += br`;
+  else for each member (walked from the end) with it as the current object, evaluate the field,
+  compare, collect `(value, member)` pairs, build a new `ScriptSet` (+0x2c) and run the block with
+  the op meaning it. Unconfirmed: whether the pairs are sorted by value. Needs engine-side member
+  fields (`distance` `2eb31462`, `horizontal distance` `9059dae4`, `heading` `9f481715`,
+  `vertical offset`) relative to the running actor, and `Minions` members (heroes), not only its
+  count. Dumps now list its operands. `tools/rea-bridge/ppcdis.py` disassembles such Gekko code.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):
