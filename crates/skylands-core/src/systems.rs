@@ -1981,9 +1981,13 @@ pub fn actor_script_system(
     campaign: Option<Res<CampaignProgress>>,
     mut save: Option<ResMut<crate::save_game::SaveGame>>,
     mut clone_effects: Option<ResMut<CloneEffects>>,
+    mut effects: ResMut<ActorEffects>,
+    mut refs: ResMut<PlacementRefs>,
+    mut new_refs: ResMut<PendingPlacementRefs>,
     mut board: Local<ScriptVarBoard>,
     placements: Option<Res<PlacementTransforms>>,
     heroes: Query<(), With<Hero>>,
+    clones: Query<(Entity, &SpawnedActor)>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -2006,12 +2010,24 @@ pub fn actor_script_system(
             targets: scripts.0.find_targets(),
             vars: Default::default(),
         };
+        refs.0.clear();
     }
-    for (_, actor, .., placed) in &actors {
-        if let Some(&PlacementOffset(p)) = placed.filter(|p| board.targets.contains(&p.0)) {
+    let held: Vec<Entity> = refs.0.values().copied().collect();
+    let mut clone_ids: std::collections::HashMap<Entity, Vec<(u32, Entity)>> = Default::default();
+    for (e, c) in &clones {
+        clone_ids.entry(c.parent).or_default().push((c.serial, e));
+    }
+    // Where `spawn ... at <another actor>` puts a clone.
+    let actor_tfs: std::collections::HashMap<Entity, Transform> =
+        actors.iter().map(|(e, _, t, ..)| (e, *t)).collect();
+    let board_key =
+        |e: Entity, placed: Option<&PlacementOffset>| placed.map_or(e.to_bits() as usize, |p| p.0);
+    for (e, actor, .., placed) in &actors {
+        let key = board_key(e, placed);
+        if board.targets.contains(&key) || held.contains(&e) {
             board
                 .vars
-                .entry(p)
+                .entry(key)
                 .or_insert_with(|| scripts.0.export_vars(actor.script, &actor.state));
         }
     }
@@ -2032,9 +2048,33 @@ pub fn actor_script_system(
             .set_counts
             .insert("Minions".to_string(), heroes.iter().count() as i32);
         actor.state.save = save.as_mut().map(|s| s.view() as _);
-        let on_board = placed.map(|p| p.0).filter(|p| board.targets.contains(p));
+        let key = board_key(entity, placed);
+        let on_board = (board.targets.contains(&key) || held.contains(&entity)).then_some(key);
         if let Some(vals) = on_board.and_then(|p| board.vars.get(&p)) {
             scripts.0.import_vars(actor.script, &mut actor.state, vals);
+        }
+        // References as this actor sees them: itself is `my`, its clones are serials.
+        let own_clones = clone_ids
+            .get(&entity)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        actor.state.clone_ids = own_clones.iter().map(|&(s, e)| (s, e.to_bits())).collect();
+        actor.state.self_key = Some(key);
+        let mut seeded = Vec::new();
+        {
+            use skylands_formats::script::RefTarget;
+            for &pr in &scripts.0.set.placement_refs {
+                let t = match refs.0.get(&pr) {
+                    None => RefTarget::Null,
+                    Some(&e) if e == entity => RefTarget::Engine(vec![MY]),
+                    Some(&e) => match own_clones.iter().find(|&&(_, c)| c == e) {
+                        Some(&(s, _)) => RefTarget::Spawned(s),
+                        None => RefTarget::Actor(e.to_bits()),
+                    },
+                };
+                actor.state.set_reference(pr, t.clone());
+                seeded.push((pr, t));
+            }
         }
         actor.state.board = std::mem::take(&mut board.vars);
         scripts.0.tick(actor.script, &mut actor.state, dt);
@@ -2042,6 +2082,19 @@ pub fn actor_script_system(
         if let Some(p) = on_board {
             let vars = scripts.0.export_vars(actor.script, &actor.state);
             board.vars.insert(p, vars);
+        }
+        {
+            for (pr, before) in seeded {
+                match actor.state.reference(pr) {
+                    Some(now) if *now != before => new_refs.0.push((pr, entity, now.clone())),
+                    _ => {}
+                }
+            }
+            for (id, e) in std::mem::take(&mut actor.state.actor_effects) {
+                if let Ok(target) = Entity::try_from_bits(id) {
+                    effects.0.push((target, e));
+                }
+            }
         }
         let spawns = std::mem::take(&mut actor.state.spawns);
         let for_clones = std::mem::take(&mut actor.state.clone_effects);
@@ -2081,6 +2134,7 @@ pub fn actor_script_system(
                 &mut commands,
                 &scripts.0,
                 placements.as_deref(),
+                &actor_tfs,
                 entity,
                 &transform,
                 spawn,
@@ -2105,34 +2159,57 @@ pub fn actor_script_system(
     }
 }
 
-/// Delivers `CloneEffects` to the `SpawnedActor` with that spawner and serial. A
-/// scripted clone applies them to its own script state; a script-less one only takes
-/// `tint.alpha` and `remove`. Clones of templates the VM could not resolve never
-/// exist, so their effects are dropped.
+/// Delivers script effects on other actors after the script tick, once this tick's
+/// clones exist: `CloneEffects` to the `SpawnedActor` with that spawner and serial,
+/// `ActorEffects` to their actor, and new `PlacementReference` values into
+/// `PlacementRefs`. A scripted actor applies effects to its own script state; a
+/// script-less one only takes `tint.alpha` and `remove`. Clones of templates the VM
+/// could not resolve never exist, so their effects are dropped.
+#[allow(clippy::type_complexity)]
 pub fn clone_effect_system(
     mut commands: Commands,
     mut pending: ResMut<CloneEffects>,
-    mut clones: Query<(
-        Entity,
-        &SpawnedActor,
-        Option<&mut ActorScript>,
-        Option<&mut ActorTint>,
-    )>,
+    mut effects: ResMut<ActorEffects>,
+    mut refs: ResMut<PlacementRefs>,
+    mut new_refs: ResMut<PendingPlacementRefs>,
+    mut clones: Query<
+        (
+            Entity,
+            Option<&SpawnedActor>,
+            Option<&mut ActorScript>,
+            Option<&mut ActorTint>,
+        ),
+        Or<(With<SpawnedActor>, With<ActorScript>)>,
+    >,
 ) {
-    use skylands_formats::script::Effect;
+    use skylands_formats::script::{Effect, RefTarget};
     use skylands_formats::script_runtime::field::*;
-    if pending.0.is_empty() {
-        return;
-    }
     let by_serial: std::collections::HashMap<(Entity, u32), Entity> = clones
         .iter()
-        .map(|(e, c, ..)| ((c.parent, c.serial), e))
+        .filter_map(|(e, c, ..)| Some(((c?.parent, c?.serial), e)))
         .collect();
-    for (parent, serial, effect) in pending.0.drain(..) {
-        let Some((entity, _, script, tint)) = by_serial
-            .get(&(parent, serial))
-            .and_then(|&e| clones.get_mut(e).ok())
-        else {
+    let mut work: Vec<(Entity, Effect)> = pending
+        .0
+        .drain(..)
+        .filter_map(|(parent, serial, effect)| Some((*by_serial.get(&(parent, serial))?, effect)))
+        .collect();
+    {
+        work.append(&mut effects.0);
+        for (pr, setter, target) in new_refs.0.drain(..) {
+            let held = match target {
+                RefTarget::Engine(k) if k == [MY] => Some(setter),
+                RefTarget::Spawned(s) => by_serial.get(&(setter, s)).copied(),
+                RefTarget::Actor(id) => Entity::try_from_bits(id).ok(),
+                _ => None,
+            };
+            match held {
+                Some(e) => refs.0.insert(pr, e),
+                None => refs.0.remove(&pr),
+            };
+        }
+    }
+    for (entity, effect) in work {
+        let Ok((entity, _, script, tint)) = clones.get_mut(entity) else {
             continue;
         };
         if let Some(mut script) = script {
@@ -2152,7 +2229,7 @@ pub fn clone_effect_system(
                     }
                 }
             }
-            other => debug!("Effect on script-less clone skipped: {other:?}"),
+            other => debug!("Effect on script-less actor skipped: {other:?}"),
         }
     }
 }
@@ -2175,6 +2252,7 @@ fn spawn_script_clone(
     commands: &mut Commands,
     program: &skylands_formats::ScriptProgram,
     placements: Option<&PlacementTransforms>,
+    actor_tfs: &std::collections::HashMap<Entity, Transform>,
     parent: Entity,
     parent_tf: &Transform,
     spawn: skylands_formats::script::Effect,
@@ -2196,6 +2274,10 @@ fn spawn_script_clone(
     let at_tf = match &at {
         SpawnAt::Engine(k) if *k == [MY] => Some(*parent_tf),
         SpawnAt::Placement(o) => placements.and_then(|p| p.0.get(o)).copied(),
+        SpawnAt::Actor(id) => Entity::try_from_bits(*id)
+            .ok()
+            .and_then(|e| actor_tfs.get(&e))
+            .copied(),
         SpawnAt::Engine(_) => None,
     };
     let Some(at_tf) = at_tf else {
@@ -4011,6 +4093,9 @@ mod tests {
         use skylands_formats::script_runtime::field::*;
         let mut app = App::new();
         app.init_resource::<CloneEffects>();
+        app.init_resource::<ActorEffects>();
+        app.init_resource::<PlacementRefs>();
+        app.init_resource::<PendingPlacementRefs>();
         app.add_systems(Update, clone_effect_system);
         let spawner = app.world_mut().spawn_empty().id();
         let clone = |serial| SpawnedActor {
@@ -4325,6 +4410,7 @@ mod tests {
             sets: Default::default(),
             set_names: Default::default(),
             placements: Default::default(),
+            placement_refs: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4416,6 +4502,7 @@ mod tests {
             sets: Default::default(),
             set_names: Default::default(),
             placements: Default::default(),
+            placement_refs: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4739,6 +4826,21 @@ mod tests {
             })
             .collect();
         eprintln!("{clones:#?}");
+        let refs: Vec<_> = world
+            .resource::<PlacementRefs>()
+            .0
+            .iter()
+            .map(|(&pr, &e)| (pr, world.get::<SpawnedActor>(e).map(|c| c.template.clone())))
+            .collect();
+        // Level-wide references set by one script for all: `Current_BattleMaster` (0x14cce8),
+        // `Active _Audience` (0x13b584), `Active_Brock` (0x154798).
+        for (pr, template) in [
+            (0x14cce8, "_BattleMaster"),
+            (0x13b584, "Audience_Controller"),
+            (0x154798, "ArenaMaster_Brock"),
+        ] {
+            assert!(refs.contains(&(pr, Some(template.into()))), "{refs:x?}");
+        }
         // Spawned at their own placements (`spawn "_BattleMaster" at _BattleMaster`), with
         // their scripts running.
         for name in ["_BattleMaster", "Audience_Controller", "ArenaMaster_Brock"] {

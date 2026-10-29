@@ -505,6 +505,20 @@ pub struct ScriptVarBoard {
 #[derive(Resource, Debug, Default)]
 pub struct CloneEffects(pub Vec<(Entity, u32, skylands_formats::script::Effect)>);
 
+/// Script effects on other actors (`Effect::ForActor`), for `clone_effect_system`.
+#[derive(Resource, Debug, Default)]
+pub struct ActorEffects(pub Vec<(Entity, skylands_formats::script::Effect)>);
+
+/// Level `PlacementReference`s (`Current_BattleMaster`, `Active_Brock`) -> the actor they
+/// hold. One script's `OpSetReference` sets one; every script reads it.
+#[derive(Resource, Debug, Default)]
+pub struct PlacementRefs(pub std::collections::HashMap<usize, Entity>);
+
+/// `PlacementReference`s a script set this tick, as that script saw the target
+/// (`(reference, setting actor, target)`), resolved once its new clones exist.
+#[derive(Resource, Debug, Default)]
+pub struct PendingPlacementRefs(pub Vec<(usize, Entity, skylands_formats::script::RefTarget)>);
+
 /// The active level's scripts, shared by every `ActorScript`.
 #[derive(Resource, Clone)]
 pub struct LevelScripts(pub std::sync::Arc<skylands_formats::ScriptProgram>);

@@ -121,6 +121,16 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   are evaluated for a stored set and a one-member group (where the four ops agree pairwise),
   otherwise the old reference fallback. Not done: set members that are engine objects of other
   actors, `OpFindSubSet`, set-valued macro params beyond reference passing.
+- `PlacementReference` (`ScriptSet::placement_refs`; 4 in an arena challenge): a level-wide reference
+  object. Core keeps `PlacementRefs` (reference -> entity) and, before each tick, writes each one
+  into the actor's `refs` as that actor sees it (`my` for itself, `Spawned(serial)` for its own
+  clones, else `RefTarget::Actor(entity bits)`); a changed value after the tick is resolved by
+  `clone_effect_system` once new clones exist. Paths through an `Actor` reference become
+  `Target::Actor` -> `Effect::ForActor` (writes, slides, displace, remove...), delivered to that
+  entity's script state (script-less actors: tint and remove only). `OpFindVariable` through a
+  reference uses the held actor's board key (placement offset for placed actors, else entity
+  bits); actors held by a `PlacementReference` are on the board. `OpSpawn ... at <reference>` is
+  `SpawnAt::Actor`, the clone starts at that actor's current transform.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):

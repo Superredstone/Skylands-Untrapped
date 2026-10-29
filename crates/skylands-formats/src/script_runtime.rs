@@ -134,6 +134,12 @@ pub struct ActorScriptState {
     /// Effects on earlier clones by serial (`Effect::ForClone`), for the engine to
     /// deliver after the tick.
     pub clone_effects: Vec<(u32, Effect)>,
+    /// Effects on other actors by engine id (`Effect::ForActor`).
+    pub actor_effects: Vec<(u64, Effect)>,
+    /// Engine ids of this actor's clones by serial, and its own variable board key
+    /// (`Vm::clone_ids`, `Vm::self_key`), set by the engine before each tick.
+    pub clone_ids: HashMap<u32, u64>,
+    pub self_key: Option<usize>,
     /// `OpSpawn` clones made so far (next `Effect::Spawn::serial`).
     pub spawned: u32,
     /// `Effect::Spawn`s since the engine last drained them.
@@ -144,6 +150,16 @@ impl ActorScriptState {
     /// Op offset of the current `OpUserBehavior` (`ScriptProgram::behavior_name`).
     pub fn behavior(&self) -> Option<usize> {
         self.behavior
+    }
+
+    /// What the reference variable or `PlacementReference` object `obj` holds.
+    pub fn reference(&self, obj: usize) -> Option<&RefTarget> {
+        self.refs.get(&vec![Ref::Obj(obj)])
+    }
+
+    /// Point `obj` (a level `PlacementReference`) at `target`, as the engine sees it now.
+    pub fn set_reference(&mut self, obj: usize, target: RefTarget) {
+        self.refs.insert(vec![Ref::Obj(obj)], target);
     }
 
     pub fn get(&self, key: &[u32]) -> Option<f32> {
@@ -354,6 +370,8 @@ impl ScriptProgram {
         vm.rng = st.rng;
         vm.refs = std::mem::take(&mut st.refs);
         vm.sets = std::mem::take(&mut st.sets);
+        vm.clone_ids = std::mem::take(&mut st.clone_ids);
+        vm.self_key = st.self_key;
         vm.save = st.save.clone();
         vm.spawned = st.spawned;
         self.advance_sliders(&mut vm, &mut st.sliders, dt);
@@ -386,6 +404,7 @@ impl ScriptProgram {
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
         st.sets = std::mem::take(&mut vm.sets);
+        st.clone_ids = std::mem::take(&mut vm.clone_ids);
         st.save_writes.append(&mut vm.save_writes);
         st.spawned = vm.spawned;
         if let Err(e) = result {
@@ -397,6 +416,7 @@ impl ScriptProgram {
             match effect {
                 spawn @ Effect::Spawn { .. } => st.spawns.push(spawn),
                 Effect::ForClone { serial, effect } => st.clone_effects.push((serial, *effect)),
+                Effect::ForActor { id, effect } => st.actor_effects.push((id, *effect)),
                 effect => st.apply(effect),
             }
         }
@@ -996,6 +1016,92 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn placement_reference_reaches_another_actor() {
+        // `BattleMaster.ai`: `set Current_BattleMaster.x = 1`, `find variable "New Enemies"
+        // on Current_BattleMaster`, and "Start BattleMaster" setting it to its clone.
+        const PR: usize = 0x14cce8;
+        const FIND: usize = 0x520;
+        const OTHER: u64 = 0x1_0000_0042;
+        let p = program(
+            vec![
+                ins(
+                    11,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(PR), h(TINT), h(ALPHA)],
+                        rhs: lit(9.0),
+                    },
+                ),
+                ins(
+                    FIND,
+                    1,
+                    Op::FindVariable {
+                        name: "New Enemies".into(),
+                        target: vec![Ref::Obj(PR)],
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(FIND)],
+                    },
+                ),
+                // The reference is set inside the setup block, where `@spawn` is the clone.
+                ins(
+                    SPAWN,
+                    1,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![Ref::Obj(PR)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    13,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(PR)],
+                        rhs: vec![Ref::Obj(SPAWN)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        st.set_reference(PR, RefTarget::Actor(OTHER));
+        st.board.insert(
+            OTHER as usize,
+            HashMap::from([("New Enemies".into(), Value::Int(0))]),
+        );
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.actor_effects,
+            vec![(
+                OTHER,
+                Effect::Set {
+                    key: vec![MY, TINT, ALPHA],
+                    value: Value::Float(9.0)
+                }
+            )]
+        );
+        assert_eq!(st.board[&(OTHER as usize)]["New Enemies"], Value::Int(1));
+        // `spawn ... at Current_BattleMaster` starts at that actor.
+        assert!(matches!(
+            &st.spawns[0],
+            Effect::Spawn {
+                at: crate::script::SpawnAt::Actor(OTHER),
+                ..
+            }
+        ));
+        // `Current_BattleMaster = @spawn`: the engine sees this actor's clone 0.
+        assert_eq!(st.reference(PR), Some(&RefTarget::Spawned(0)));
     }
 
     #[test]

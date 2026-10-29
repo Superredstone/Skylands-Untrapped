@@ -256,6 +256,9 @@ pub struct ScriptSet {
     pub sets: HashMap<usize, Vec<String>>,
     /// `tfbActorInfo` objects in the file (what `OpSpawn ... at` can name).
     pub placements: HashSet<usize>,
+    /// `PlacementReference` objects: level-wide references (`Current_BattleMaster`) that
+    /// one actor's `OpSetReference` sets and every script reads.
+    pub placement_refs: HashSet<usize>,
     /// `ScriptSet` object -> its `+0x08` name (`global.bld` `$51a` = "Minions").
     pub set_names: HashMap<usize, String>,
     /// Name of every `OpDefineMacro` object, including stubs of macros defined in other
@@ -690,11 +693,15 @@ impl ScriptSet {
             };
             vars.insert(o.offset, info);
         }
-        let placements = objects
-            .iter()
-            .filter(|o| o.type_name.as_deref() == Some("tfbActorInfo"))
-            .map(|o| o.offset)
-            .collect();
+        let of_type = |t: &str| {
+            objects
+                .iter()
+                .filter(|o| o.type_name.as_deref() == Some(t))
+                .map(|o| o.offset)
+                .collect()
+        };
+        let placements = of_type("tfbActorInfo");
+        let placement_refs = of_type("PlacementReference");
         let set_names = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
@@ -781,6 +788,7 @@ impl ScriptSet {
             opaque_operands,
             sets,
             placements,
+            placement_refs,
             set_names,
             macro_names,
         })
@@ -1092,6 +1100,10 @@ pub struct Vm<'a> {
     found: HashMap<usize, (usize, String)>,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
     pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
+    /// Engine ids of this actor's clones by serial, and this actor's own board key, for
+    /// `OpFindVariable` / `OpSpawn ... at` through references.
+    pub clone_ids: HashMap<u32, u64>,
+    pub self_key: Option<usize>,
     /// Engine actions the scripts asked for, in execution order.
     pub effects: Vec<Effect>,
     /// Global variables shared across actor scripts (e.g. "Levels_Completed").
@@ -1128,6 +1140,9 @@ pub enum RefTarget {
     Engine(Vec<u32>),
     /// The actor's `serial`-th `OpSpawn` clone (`Effect::Spawn`).
     Spawned(u32),
+    /// Another actor, by the engine's id for it (a level `PlacementReference` such as
+    /// `Current_BattleMaster` that another script set).
+    Actor(u64),
     /// Something only the live engine knows (macro output...).
     Unknown,
 }
@@ -1146,6 +1161,7 @@ enum Target {
     Engine(Vec<u32>),
     Clone(usize, Vec<u32>),
     Spawned(u32, Vec<u32>),
+    Actor(u64, Vec<u32>),
 }
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
@@ -1190,6 +1206,8 @@ pub enum Effect {
     /// `effect` (targets as the clone's own `my` paths) on the actor's `serial`-th clone,
     /// reached through a reference variable after its setup block (`"My Lid".tint.alpha`).
     ForClone { serial: u32, effect: Box<Effect> },
+    /// `effect` (targets as that actor's own `my` paths) on another actor (`RefTarget::Actor`).
+    ForActor { id: u64, effect: Box<Effect> },
     /// `OpSpawn` at op `op`: clone `template` at the engine object `at`, facing `facing`
     /// degrees. `serial` numbers the actor's spawns (`RefTarget::Spawned`). The setup block's
     /// writes to the clone are in `seed` (keys as the clone's own `my` paths) and its
@@ -1213,6 +1231,8 @@ pub enum SpawnAt {
     /// A placed `tfbActorInfo` (`spawn "_BattleMaster" at _BattleMaster`): its placement
     /// transform, inactive templates included.
     Placement(usize),
+    /// Another actor's current transform (`spawn "Left 1" at Current_BattleMaster`).
+    Actor(u64),
 }
 
 /// A clone whose `OpSpawn` setup block is running.
@@ -1279,6 +1299,8 @@ impl<'a> Vm<'a> {
             board: HashMap::new(),
             found: HashMap::new(),
             sets: HashMap::new(),
+            clone_ids: HashMap::new(),
+            self_key: None,
             unbound: Vec::new(),
             rng: 0,
             behavior: None,
@@ -1360,6 +1382,38 @@ impl<'a> Vm<'a> {
         Some((*serial, [MY_HASH].into_iter().chain(rest).collect()))
     }
 
+    /// A path through a reference to another actor (`Current_BattleMaster.x`): its id and
+    /// that actor's own `my` path.
+    fn actor_key(&self, p: &[Ref]) -> Option<(u64, Vec<u32>)> {
+        let first @ Ref::Obj(_) = p.first()? else {
+            return None;
+        };
+        let Some(RefTarget::Actor(id)) = self.refs.get(std::slice::from_ref(first)) else {
+            return None;
+        };
+        let rest = match &p[1..] {
+            [] => Vec::new(),
+            rest => self.set.engine_key(rest)?,
+        };
+        Some((*id, [MY_HASH].into_iter().chain(rest).collect()))
+    }
+
+    /// Variable board key of the object `path` names: a board actor itself, or the actor
+    /// a reference holds (another actor, one of this actor's clones, `my`).
+    fn board_key(&self, path: &[Ref]) -> Option<usize> {
+        if let [Ref::Obj(a)] = path {
+            if self.board.contains_key(a) {
+                return Some(*a);
+            }
+        }
+        match self.ref_target(path) {
+            RefTarget::Actor(id) => Some(id as usize),
+            RefTarget::Spawned(s) => self.clone_ids.get(&s).map(|&id| id as usize),
+            RefTarget::Engine(k) if k == [MY_HASH] => self.self_key,
+            _ => None,
+        }
+    }
+
     fn target(&self, path: &[Ref]) -> Option<Target> {
         if let Some(k) = self.set.engine_key(path) {
             return Some(Target::Engine(k));
@@ -1367,6 +1421,9 @@ impl<'a> Vm<'a> {
         let p = self.canon(path).ok()?;
         if let Some((i, k)) = self.clone_key(&p) {
             return Some(Target::Clone(i, k));
+        }
+        if let Some((id, k)) = self.actor_key(&p) {
+            return Some(Target::Actor(id, k));
         }
         let (serial, k) = self.spawned_key(&p)?;
         // A reference to the clone whose setup block is still running means that clone.
@@ -1384,6 +1441,10 @@ impl<'a> Vm<'a> {
             Target::Clone(i, k) => self.spawning[i].setup.push(effect(k)),
             Target::Spawned(serial, k) => self.effects.push(Effect::ForClone {
                 serial,
+                effect: Box::new(effect(k)),
+            }),
+            Target::Actor(id, k) => self.effects.push(Effect::ForActor {
+                id,
                 effect: Box::new(effect(k)),
             }),
         }
@@ -1789,6 +1850,14 @@ impl<'a> Vm<'a> {
                                 });
                             }
                         }
+                        Some(Target::Actor(id, k)) => {
+                            if let Some(refs) = self.my_refs(&k) {
+                                self.effects.push(Effect::ForActor {
+                                    id,
+                                    effect: Box::new(slide(refs)),
+                                });
+                            }
+                        }
                         _ => {
                             if let Ok(lhs) = self.canon(lhs) {
                                 self.effects.push(slide(lhs));
@@ -1869,7 +1938,14 @@ impl<'a> Vm<'a> {
                         (None, [Ref::Obj(o)]) if self.set.placements.contains(o) => {
                             Some(SpawnAt::Placement(*o))
                         }
-                        _ => None,
+                        _ => match self.ref_target(at) {
+                            RefTarget::Actor(id) => Some(SpawnAt::Actor(id)),
+                            RefTarget::Spawned(s) => {
+                                self.clone_ids.get(&s).map(|&id| SpawnAt::Actor(id))
+                            }
+                            RefTarget::Engine(k) => Some(SpawnAt::Engine(k)),
+                            _ => None,
+                        },
                     };
                     let (Some(template), Some(at)) = (actor, at) else {
                         pc += skip;
@@ -1908,14 +1984,9 @@ impl<'a> Vm<'a> {
                 // A variable of another placed actor: the block runs with the op meaning
                 // that variable. Anything else is not found: the block is skipped.
                 Op::FindVariable { name, target } => {
-                    let actor = match target[..] {
-                        [Ref::Obj(a)]
-                            if self.board.get(&a).is_some_and(|v| v.contains_key(name)) =>
-                        {
-                            Some(a)
-                        }
-                        _ => None,
-                    };
+                    let actor = self
+                        .board_key(target)
+                        .filter(|a| self.board.get(a).is_some_and(|v| v.contains_key(name)));
                     match actor {
                         Some(a) => {
                             self.found.insert(ins.offset, (a, name.clone()));
@@ -2148,6 +2219,10 @@ impl<'a> Vm<'a> {
                 // Kept here too, so the script reads back what it wrote.
                 Some(Target::Spawned(serial, key)) => self.effects.push(Effect::ForClone {
                     serial,
+                    effect: Box::new(Effect::Set { key, value: v }),
+                }),
+                Some(Target::Actor(id, key)) => self.effects.push(Effect::ForActor {
+                    id,
                     effect: Box::new(Effect::Set { key, value: v }),
                 }),
                 _ => {}
