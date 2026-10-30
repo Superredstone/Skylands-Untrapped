@@ -1354,6 +1354,64 @@ mod tests {
         }
     }
 
+    /// Engine distances between positions on a line, by id.
+    #[derive(Debug)]
+    struct Line(HashMap<u64, f32>);
+
+    impl crate::script::MemberFields for Line {
+        fn field(&self, me: u64, member: u64, field: u32) -> Option<f32> {
+            let (a, b) = (self.0.get(&me)?, self.0.get(&member)?);
+            (field == DISTANCE).then_some((a - b).abs())
+        }
+    }
+
+    #[test]
+    fn a_field_read_is_measured_from_its_reference_point() {
+        // "Transport - Navigate Waypoints": `check "info"."Transport".distance < tolerance`
+        // measures the transport from "Nav - Move Target" (the stack's `+0x18`), not from
+        // `my`: 30 away here, so the check fails.
+        const T: usize = 0x700;
+        const MT: usize = 0x710;
+        const OUT: usize = 0x720;
+        const CHECK: usize = 0x730;
+        let mut p = program(
+            vec![
+                ins(
+                    CHECK,
+                    1,
+                    Op::CheckValue {
+                        lhs: vec![Ref::Obj(T), h(DISTANCE)],
+                        rel: 3,
+                        rhs: lit(5.0),
+                    },
+                ),
+                ins(
+                    0x731,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(OUT)],
+                        rhs: lit(1.0),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        p.set.relative.insert(CHECK, vec![Ref::Obj(MT)]);
+        let mut st = ActorScriptState {
+            self_id: Some(1),
+            fields: Some(std::sync::Arc::new(Line(HashMap::from([
+                (1, 0.0),
+                (7, 30.0),
+            ])))),
+            ..Default::default()
+        };
+        st.set_reference(T, RefTarget::Engine(vec![MY]));
+        st.set_reference(MT, RefTarget::Actor(7));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.vars.get(&vec![Ref::Obj(OUT)]), None);
+    }
+
     #[test]
     fn find_subset_keeps_members_the_engine_measures_in_range() {
         // `Transport_Macros.ai`: `find subset of "Minions" where .distance < 40 { ... }`,

@@ -296,6 +296,10 @@ pub struct ScriptSet {
     pub records: HashSet<usize>,
     /// `StringInfo` constants by offset (`RefTarget::String`).
     pub strings: HashSet<usize>,
+    /// Per op: the object its LHS (+0x1c stack) is measured from, the stack's `+0x18`
+    /// `PositionStack` (`0x80090880` points the engine's reference at it, `r13-0x3c98`;
+    /// `distance` `0x80075154` is `|object - reference|`). Without one: `my`.
+    pub relative: HashMap<usize, Vec<Ref>>,
     /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
     /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
     pub use_paths: HashMap<usize, Vec<Ref>>,
@@ -939,8 +943,18 @@ impl ScriptSet {
             .map(|&g| (g, r.lhs(g + 0x30)))
             .collect();
         let strings = of_type("StringInfo");
+        let relative = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref().is_some_and(|t| t.starts_with("Op")))
+            .filter_map(|o| {
+                let rel = r.ptr(r.ptr(o.offset + 0x1c)? + 0x18)?;
+                let path = (r.ty(rel) == "PositionStack").then(|| r.path(rel))?;
+                (!path.is_empty()).then_some((o.offset, path))
+            })
+            .collect();
         let mut set = Self {
             strings,
+            relative,
             scripts,
             master_vars,
             tags,
@@ -1297,6 +1311,9 @@ pub struct Vm<'a> {
     /// own placement): those read and write the variable itself.
     pub own_vars: HashMap<String, usize>,
     found_own: HashMap<usize, usize>,
+    /// The object field measurements are taken from while an op with a
+    /// `ScriptSet::relative` reference point reads its LHS (`None`: `my`).
+    origin: Option<RefTarget>,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
     pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// Engine ids of this actor's clones by serial, and this actor's own board key, for
@@ -1593,6 +1610,7 @@ impl<'a> Vm<'a> {
             found: HashMap::new(),
             own_vars: HashMap::new(),
             found_own: HashMap::new(),
+            origin: None,
             sets: HashMap::new(),
             clone_ids: HashMap::new(),
             self_key: None,
@@ -1739,6 +1757,11 @@ impl<'a> Vm<'a> {
         self.engine_sets.get(name)
     }
 
+    /// The reference point op `at` measures its LHS from (`ScriptSet::relative`).
+    fn relative_origin(&self, at: usize) -> Option<RefTarget> {
+        self.set.relative.get(&at).map(|p| self.ref_target(p))
+    }
+
     /// Engine id of a member (`None`: a placement, `null`, what only the engine knows).
     fn member_id(&self, m: &RefTarget) -> Option<u64> {
         match m {
@@ -1839,10 +1862,33 @@ impl<'a> Vm<'a> {
             }
             (RefTarget::Waypoint { owner, index }, [f]) => {
                 let wp = self.home_waypoints(owner)?.get(index)?;
+                let from = match &self.origin {
+                    Some(o) => self.member_id(o)?,
+                    None => self.self_id?,
+                };
                 let v = self
                     .fields
                     .as_ref()?
-                    .waypoint_field(self.self_id?, owner, wp.local, *f)?;
+                    .waypoint_field(from, owner, wp.local, *f)?;
+                Some(Value::Float(v))
+            }
+            // Measured from another object (`"info"."Transport".distance` from
+            // "Nav - Move Target"); `distance` from a waypoint is the waypoint's from the
+            // object.
+            (t, [f]) if self.origin.is_some() => {
+                let id = self.member_id(&t)?;
+                let v = match self.origin.clone()? {
+                    RefTarget::Waypoint { owner, index } => {
+                        let wp = self.home_waypoints(owner)?.get(index)?;
+                        self.fields
+                            .as_ref()?
+                            .waypoint_field(id, owner, wp.local, *f)?
+                    }
+                    o => {
+                        let from = self.member_id(&o)?;
+                        self.fields.as_ref()?.field(from, id, *f)?
+                    }
+                };
                 Some(Value::Float(v))
             }
             // This actor itself: its own engine state ("info"."Transport".distance).
@@ -1856,7 +1902,11 @@ impl<'a> Vm<'a> {
                 .copied(),
             (t, [f]) => {
                 let id = self.member_id(&t)?;
-                let v = self.fields.as_ref()?.field(self.self_id?, id, *f)?;
+                let from = match &self.origin {
+                    Some(o) => self.member_id(o)?,
+                    None => self.self_id?,
+                };
+                let v = self.fields.as_ref()?.field(from, id, *f)?;
                 Some(Value::Float(v))
             }
             _ => None,
@@ -2599,7 +2649,9 @@ impl<'a> Vm<'a> {
                     self.write(lhs, v);
                 }
                 Op::CheckValue { lhs, rel, rhs } => {
+                    self.origin = self.relative_origin(ins.offset);
                     let a = self.read(lhs);
+                    self.origin = None;
                     let b = self.eval(rhs)?;
                     if !compare(a, *rel, b)? {
                         pc += skip;
@@ -2746,12 +2798,16 @@ impl<'a> Vm<'a> {
                         None => Value::Int(0),
                     };
                     let field = self.set.engine_key(field);
+                    let from = match self.relative_origin(ins.offset) {
+                        Some(o) => self.member_id(&o),
+                        None => self.self_id,
+                    };
                     let matches: Vec<RefTarget> = self
                         .members(set)
                         .into_iter()
                         .filter(|m| {
                             let (Some(me), Some(id), Some([f])) =
-                                (self.self_id, self.member_id(m), field.as_deref())
+                                (from, self.member_id(m), field.as_deref())
                             else {
                                 return false;
                             };

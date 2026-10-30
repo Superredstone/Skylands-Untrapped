@@ -291,11 +291,20 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       negative; an empty list gives `null`. Loop counters are `OpLoop._index` (+0x1c), 0-based
       (`OpLoopValue` execute `0x8008fecc` zeroes it, `0x8009009c` steps it), so "Stage 1 - 01 -
       Unload"'s `"active dropships"[count - loop]` visits element 0 first.
+  22. Position fields are registered at `0x805bc578` (`0x8001a078(name, unit, min, max,
+      getter, setter)`, names as offsets from `0x804a08f0`): `distance` getter `0x80075154`,
+      setter `0x80075224`; `heading` `0x800754b0` / `0x8007562c`. The getter returns
+      `|object - reference| * 3.2808399` (metres to feet), where the reference is the engine
+      global `r13-0x3c98`. `0x80090880` points that global at the `+0x18` `PositionStack` of
+      the value / reference stack being read; with none it stays as it was (`my`).
+      So each read names what it is measured from: Transport_Macros checks
+      `"info"."Transport".distance` from "Nav - Move Target", and the move target's from
+      "Nav - next wp". VM: `ScriptSet::relative` (per op, its LHS stack's `+0x18`), used by
+      `OpCheckValue` and `OpFindSubSet` (`Vm::origin`). Not modelled: reference points on
+      RHS reads, and the feet factor (core's `ActorFieldSnapshot` answers in world units).
   Now: the arena runs its stages (stage 2 at ~30 s, "Stage 3 - 01 - Check" by 60 s), but no
-  dropship moves. Each one reads its own `distance` as 0, takes every waypoint as reached in
-  one go, runs "Transport - Shutdown" and is left parked. So an actor's `distance` cannot be
-  measured from itself: the engine measures it against something else, probably the move
-  target that "Nav - Move Target" displaces. Not reversed; that is the next blocker.
+  dropship moves. "Nav - Move Target" is `null`: it is spawned from `$4f8`, a `global.bld`
+  actor template, and the VM only spawns level templates. That is the next blocker.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
