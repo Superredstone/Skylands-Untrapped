@@ -84,6 +84,8 @@ impl Plugin for SkylandsCorePlugin {
                     systems::hero_combat_system,
                     systems::enemy_ai_system,
                     systems::actor_script_system,
+                    // Attached actors where they are before effects measure them.
+                    systems::attach_system,
                     apply_deferred,
                     systems::clone_effect_system,
                     apply_deferred,

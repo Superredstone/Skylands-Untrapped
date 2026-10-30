@@ -331,9 +331,16 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         its script displaces it since; `null` lets go where it is.
       - Not modelled: the transport model's `attach nodes` (`d99e7501`, handle 38), so
         passengers hang at the transport root plus the script's offsets, all at one point.
-  Now: stage 1 dropships fly with their passengers attached (about 80 ft above them), but
-  the passengers stay "disabled" and are never unloaded: "Transport - Unload Dropship" /
-  "Single Enemy Unload" not traced yet.
+  26. Right-hand reads have reference points too (`RHSValueStack` `+0x18`,
+      `ScriptSet::relative_reads` by (op, path), `Vm::cur_op`): "Navigate Waypoints" steers
+      the move target by `"Nav - next wp".heading` / `pitch` measured from the move
+      target. Core runs `attach_system` after the script tick as well as after effects, so
+      a released passenger is let go where it was.
+  Now: a stage 1 dropship flies a straight line to the end of its path (~20 s) and
+  releases its passengers there; they stay "disabled". The arena's "Transport - Unload
+  Dropship" waits for "Command - docked", which the dropship never sets (it reaches its
+  last waypoint instead of a dock waypoint; waypoint `roll` flags, assumed zero, not
+  checked).
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

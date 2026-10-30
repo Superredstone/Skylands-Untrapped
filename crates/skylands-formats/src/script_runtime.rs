@@ -1493,6 +1493,51 @@ mod tests {
     }
 
     #[test]
+    fn a_right_hand_read_is_measured_from_its_reference_point() {
+        // `displace "Nav - Move Target" heading="Nav - next wp".heading`: the heading is
+        // the waypoint's from the move target (its `RHSValueStack`'s `+0x18`).
+        const T: usize = 0x700;
+        const MT: usize = 0x710;
+        const OUT: usize = 0x720;
+        const SET: usize = 0x730;
+        let read = vec![Ref::Obj(T), h(DISTANCE)];
+        let mut p = program(
+            vec![ins(
+                SET,
+                0,
+                Op::SetValue {
+                    lhs: vec![Ref::Obj(OUT)],
+                    rhs: Rhs {
+                        a: Operand::Read {
+                            path: read.clone(),
+                            kind: crate::script::NumKind::Float,
+                        },
+                        arith: -1,
+                        b: None,
+                        func: 0,
+                    },
+                },
+            )],
+            vec![],
+        );
+        p.set.relative_reads.insert((SET, read), vec![Ref::Obj(MT)]);
+        let mut st = ActorScriptState {
+            self_id: Some(1),
+            fields: Some(std::sync::Arc::new(Line(HashMap::from([
+                (1, 0.0),
+                (7, 30.0),
+                (9, 40.0),
+            ])))),
+            ..Default::default()
+        };
+        st.set_reference(T, RefTarget::Actor(9));
+        st.set_reference(MT, RefTarget::Actor(7));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.vars.get(&vec![Ref::Obj(OUT)]), Some(&Value::Float(10.0)));
+    }
+
+    #[test]
     fn find_subset_keeps_members_the_engine_measures_in_range() {
         // `Transport_Macros.ai`: `find subset of "Minions" where .distance < 40 { ... }`,
         // here over a script set of two clones, 25 and 90 away.

@@ -300,6 +300,10 @@ pub struct ScriptSet {
     /// `PositionStack` (`0x80090880` points the engine's reference at it, `r13-0x3c98`;
     /// `distance` `0x80075154` is `|object - reference|`). Without one: `my`.
     pub relative: HashMap<usize, Vec<Ref>>,
+    /// The same for right-hand reads: (op, read path) -> reference point, from each
+    /// `RHSValueStack`'s `+0x18` (`displace "Nav - Move Target" heading="Nav - next
+    /// wp".heading` measures from the move target).
+    pub relative_reads: HashMap<(usize, Vec<Ref>), Vec<Ref>>,
     /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
     /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
     pub use_paths: HashMap<usize, Vec<Ref>>,
@@ -952,9 +956,42 @@ impl ScriptSet {
                 (!path.is_empty()).then_some((o.offset, path))
             })
             .collect();
+        let mut relative_reads = HashMap::new();
+        for o in objects
+            .iter()
+            .filter(|o| o.type_name.as_deref().is_some_and(|t| t.starts_with("Op")))
+        {
+            let mut todo: Vec<(usize, u32)> = (0x1c..0x40)
+                .step_by(4)
+                .filter_map(|f| Some((r.ptr(o.offset + f)?, 0)))
+                .collect();
+            while let Some((x, depth)) = todo.pop() {
+                match r.ty(x) {
+                    "ValueRHSVariant" if depth < 8 => {
+                        for f in [0x08, 0x10] {
+                            if let Some(y) = r.ptr(x + f) {
+                                todo.push((y, depth + 1));
+                            }
+                        }
+                    }
+                    "RHSValueStack" => {
+                        let rel = r
+                            .ptr(x + 0x18)
+                            .filter(|&p| r.ty(p) == "PositionStack")
+                            .map(|p| r.path(p))
+                            .filter(|p| !p.is_empty());
+                        if let Some(rel) = rel {
+                            relative_reads.insert((o.offset, r.path(x)), rel);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut set = Self {
             strings,
             relative,
+            relative_reads,
             scripts,
             master_vars,
             tags,
@@ -1325,6 +1362,8 @@ pub struct Vm<'a> {
     /// The object field measurements are taken from while an op with a
     /// `ScriptSet::relative` reference point reads its LHS (`None`: `my`).
     origin: Option<RefTarget>,
+    /// Offset of the op running (`ScriptSet::relative_reads` keys).
+    cur_op: usize,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
     pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// Engine ids of this actor's clones by serial, and this actor's own board key, for
@@ -1644,6 +1683,7 @@ impl<'a> Vm<'a> {
             own_vars: HashMap::new(),
             found_own: HashMap::new(),
             origin: None,
+            cur_op: 0,
             sets: HashMap::new(),
             clone_ids: HashMap::new(),
             self_key: None,
@@ -2664,6 +2704,7 @@ impl<'a> Vm<'a> {
                 return Err(VmError::Budget);
             }
             let ins = &ops[pc];
+            self.cur_op = ins.offset;
             if let Some(t) = self.trace.as_mut() {
                 t.push((self.home.is_some(), ins.offset));
             }
@@ -3266,7 +3307,16 @@ impl<'a> Vm<'a> {
     fn operand(&mut self, o: &Operand) -> Result<Value, VmError> {
         match o {
             Operand::Lit(v) => Ok(*v),
-            Operand::Read { path, .. } => Ok(self.read(path)),
+            Operand::Read { path, .. } => {
+                // Measured from the read's own reference point (`ScriptSet::relative_reads`).
+                let Some(rel) = self.set.relative_reads.get(&(self.cur_op, path.clone())) else {
+                    return Ok(self.read(path));
+                };
+                let saved = self.origin.replace(self.ref_target(rel));
+                let v = self.read(path);
+                self.origin = saved;
+                Ok(v)
+            }
             Operand::Expr(r) => self.eval(r),
         }
     }
@@ -4931,6 +4981,29 @@ mod tests {
         let armored = arena.tags[&0xaf6f0][2];
         assert_eq!(arena.var_name(armored), "armored");
         assert_eq!(arena.vars[&armored].init, Some(I(1)));
+    }
+
+    #[test]
+    fn rom_right_hand_reads_name_their_reference_point() {
+        // "Transport - Navigate Waypoints" @1bfac4: `displace "Nav - Move Target"
+        // heading="Nav - next wp".heading pitch="Nav - next wp".pitch`, both from the move
+        // target.
+        let Some(arena) =
+            read_bld("level", "Arena_Challenge_300_000").and_then(|d| ScriptSet::parse(&d))
+        else {
+            return;
+        };
+        let rels: Vec<_> = arena
+            .relative_reads
+            .iter()
+            .filter(|((op, _), _)| *op == 0x1bfac4)
+            .map(|(_, rel)| arena.path_str(rel))
+            .collect();
+        assert_eq!(rels.len(), 2, "{rels:?}");
+        assert!(
+            rels.iter().all(|r| r == "\"info\".\"Nav - Move Target\""),
+            "{rels:?}"
+        );
     }
 
     #[test]
