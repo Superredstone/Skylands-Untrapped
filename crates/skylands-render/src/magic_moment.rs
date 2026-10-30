@@ -110,9 +110,9 @@ pub struct MmOwnMaterial {
 pub struct MmScroll(pub Vec2);
 
 #[derive(Clone)]
-struct MmPart {
-    mesh: Handle<Mesh>,
-    material: StandardMaterial,
+pub(crate) struct MmPart {
+    pub(crate) mesh: Handle<Mesh>,
+    pub(crate) material: StandardMaterial,
     uv_scroll: Option<Vec2>,
     /// Articulated drawable: (model stem, joint) it follows.
     joint: Option<(String, usize)>,
@@ -340,7 +340,7 @@ fn double_vertex_colors(mesh: &mut Mesh) {
     }
 }
 
-fn load_parts(
+pub(crate) fn load_parts(
     model: &IgbModel,
     indices: &[usize],
     loader: &skylands_formats::AssetLoader,

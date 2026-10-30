@@ -6,4 +6,6 @@ pub enum GameState {
     Hub,
     VillainCapture,
     ZoneTransition,
+    /// `level/Title.bld` main menu; gameplay waits until Adventure is chosen.
+    Title,
 }

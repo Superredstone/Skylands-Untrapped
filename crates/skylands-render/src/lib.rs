@@ -5,6 +5,7 @@ pub mod magic_moment;
 pub mod mesh_conversion;
 pub mod sky4_hud;
 pub mod texture_conversion;
+pub mod title_menu;
 pub mod viewer;
 pub mod visual_sync;
 
@@ -36,6 +37,7 @@ pub use sky4_hud::{
 pub use texture_conversion::{
     create_colored_material, create_textured_material, rgba8_to_bevy_image,
 };
+pub use title_menu::{setup_title_menu, title_menu_scene_system, TitleAssets, TITLE_LAYER};
 pub use viewer::{viewer_controls_system, ViewerSettings, SHOWCASE_CHARACTERS};
 pub use visual_sync::{
     actor_tint_system, actor_visual_sync_system, character_animation_system,
@@ -78,8 +80,10 @@ impl Plugin for SkylandsRenderPlugin {
                     setup_sky4_hud,
                     setup_debug_menu_ui,
                     setup_magic_moment,
+                    setup_title_menu,
                 ),
             )
+            .add_systems(Update, title_menu_scene_system.after(magic_moment_system))
             .add_systems(
                 Update,
                 (

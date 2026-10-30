@@ -67,7 +67,10 @@ Single source of truth for progress. Update this file; do not add per-task fragm
 - [x] Dynamic HUD stats in viewer mode (vertex & triangle count from active character mesh).
 - [x] Original player HUD (`sky4_hud.rs`, notes `agent/HUD.md`): sprites and layout from `global.bld` (`SpriteLibrary`, GX `RGBA8`), element badge, name, health bar + hp, XP bar + level, coins. Replaces the placeholder hero card / coin pill.
   - Tests: `hud_sprites_resolve_to_textures` (ROM), `test_decode_gx_rgba8_tile_order`, `sky4_hud::tests::*`.
-  - [ ] Portrait, original font, P2 / ally / boss HUD, pause menu (`UI_PauseMenu_Streamed.bld`), title menu (`Title.bld`).
+  - [ ] Portrait, original font, P2 / ally / boss HUD, pause menu (`UI_PauseMenu_Streamed.bld`).
+- [x] Title main menu (`title_menu.rs` in core and render, notes `agent/TITLE_MENU.md`): `GameState::Title` at boot (windowed, no `--level`), 3D rotating rig `MainMenuCarousel` with the Horde / Story / Arena silver buttons, gold focus highlight, 20 deg turns over 0.2 s, node bounce; Adventure enters the hub.
+  - Tests: `title_menu::tests::*`, `choosing_adventure_leaves_the_title_for_the_hub`, render `title_menu::tests::*`.
+  - [ ] Focus glow (`MainMenuGlow` model), background / mood box / logo, press start, save slot and difficulty pages, Settings, Horde and Arena pages, sounds.
 - [x] Skylanders-themed Debug Menu (`debug_menu.rs`):
   - F12 hotkey toggles debug menu (replaces direct free cam hotkey); Escape exits free cam.
   - Skylanders Trap Team visual styling: dark slate/obsidian dialog, antique gold runic borders, Traptanium cyan highlights, element-coded badge pills.

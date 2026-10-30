@@ -272,6 +272,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.insert_resource(active_level);
     app.insert_resource(portal);
 
+    // The game boots to the title menu; `--level` and the viewer go straight in.
+    if args.level.is_none() && !args.viewer {
+        app.world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::Title);
+    }
+
     let mut gameplay = app.world_mut().resource_mut::<PortalGameplayState>();
     gameplay.active_hero_character_id = Some(resolved_char_id);
     if args.viewer {

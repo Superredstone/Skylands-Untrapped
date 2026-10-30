@@ -10,6 +10,7 @@ pub mod resources;
 pub mod save_game;
 pub mod states;
 pub mod systems;
+pub mod title_menu;
 
 pub use audio::{resample_to_8khz_u8, PortalSpeakerSink};
 pub use collision::{Aabb, CollisionMesh, Triangle};
@@ -26,6 +27,10 @@ pub use resources::*;
 pub use save_game::{SaveGame, SAVE_SLOTS};
 pub use states::GameState;
 pub use systems::*;
+pub use title_menu::{
+    title_menu_system, TitleButton, TitleMenu, TITLE_BUTTONS, TITLE_RIG_NODES,
+    TITLE_RIG_STEP_DEGREES,
+};
 
 use bevy::prelude::*;
 
@@ -63,6 +68,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<ActorEffects>()
             .init_resource::<PlacementRefs>()
             .init_resource::<PendingPlacementRefs>()
+            .init_resource::<TitleMenu>()
             .add_systems(Startup, systems::setup_default_scene)
             .add_systems(FixedFirst, interpolation::restore_tick_transform)
             .add_systems(FixedPostUpdate, interpolation::record_tick_transform)
@@ -92,7 +98,8 @@ impl Plugin for SkylandsCorePlugin {
                     systems::attach_system,
                     save_game::save_progress_system,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(not(in_state(GameState::Title))),
             )
             .add_systems(
                 FixedUpdate,
@@ -113,7 +120,18 @@ impl Plugin for SkylandsCorePlugin {
                     apply_state_transitions,
                 )
                     .chain()
-                    .after(systems::enemy_ai_system),
+                    .after(systems::enemy_ai_system)
+                    .run_if(not(in_state(GameState::Title))),
+            )
+            .add_systems(
+                FixedUpdate,
+                (
+                    systems::input_mapping_system,
+                    title_menu::title_menu_system,
+                    apply_state_transitions,
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Title)),
             );
     }
 }
