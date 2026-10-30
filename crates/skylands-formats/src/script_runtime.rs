@@ -165,6 +165,9 @@ pub struct ActorScriptState {
     /// (`Vm::clone_ids`, `Vm::self_key`), set by the engine before each tick.
     pub clone_ids: HashMap<u32, u64>,
     pub self_key: Option<usize>,
+    /// Tags of this actor's placement (`ScriptSet::tags`): variables it owns besides its
+    /// script's, set by the engine when the actor is made.
+    pub tags: Vec<usize>,
     /// `OpSpawn` clones made so far (next `Effect::Spawn::serial`).
     pub spawned: u32,
     /// `Effect::Spawn`s since the engine last drained them.
@@ -268,13 +271,19 @@ impl ScriptProgram {
         }
     }
 
-    /// Variables script `si` declares (`_masterVarList`): object and name.
-    fn declared(&self, si: usize) -> impl Iterator<Item = (usize, &str)> {
+    /// Variables of an actor running script `si` (`_masterVarList`, then its placement's
+    /// tags): object and name.
+    fn declared<'a>(
+        &'a self,
+        si: usize,
+        st: &'a ActorScriptState,
+    ) -> impl Iterator<Item = (usize, &'a str)> {
         self.set
             .master_vars
             .get(si)
             .into_iter()
             .flatten()
+            .chain(&st.tags)
             .filter(|v| self.set.vars.contains_key(v))
             .map(|&v| (v, self.set.var_name(v)))
     }
@@ -282,7 +291,7 @@ impl ScriptProgram {
     /// Values of script `si`'s variables by name (initial values until written), for
     /// other actors' `OpFindVariable`.
     pub fn export_vars(&self, si: usize, st: &ActorScriptState) -> HashMap<String, Value> {
-        self.declared(si)
+        self.declared(si, st)
             .map(|(var, name)| {
                 let v = st
                     .vars
@@ -303,9 +312,13 @@ impl ScriptProgram {
     /// References in script `si`'s variables by name, as any actor reads them (`my` and
     /// this actor's clones as engine ids), for other actors' `OpFindVariable`.
     pub fn export_refs(&self, si: usize, st: &ActorScriptState) -> HashMap<String, RefTarget> {
-        self.declared(si)
+        self.declared(si, st)
             .filter_map(|(var, name)| {
-                let t = st.refs.get(&vec![Ref::Obj(var)])?.clone();
+                let t = st
+                    .refs
+                    .get(&vec![Ref::Obj(var)])
+                    .or_else(|| self.set.tag_refs.get(&var))?
+                    .clone();
                 let t = match t {
                     RefTarget::Engine(ref k) if *k == [field::MY] => {
                         st.self_id.map_or(t, RefTarget::Actor)
@@ -328,7 +341,7 @@ impl ScriptProgram {
         refs: &HashMap<String, RefTarget>,
     ) {
         let found: Vec<_> = self
-            .declared(si)
+            .declared(si, st)
             .filter_map(|(var, name)| Some((var, refs.get(name)?.clone())))
             .collect();
         for (var, t) in found {
@@ -339,7 +352,7 @@ impl ScriptProgram {
     /// Takes other actors' writes to script `si`'s variables (`export_vars` names).
     pub fn import_vars(&self, si: usize, st: &mut ActorScriptState, vals: &HashMap<String, Value>) {
         let vars: Vec<_> = self
-            .declared(si)
+            .declared(si, st)
             .filter_map(|(var, name)| Some((var, *vals.get(name)?)))
             .collect();
         for (var, v) in vars {
@@ -685,6 +698,41 @@ mod tests {
     }
 
     const SPAWN: usize = 0x300;
+
+    #[test]
+    fn placement_tags_are_found_like_script_variables() {
+        // A placement's tags (`ScriptSet::tags`) are variables of its actor beside the
+        // script's: other actors find them (`export_vars` / `export_refs`) and write them
+        // (`import_refs`); unset reference tags give their default.
+        const ARMORED: usize = 0x500;
+        const PATH: usize = 0x510;
+        let mut p = program(Vec::new(), Vec::new());
+        for (v, name, init) in [
+            (ARMORED, "armored", Some(Value::Int(1))),
+            (PATH, "flight path", None),
+        ] {
+            p.set.vars.insert(
+                v,
+                VarInfo {
+                    name: name.into(),
+                    type_name: "OpParameter".into(),
+                    init,
+                },
+            );
+        }
+        p.set.tag_refs.insert(PATH, RefTarget::Null);
+        let mut st = ActorScriptState::default();
+        assert!(!p.export_vars(0, &st).contains_key("armored"));
+        st.tags = vec![ARMORED, PATH];
+        assert_eq!(p.export_vars(0, &st)["armored"], Value::Int(1));
+        assert_eq!(p.export_refs(0, &st)["flight path"], RefTarget::Null);
+        let path = HashMap::from([("flight path".to_string(), RefTarget::Placement(0x600))]);
+        p.import_refs(0, &mut st, &path);
+        assert_eq!(
+            p.export_refs(0, &st)["flight path"],
+            RefTarget::Placement(0x600)
+        );
+    }
 
     fn coin() -> crate::script::SpawnTemplate {
         crate::script::SpawnTemplate {

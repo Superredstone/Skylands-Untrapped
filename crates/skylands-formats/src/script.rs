@@ -259,6 +259,12 @@ pub struct ScriptSet {
     pub scripts: Vec<Script>,
     /// Per script: its `_masterVarList` variable objects (what `OpFindVariable` finds).
     pub master_vars: Vec<Vec<usize>>,
+    /// Per `tfbActorInfo`: its tags (`_tagList` +0x18 `TagList`, `_initialTags` +0x1c count,
+    /// +0x24 data), `OpParameter` variables every actor of that placement owns besides its
+    /// script's (`"flight path"`, `"armored"`); `OpFindVariable` finds both.
+    pub tags: HashMap<usize, Vec<usize>>,
+    /// Reference tags' default (`OpParameter._RHS` +0x30): `null` or an engine handle.
+    pub tag_refs: HashMap<usize, RefTarget>,
     pub vars: HashMap<usize, VarInfo>,
     /// `EXID` index -> first word: export id when `handle_ns` is `global.bld`, else
     /// FNV-1a of the lower-case engine name.
@@ -755,6 +761,15 @@ impl ScriptSet {
                     type_name: t.into(),
                     init: None,
                 },
+                // A tag: `_varName` +0x1c, default `_RHS` +0x30 (a literal for values).
+                "OpParameter" => VarInfo {
+                    name: r.cstr(o.offset + 0x1c),
+                    type_name: t.into(),
+                    init: r.rhs_at(o.offset + 0x30).and_then(|x| match x.a {
+                        Operand::Lit(v) if x.b.is_none() => Some(v),
+                        _ => None,
+                    }),
+                },
                 _ => continue,
             };
             vars.insert(o.offset, info);
@@ -892,9 +907,33 @@ impl ScriptSet {
                 ))
             })
             .unzip();
-        Some(Self {
+        let tags: HashMap<usize, Vec<usize>> = placements
+            .iter()
+            .filter_map(|&a| {
+                let t = r.ptr(a + 0x18).filter(|&t| r.ty(t) == "TagList")?;
+                let data = r.ptr(t + 0x24)?;
+                let n = r.u32(t + 0x1c)? as usize;
+                let list: Vec<usize> = (0..n)
+                    .filter_map(|i| r.ptr(data + 4 * i))
+                    .filter(|&g| vars.contains_key(&g))
+                    .collect();
+                (!list.is_empty()).then_some((a, list))
+            })
+            .collect();
+        let tag_paths: Vec<(usize, Vec<Ref>)> = tags
+            .values()
+            .flatten()
+            .filter(|&&g| {
+                r.ptr(g + 0x30)
+                    .is_some_and(|p| r.ty(p) == "RHSReferenceStack")
+            })
+            .map(|&g| (g, r.lhs(g + 0x30)))
+            .collect();
+        let mut set = Self {
             scripts,
             master_vars,
+            tags,
+            tag_refs: HashMap::new(),
             vars,
             handle_ids: file.exid_formats.clone(),
             handle_ns: file.exid_namespaces.clone(),
@@ -911,7 +950,18 @@ impl ScriptSet {
             placement_refs,
             set_names,
             macro_names,
-        })
+        };
+        set.tag_refs = tag_paths
+            .into_iter()
+            .map(|(g, path)| {
+                let t = match set.engine_key(&path).as_deref() {
+                    Some([NULL_HASH]) | None => RefTarget::Null,
+                    Some(k) => RefTarget::Engine(k.to_vec()),
+                };
+                (g, t)
+            })
+            .collect();
+        Some(set)
     }
 
     /// Name hashes of an engine path (`my.orientation.facing`): every step is a
@@ -2989,7 +3039,16 @@ impl<'a> Vm<'a> {
                     a
                 })
             }
-            (11, _) => Float(f.to_radians().sin()),
+            // `0x80071a00` / `0x80071a4c` / `0x80071a98`: degrees times the f32
+            // `0.017453292` (`fmuls`), then double `sin` / `cos` / `tan`, rounded to f32.
+            (11..=13, _) => {
+                let r = f64::from(f * 0.017_453_292);
+                Float(match func {
+                    11 => r.sin(),
+                    12 => r.cos(),
+                    _ => r.tan(),
+                } as f32)
+            }
             _ => return Err(VmError::Unsupported(format!("result func {func}"))),
         })
     }
@@ -3592,6 +3651,9 @@ mod tests {
         assert_eq!(f(10, F(270.0)), F(-90.0));
         assert_eq!(f(10, F(-180.0)), F(180.0));
         assert!(matches!(f(11, F(90.0)), Value::Float(x) if (x - 1.0).abs() < 1e-6));
+        assert!(matches!(f(12, F(180.0)), Value::Float(x) if (x + 1.0).abs() < 1e-6));
+        assert!(matches!(f(12, I(60)), Value::Float(x) if (x - 0.5).abs() < 1e-6));
+        assert!(matches!(f(13, F(45.0)), Value::Float(x) if (x - 1.0).abs() < 1e-6));
         for _ in 0..200 {
             assert!(matches!(f(1, I(99)), Value::Int(0..=99)));
             assert!(matches!(f(1, F(2.0)), Value::Float(x) if (0.0..2.0).contains(&x)));
@@ -4479,6 +4541,31 @@ mod tests {
         assert!(!arena.records.contains(&0x1bd340));
         assert!(g.records.contains(&0x296dec));
         assert!(!g.records.contains(&0x29fe78));
+    }
+
+    #[test]
+    fn rom_placement_tags_are_its_variables() {
+        let Some(arena) =
+            read_bld("level", "Arena_Challenge_300_000").and_then(|d| ScriptSet::parse(&d))
+        else {
+            return;
+        };
+        // `GroupTransport_Helecopter` (0x1211a0): "flight path" (what `BattleMaster.ai` sets
+        // through `find variable` on the spawned dropship), then its payload slots.
+        let names: Vec<_> = arena.tags[&0x1211a0]
+            .iter()
+            .map(|&g| arena.var_name(g))
+            .collect();
+        assert_eq!(names[..3], ["flight path", "payload", "enemy1L"]);
+        assert_eq!(
+            arena.tag_refs[&0x1212e0],
+            RefTarget::Engine(vec![0x9b61_ad43])
+        );
+        assert_eq!(arena.tag_refs[&0x12134c], RefTarget::Null);
+        // `Enemy_S4_BirdCopter_(armored)`: value tags take their literal default.
+        let armored = arena.tags[&0xaf6f0][2];
+        assert_eq!(arena.var_name(armored), "armored");
+        assert_eq!(arena.vars[&armored].init, Some(I(1)));
     }
 
     #[test]

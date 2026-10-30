@@ -1741,7 +1741,11 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint, marker.weight),
+                            state: placed_script_state(
+                                marker.tint,
+                                marker.weight,
+                                placement_tags(&scripts, marker.placement),
+                            ),
                             base,
                         },
                         base,
@@ -1796,7 +1800,11 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint, marker.weight),
+                            state: placed_script_state(
+                                marker.tint,
+                                marker.weight,
+                                placement_tags(&scripts, marker.placement),
+                            ),
                             base,
                         },
                         base,
@@ -1892,7 +1900,11 @@ pub fn spawn_level_content(
                         ActorScript {
                             script: si,
                             marker_node: marker.node_index,
-                            state: placed_script_state(marker.tint, marker.weight),
+                            state: placed_script_state(
+                                marker.tint,
+                                marker.weight,
+                                placement_tags(&scripts, marker.placement),
+                            ),
                             base,
                         },
                         base,
@@ -2336,9 +2348,24 @@ pub fn clone_effect_system(
 
 /// Engine state a placed actor's script starts with: `scale.uniform` 100, `tint.alpha`
 /// from its `Placement._tint` and `collision volume.weight` from its `CollisionInfo`.
-fn placed_script_state(tint: Option<[u8; 4]>, weight: f32) -> skylands_formats::ActorScriptState {
+/// Tags of a placement (`ScriptSet::tags`), once the level's scripts are parsed.
+fn placement_tags(scripts: &Option<Option<LevelScripts>>, placement: Option<usize>) -> Vec<usize> {
+    scripts
+        .as_ref()
+        .and_then(Option::as_ref)
+        .zip(placement)
+        .and_then(|(s, p)| s.0.set.tags.get(&p).cloned())
+        .unwrap_or_default()
+}
+
+fn placed_script_state(
+    tint: Option<[u8; 4]>,
+    weight: f32,
+    tags: Vec<usize>,
+) -> skylands_formats::ActorScriptState {
     use skylands_formats::script_runtime::field::*;
     let mut state = skylands_formats::ActorScriptState::default();
+    state.tags = tags;
     state.set(&[MY, SCALE, UNIFORM], 100.0);
     state.set(&[MY, TINT, ALPHA], tint.map_or(255.0, |t| t[3] as f32));
     state.set(&[MY, COLLISION_VOLUME, WEIGHT], weight);
@@ -2412,6 +2439,12 @@ fn spawn_script_clone(
         base,
         ActorAnimation::default(),
     ));
+    state.tags = program
+        .set
+        .tags
+        .get(&template.offset)
+        .cloned()
+        .unwrap_or_default();
     if let Some(si) = script {
         // Its script variables the setup block wrote through `OpFindVariable`.
         program.import_vars(si, &mut state, &named_vars);
@@ -4300,7 +4333,7 @@ mod tests {
     #[test]
     fn test_placed_script_state_seeds_tint_and_weight() {
         use skylands_formats::script_runtime::field::*;
-        let st = placed_script_state(Some([0x80, 0x80, 0x80, 0x40]), 100.0);
+        let st = placed_script_state(Some([0x80, 0x80, 0x80, 0x40]), 100.0, Vec::new());
         assert_eq!(st.get(&[MY, TINT, ALPHA]), Some(64.0));
         assert_eq!(st.get(&[MY, COLLISION_VOLUME, WEIGHT]), Some(100.0));
     }
@@ -4329,7 +4362,7 @@ mod tests {
             .entity_mut(prop)
             .insert(ActorTint::default());
         app.world_mut().get_mut::<ActorScript>(prop).unwrap().state =
-            placed_script_state(Some([0x80, 0x80, 0x80, 0xff]), 0.0);
+            placed_script_state(Some([0x80, 0x80, 0x80, 0xff]), 0.0, Vec::new());
         step_fixed(&mut app);
         step_fixed(&mut app);
         // Starts at the placement's 255, not at an unset 0.
@@ -4576,6 +4609,8 @@ mod tests {
             export_base: 0,
             roots: Vec::new(),
             vars,
+            tags: Default::default(),
+            tag_refs: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
@@ -4673,6 +4708,8 @@ mod tests {
             export_base: 0,
             roots: Vec::new(),
             vars: vars2,
+            tags: Default::default(),
+            tag_refs: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),

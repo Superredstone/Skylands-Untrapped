@@ -252,9 +252,24 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       +0x30: "Transport - Startup"'s "transport" = `my`), else `null`.
   16. A field read through a reference to oneself reads one's own engine state
       ("info"."Transport".distance), not an engine measurement.
-  Now: the transport finishes its startup and navigates; stage 1 spawns its second dropship at
-  8 s. Neither transport moves yet: "Nav - Flight Path" still reads `null` in Navigate (its
-  waypoint count is 0, so it steps past the end); not traced further.
+  17. Placement tags: a `tfbActorInfo`'s `_tagList` (+0x18, `TagList`: `_initialTags` count
+      +0x1c, data +0x24) lists `OpParameter` "tag" variables (`_varName` +0x1c, default `_RHS`
+      +0x30) that every actor of that placement owns besides its script's `_masterVarList`
+      ("flight path", "payload", "enemy1L".. on `GroupTransport_Helecopter`; "armored",
+      "noticeRange" on enemies). Tag objects are shared between placements; each actor holds
+      its own value. `OpFindVariable` finds them (`ScriptSet::tags`, `tag_refs`,
+      `ActorScriptState::tags`). Reference defaults are `null` or an engine handle
+      (`$9b61ad43` for "flight path"; unnamed).
+      `OpFindVariable` execute is `0x80083bdc` (vtable `0x80508c08`, +0x60): it resolves
+      `_owner` (+0x30, `_indexRHS` +0x34), asks the owner's virtual +0x40 for its variable list
+      (`_filter` +0x28) and binary-searches it by name and container / contents types; a miss
+      skips the block. Not reversed: which lists the virtual returns.
+  18. Result funcs 12 / 13 (`0x80071a4c` / `0x80071a98`) are `cos` / `tan` of degrees (fdlibm
+      `0x803d25f4` / `0x803d2bc8`): f32 `* 0.017453292`, double math, rounded to f32 (11 = `sin`).
+  Now: the transport reads its flight path (4 waypoints) and runs "Navigate Waypoints", but
+  `"info"."Transport".distance` (`2eb31462`, its own engine field, set to 0 in startup) is
+  below "WP Tolerance - Moving" at once, so it docks at the first waypoint and waits for
+  "Command - go". What the engine's `distance` of an actor measures is not reversed.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

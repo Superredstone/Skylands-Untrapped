@@ -261,7 +261,9 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     startup sequence (attaching passengers); `global.bld` state is now shared level-wide; per-instance data objects and
     indexing into sets done; growable record lists, a reference board across actors, record typing, clone setup
     slots and parameter defaults let the transport finish startup and navigate (stage 1 now spawns its second
-    dropship); next: "Nav - Flight Path" still null in Navigate, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    dropship); placement tags (`TagList` variables such as "flight path") and the `cos` / `tan` result
+    funcs bring it to its first waypoint; next: the engine's `distance` of an actor (it docks at
+    once), see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
