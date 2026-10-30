@@ -302,9 +302,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       "Nav - next wp". VM: `ScriptSet::relative` (per op, its LHS stack's `+0x18`), used by
       `OpCheckValue` and `OpFindSubSet` (`Vm::origin`). Not modelled: reference points on
       RHS reads, and the feet factor (core's `ActorFieldSnapshot` answers in world units).
-  Now: the arena runs its stages (stage 2 at ~30 s, "Stage 3 - 01 - Check" by 60 s), but no
-  dropship moves. "Nav - Move Target" is `null`: it is spawned from `$4f8`, a `global.bld`
-  actor template, and the VM only spawns level templates. That is the next blocker.
+  23. Dropship flight:
+      - `spawn $4f8 at my` spawns a `global.bld` `tfbActorInfo` (`ScriptSet::global_template`).
+        Core keeps script-less clones in `ActorFieldSnapshot` and moves them by `OpDisplace`.
+        The move target is such a marker.
+      - A reference held in a record field ("info"."Nav - Move Target", "info"."Transport")
+        resolves like one in a variable (`Vm::held_ref`) for effects and engine paths.
+      - `displace my.velocity len heading pitch` adds that vector to the velocity (length,
+        heading, pitch, horizontal length, vertical difference). This is how
+        Transport_Macros accelerates.
+  Now: the arena's dropships fly (velocity up to about 70) after their move targets, through
+  the stages. They overshoot and turn back (heading flips); the feet factor of
+  `distance` (tolerances are in feet) is a likely cause. Not checked against the game.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

@@ -1018,6 +1018,17 @@ impl ScriptSet {
         global.vars.get(global.roots.get(id)?)
     }
 
+    /// The `tfbActorInfo` template behind `EXID` handle `h` exported by `global`
+    /// (`Transport_Macros.ai`: `spawn $4f8 at my`, its "Nav - Move Target").
+    pub fn global_template<'g>(&self, h: u32, global: &'g ScriptSet) -> Option<&'g SpawnTemplate> {
+        let i = h as usize;
+        if *self.handle_ns.get(i)? != name_hash("global.bld") {
+            return None;
+        }
+        let id = (*self.handle_ids.get(i)? as usize).checked_sub(global.export_base)?;
+        global.templates.get(global.roots.get(id)?)
+    }
+
     /// Members of the static `ScriptSet` behind `EXID` handle `h` exported by `global`.
     pub fn global_set<'g>(&self, h: u32, global: &'g ScriptSet) -> Option<&'g [String]> {
         let i = h as usize;
@@ -1789,17 +1800,26 @@ impl<'a> Vm<'a> {
     /// A path through a reference variable that holds one of this actor's clones
     /// (`OpSetReference "My Lid" = @spawn`): the clone's serial and own `my` path.
     fn spawned_key(&self, p: &[Ref]) -> Option<(u32, Vec<u32>)> {
-        let first @ Ref::Obj(_) = p.first()? else {
+        let (RefTarget::Spawned(serial), rest) = self.held_ref(p)? else {
             return None;
         };
-        let Some(RefTarget::Spawned(serial)) = self.refs.get(std::slice::from_ref(first)) else {
+        Some((serial, [MY_HASH].into_iter().chain(rest).collect()))
+    }
+
+    /// The reference the longest script prefix of `p` holds (a variable or a record field,
+    /// `"info"."Nav - Move Target"`), and the rest of `p` as engine field hashes.
+    fn held_ref(&self, p: &[Ref]) -> Option<(RefTarget, Vec<u32>)> {
+        let Ref::Obj(_) = p.first()? else {
             return None;
         };
-        let rest = match &p[1..] {
-            [] => Vec::new(),
-            rest => self.set.engine_key(rest)?,
-        };
-        Some((*serial, [MY_HASH].into_iter().chain(rest).collect()))
+        (1..=p.len()).rev().find_map(|k| {
+            let t = self.refs_of(&p[..k]).get(&p[..k])?.clone();
+            let rest = match &p[k..] {
+                [] => Vec::new(),
+                rest => self.set.engine_key(rest)?,
+            };
+            Some((t, rest))
+        })
     }
 
     /// Element `i` of the list a path names: `<placement>.waypoints[i]`.
@@ -2036,20 +2056,13 @@ impl<'a> Vm<'a> {
     /// A path through a reference to another actor (`Current_BattleMaster.x`): its id and
     /// that actor's own `my` path.
     fn actor_key(&self, p: &[Ref]) -> Option<(u64, Vec<u32>)> {
-        let first @ Ref::Obj(_) = p.first()? else {
+        let (RefTarget::Actor(id), rest) = self.held_ref(p)? else {
             return None;
         };
-        let Some(RefTarget::Actor(id)) = self.refs.get(std::slice::from_ref(first)) else {
-            return None;
-        };
-        if Some(*id) == self.self_id {
+        if Some(id) == self.self_id {
             return None;
         }
-        let rest = match &p[1..] {
-            [] => Vec::new(),
-            rest => self.set.engine_key(rest)?,
-        };
-        Some((*id, [MY_HASH].into_iter().chain(rest).collect()))
+        Some((id, [MY_HASH].into_iter().chain(rest).collect()))
     }
 
     /// Variable board key of the object `path` names: a board actor itself, or the actor
@@ -2087,20 +2100,13 @@ impl<'a> Vm<'a> {
     /// A path through a reference that holds an engine object (`"mover" = my`, then
     /// `"mover".velocity.length`; also this actor by its engine id): that object's path.
     fn engine_ref_key(&self, p: &[Ref]) -> Option<Vec<u32>> {
-        let first @ Ref::Obj(_) = p.first()? else {
-            return None;
-        };
-        let k = match self.refs.get(std::slice::from_ref(first)) {
-            Some(RefTarget::Engine(k)) => k.clone(),
-            Some(RefTarget::Actor(id)) if Some(*id) == self.self_id => vec![MY_HASH],
+        let (t, rest) = self.held_ref(p)?;
+        let k = match t {
+            RefTarget::Engine(k) => k,
+            RefTarget::Actor(id) if Some(id) == self.self_id => vec![MY_HASH],
             _ => return None,
         };
-        let k = &k;
-        let rest = match &p[1..] {
-            [] => Vec::new(),
-            rest => self.set.engine_key(rest)?,
-        };
-        Some(k.iter().copied().chain(rest).collect())
+        Some(k.into_iter().chain(rest).collect())
     }
 
     fn target(&self, path: &[Ref]) -> Option<Target> {
@@ -3000,9 +3006,17 @@ impl<'a> Vm<'a> {
                             _ => None,
                         },
                     };
-                    let referenced = match actor {
-                        Some(_) => None,
-                        None => match self.ref_target(template) {
+                    let referenced = match (actor, &template[..]) {
+                        (Some(_), _) => None,
+                        // A `global.bld` export.
+                        (None, &[Ref::Handle(h)])
+                            if self
+                                .global
+                                .is_some_and(|g| self.set.global_template(h, g).is_some()) =>
+                        {
+                            self.global.and_then(|g| self.set.global_template(h, g))
+                        }
+                        (None, _) => match self.ref_target(template) {
                             RefTarget::Placement(o) => self
                                 .set
                                 .templates
@@ -4825,6 +4839,28 @@ mod tests {
         let armored = arena.tags[&0xaf6f0][2];
         assert_eq!(arena.var_name(armored), "armored");
         assert_eq!(arena.vars[&armored].init, Some(I(1)));
+    }
+
+    #[test]
+    fn rom_global_templates_spawn() {
+        // `Transport_Macros.ai` "Transport - Startup": `spawn $4f8 at my` (its "Nav - Move
+        // Target") names a `global.bld` `tfbActorInfo`.
+        let (Some(arena), Some(g)) = (
+            read_bld("level", "Arena_Challenge_300_000").and_then(|d| ScriptSet::parse(&d)),
+            read_bld("permanent", "global").and_then(|d| ScriptSet::parse(&d)),
+        ) else {
+            return;
+        };
+        let global = name_hash("global.bld");
+        let h = (0..arena.handle_ids.len())
+            .find(|&i| arena.handle_ids[i] == 0x4f8 && arena.handle_ns[i] == global)
+            .unwrap() as u32;
+        let t = arena.global_template(h, &g).unwrap();
+        assert_eq!(t.ty, "tfbActorInfo");
+        assert!(arena
+            .templates
+            .get(&t.offset)
+            .is_none_or(|l| l.name != t.name));
     }
 
     #[test]

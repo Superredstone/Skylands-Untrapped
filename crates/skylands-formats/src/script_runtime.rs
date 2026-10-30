@@ -42,6 +42,9 @@ pub mod field {
     pub const LENGTH: u32 = 0x83d0_3615;
     pub const HEADING: u32 = 0x9f48_1715;
     pub const PITCH: u32 = 0xbd32_4ab1;
+    /// A vector's `horizontal length` and `vertical difference`.
+    pub const HORIZONTAL_LENGTH: u32 = 0xfaa0_2963;
+    pub const VERTICAL_DIFFERENCE: u32 = 0xecfb_5226;
 }
 
 /// `my` fields that move, turn, scale or remove the actor.
@@ -243,6 +246,36 @@ impl ActorScriptState {
                 let (sp, cp) = pitch.to_radians().sin_cos();
                 for (d, v) in self.displacement.iter_mut().zip([cp * sh, sp, cp * ch]) {
                     *d += len * v;
+                }
+            }
+            // `displace my.velocity len heading pitch` (Transport_Macros' accelerations):
+            // adds that vector to the velocity.
+            Effect::Displace {
+                target,
+                len,
+                heading,
+                pitch,
+            } if target == [field::MY, field::VELOCITY] => {
+                let key = |f| [field::MY, field::VELOCITY, f];
+                let polar = |l: f32, h: f32, p: f32| {
+                    let (sh, ch) = h.to_radians().sin_cos();
+                    let (sp, cp) = p.to_radians().sin_cos();
+                    [l * cp * sh, l * sp, l * cp * ch]
+                };
+                let get = |f| self.get(&key(f)).unwrap_or(0.0);
+                let v = polar(get(field::LENGTH), get(field::HEADING), get(field::PITCH));
+                let d = polar(len, heading, pitch);
+                let [x, y, z] = [v[0] + d[0], v[1] + d[1], v[2] + d[2]];
+                let horizontal = x.hypot(z);
+                let length = horizontal.hypot(y);
+                self.set(&key(field::LENGTH), length);
+                self.set(&key(field::HORIZONTAL_LENGTH), horizontal);
+                self.set(&key(field::VERTICAL_DIFFERENCE), y);
+                if length > 0.0 {
+                    if horizontal > 0.0 {
+                        self.set(&key(field::HEADING), x.atan2(z).to_degrees());
+                    }
+                    self.set(&key(field::PITCH), y.atan2(horizontal).to_degrees());
                 }
             }
             Effect::Remove { target } if target == [field::MY] => self.removed = true,
@@ -1352,6 +1385,51 @@ mod tests {
                 .then(|| self.0.get(&member).copied())
                 .flatten()
         }
+    }
+
+    #[test]
+    fn displacing_my_velocity_through_a_record_field_accelerates() {
+        // "Transport - Navigate Waypoints": `"info"."Transport" = my`, then
+        // `displace "info"."Transport".velocity len=3 heading=90` and again `len=4 heading=0`:
+        // the velocity is the sum of both vectors, 5 at atan(3/4).
+        const INFO: usize = 0x700;
+        const T: usize = 0x710;
+        let accel = |off, len: f32, heading: f32| {
+            ins(
+                off,
+                0,
+                Op::Displace {
+                    target: vec![Ref::Obj(INFO), Ref::Obj(T), h(VELOCITY)],
+                    mode: 0,
+                    len: Some(lit(len)),
+                    heading: Some(lit(heading)),
+                    pitch: Some(lit(0.0)),
+                },
+            )
+        };
+        let p = program(
+            vec![
+                ins(
+                    0x720,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(INFO), Ref::Obj(T)],
+                        rhs: vec![h(MY)],
+                        desc: String::new(),
+                    },
+                ),
+                accel(0x721, 3.0, 90.0),
+                accel(0x722, 4.0, 0.0),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let v = |f| st.get(&[MY, VELOCITY, f]).unwrap();
+        assert!((v(LENGTH) - 5.0).abs() < 1e-4, "{}", v(LENGTH));
+        assert!((v(HEADING) - 36.869_9).abs() < 1e-3, "{}", v(HEADING));
+        assert!((v(HORIZONTAL_LENGTH) - 5.0).abs() < 1e-4);
     }
 
     /// Engine distances between positions on a line, by id.

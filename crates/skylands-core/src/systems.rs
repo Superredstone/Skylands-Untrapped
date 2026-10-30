@@ -2000,6 +2000,8 @@ pub fn actor_script_system(
     placements: Option<Res<PlacementTransforms>>,
     heroes: Query<(Entity, &Transform), (With<Hero>, Without<ActorScript>)>,
     clones: Query<(Entity, &SpawnedActor)>,
+    // Script-less clones (markers such as "Nav - Move Target") for `MemberFields`.
+    still_clones: Query<(Entity, &Transform), (With<SpawnedActor>, Without<ActorScript>)>,
     mut actors: Query<(
         Entity,
         &mut ActorScript,
@@ -2050,6 +2052,11 @@ pub fn actor_script_system(
             actors: actor_tfs
                 .iter()
                 .map(|(e, t)| (e.to_bits(), t.translation))
+                .chain(
+                    still_clones
+                        .iter()
+                        .map(|(e, t)| (e.to_bits(), t.translation)),
+                )
                 .chain(heroes.iter().map(|(e, t)| (e.to_bits(), t.translation)))
                 .collect(),
             placements: placements.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
@@ -2290,6 +2297,7 @@ pub fn clone_effect_system(
             Option<&SpawnedActor>,
             Option<&mut ActorScript>,
             Option<&mut ActorTint>,
+            Option<&mut Transform>,
         ),
         Or<(With<SpawnedActor>, With<ActorScript>)>,
     >,
@@ -2321,7 +2329,7 @@ pub fn clone_effect_system(
         }
     }
     for (entity, effect) in work {
-        let Ok((entity, _, script, tint)) = clones.get_mut(entity) else {
+        let Ok((entity, _, script, tint, transform)) = clones.get_mut(entity) else {
             continue;
         };
         if let Some(mut script) = script {
@@ -2339,6 +2347,19 @@ pub fn clone_effect_system(
                     None => {
                         commands.entity(entity).insert(ActorTint { alpha });
                     }
+                }
+            }
+            // `OpDisplace` of a marker ("Nav - Move Target"): heading 0 = +Z, pitch 90 = up.
+            Effect::Displace {
+                target,
+                len,
+                heading,
+                pitch,
+            } if target == [MY] => {
+                if let Some(mut t) = transform {
+                    let (sh, ch) = heading.to_radians().sin_cos();
+                    let (sp, cp) = pitch.to_radians().sin_cos();
+                    t.translation += len * Vec3::new(cp * sh, sp, cp * ch);
                 }
             }
             other => debug!("Effect on script-less actor skipped: {other:?}"),
@@ -2428,6 +2449,19 @@ fn spawn_script_clone(
         scale: Vec3::from(template.scale) / 100.0,
     };
     let script = template.script.as_deref().and_then(|s| program.find(s));
+    // Tags of a level placement (a `global.bld` template's offset is in another file).
+    let level_placement = program
+        .set
+        .templates
+        .get(&template.offset)
+        .is_some_and(|t| t.name == template.name);
+    state.tags = program
+        .set
+        .tags
+        .get(&template.offset)
+        .filter(|_| level_placement)
+        .cloned()
+        .unwrap_or_default();
     let mut clone = commands.spawn((
         LevelEntity,
         SpawnedActor {
@@ -2439,12 +2473,7 @@ fn spawn_script_clone(
         base,
         ActorAnimation::default(),
     ));
-    state.tags = program
-        .set
-        .tags
-        .get(&template.offset)
-        .cloned()
-        .unwrap_or_default();
+
     if let Some(si) = script {
         // Its script variables the setup block wrote through `OpFindVariable`.
         program.import_vars(si, &mut state, &named_vars);
@@ -5114,5 +5143,14 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Stage 1 - 01 - Unload"]);
+        // The dropships fly: "Navigate Waypoints" walks "Nav - Move Target" (a `global.bld`
+        // marker) toward the next waypoint and accelerates `my.velocity` after it.
+        let mut q = world.query::<(&ActorScript, &Transform, &SpawnedActor)>();
+        let moved = q
+            .iter(world)
+            .filter(|(_, _, c)| c.template == "GroupTransport_Helecopter")
+            .map(|(a, t, _)| t.translation.distance(a.base.translation))
+            .fold(0.0f32, f32::max);
+        assert!(moved > 50.0, "{moved}");
     }
 }
