@@ -544,6 +544,7 @@ impl ScriptProgram {
             let end = (at + 1 + ops[at].br as usize).min(ops.len());
             result = vm.run_range(si, at + 1, end);
         }
+        vm.fold_spawn_slots();
         st.behavior = vm.behavior;
         st.globals = vm.globals;
         st.refs = std::mem::take(&mut vm.refs);
@@ -1796,6 +1797,99 @@ mod tests {
             Some(&RefTarget::Placement(PATH))
         );
         assert!(st.board.is_empty() && st.ref_board.is_empty());
+    }
+
+    #[test]
+    fn find_variable_on_a_clone_spawned_this_tick_travels_with_its_spawn() {
+        // "BattleMaster - Spawn Dropship": `spawn "Transport Template"` ("transport" =
+        // @spawn), then `spawn "Left 1"` and `find variable "enemy1L" on "transport" { @find
+        // = @spawn }`. The dropship does not exist until after the tick; its "enemy1L" goes
+        // with its spawn, naming the other clone by serial.
+        const T: usize = 0x700;
+        const LEFT: usize = 0x310;
+        const FIND: usize = 0x520;
+        let spawn = |off, br| {
+            ins(
+                off,
+                br,
+                Op::Spawn {
+                    template: vec![Ref::Obj(0x400)],
+                    actor: Some(coin()),
+                    at: vec![h(MY)],
+                    facing: None,
+                },
+            )
+        };
+        let p = program(
+            vec![
+                spawn(SPAWN, 1),
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(T)],
+                        rhs: vec![Ref::Obj(SPAWN)],
+                        desc: String::new(),
+                    },
+                ),
+                spawn(LEFT, 2),
+                ins(
+                    FIND,
+                    1,
+                    Op::FindVariable {
+                        name: "enemy1L".into(),
+                        target: vec![Ref::Obj(T)],
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(FIND)],
+                        rhs: vec![Ref::Obj(LEFT)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let Effect::Spawn { named_refs, .. } = &st.spawns[0] else {
+            panic!()
+        };
+        assert_eq!(named_refs.get("enemy1L"), Some(&RefTarget::Spawned(1)));
+        assert!(st.board.is_empty() && st.ref_board.is_empty());
+    }
+
+    #[test]
+    fn writing_another_actors_distance_places_it() {
+        // "Transport - Activate Enemy": `set "enemy".distance = 0` puts the passenger on the
+        // transport (`my`, the write's reference point).
+        const E: usize = 0x700;
+        let p = program(
+            vec![ins(
+                0x701,
+                0,
+                Op::SetValue {
+                    lhs: vec![Ref::Obj(E), h(DISTANCE)],
+                    rhs: lit(0.0),
+                },
+            )],
+            vec![],
+        );
+        let mut st = ActorScriptState {
+            self_id: Some(1),
+            ..Default::default()
+        };
+        st.set_reference(E, RefTarget::Actor(7));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert!(matches!(
+            &st.actor_effects[..],
+            [(7, Effect::Place { target, from: 1, distance })] if target == &[MY] && *distance == 0.0
+        ));
     }
 
     #[test]

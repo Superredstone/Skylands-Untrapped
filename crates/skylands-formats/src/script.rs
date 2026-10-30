@@ -1421,6 +1421,11 @@ pub enum RefTarget {
     Unknown,
 }
 
+/// Board slot of clone `serial` spawned this run, until `Vm::fold_spawn_slots`.
+fn spawn_slot(serial: u32) -> usize {
+    usize::MAX / 2 - serial as usize
+}
+
 /// Name hash of the engine's `null` reference.
 const NULL_HASH: u32 = 0x7707_4ba4;
 /// Name hash of `my`, the actor running the script.
@@ -1441,6 +1446,9 @@ const LAST: u32 = 0x63e1_d819;
 /// `waypoints` (a placement's `ActorWaypointList`), and `orientation.facing/tilt/roll`.
 const WAYPOINTS: u32 = 0x7a0a_bb2b;
 const ORIENTATION_HASH: u32 = 0xc545_bc21;
+/// `distance` (`0x80075154`) and `attach node`.
+const DISTANCE_HASH: u32 = 0x2eb3_1462;
+const ATTACH_NODE_HASH: u32 = 0x5ba1_1be8;
 const FACING_HASH: u32 = 0x86d0_5dcf;
 const TILT_HASH: u32 = 0x603a_6206;
 const ROLL_HASH: u32 = 0x16ff_3d1e;
@@ -1496,6 +1504,20 @@ pub enum Effect {
         seconds: f32,
         ease_out: f32,
         ease_in: f32,
+    },
+    /// `<object>.distance = distance` (setter `0x80075224`): the object moves along the
+    /// line from the reference point (engine id `from`) to `distance` feet from it
+    /// (`set "enemy".distance = 0` puts a passenger on its transport).
+    Place {
+        target: Vec<u32>,
+        from: u64,
+        distance: f32,
+    },
+    /// `<object>.attach node = <parent>`: the object follows `parent` (engine id), or is
+    /// let go (`null`).
+    Attach {
+        target: Vec<u32>,
+        parent: Option<u64>,
     },
     /// `OpDisplace` of the engine object `target` (name-hash path).
     Displace {
@@ -1766,6 +1788,27 @@ impl<'a> Vm<'a> {
         let [Ref::Handle(h)] = group else { return None };
         let name = self.set.global_set_name(*h, self.global?)?;
         self.engine_sets.get(name)
+    }
+
+    /// Variables written through `OpFindVariable` on clones spawned this run go with
+    /// their `Effect::Spawn` (`named_vars` / `named_refs`).
+    pub fn fold_spawn_slots(&mut self) {
+        for e in &mut self.effects {
+            if let Effect::Spawn {
+                serial,
+                named_vars,
+                named_refs,
+                ..
+            } = e
+            {
+                if let Some(v) = self.board.remove(&spawn_slot(*serial)) {
+                    named_vars.extend(v);
+                }
+                if let Some(r) = self.ref_board.remove(&spawn_slot(*serial)) {
+                    named_refs.extend(r);
+                }
+            }
+        }
     }
 
     /// The reference point op `at` measures its LHS from (`ScriptSet::relative`).
@@ -2629,7 +2672,9 @@ impl<'a> Vm<'a> {
             match &ins.op {
                 Op::SetValue { lhs, rhs } => {
                     let v = self.eval(rhs)?;
+                    self.origin = self.relative_origin(ins.offset);
                     self.write(lhs, v);
+                    self.origin = None;
                 }
                 Op::IncValue { lhs } | Op::DecValue { lhs } => {
                     let d = if matches!(ins.op, Op::IncValue { .. }) {
@@ -2664,6 +2709,22 @@ impl<'a> Vm<'a> {
                     }
                 }
                 Op::SetRef { lhs, rhs, .. } => {
+                    // `<object>.attach node = <parent>[.attach nodes[i]]`.
+                    if let Some((Ref::Handle(h), object)) = lhs.split_last() {
+                        if self.set.engine_key(&[Ref::Handle(*h)]) == Some(vec![ATTACH_NODE_HASH]) {
+                            let parent = match self.ref_target(rhs) {
+                                RefTarget::Null => None,
+                                t => self.member_id(&t).or_else(|| {
+                                    let (t, _) = self.held_ref(&self.canon(rhs).ok()?)?;
+                                    self.member_id(&t)
+                                }),
+                            };
+                            if let Some(t) = self.target(object) {
+                                self.emit(t, |target| Effect::Attach { target, parent });
+                            }
+                            continue;
+                        }
+                    }
                     let t = match self.set.ref_index.get(&ins.offset) {
                         Some(i) => {
                             let i = self.eval(i)?.as_f32() as i64;
@@ -3083,8 +3144,18 @@ impl<'a> Vm<'a> {
                     // The clone being set up (`find variable "flight path" on @spawn` in its
                     // setup block): a slot that travels with its `Effect::Spawn`.
                     if let RefTarget::Spawned(s) = self.ref_target(target) {
-                        if let Some(i) = self.spawning.iter().position(|x| x.serial == s) {
-                            let slot = usize::MAX - i;
+                        // A clone spawned earlier this run (the engine makes it after the
+                        // tick): `find variable "enemy1L" on "transport"` in "BattleMaster -
+                        // Spawn Dropship". Its slot is folded into its `Effect::Spawn`.
+                        let slot = match self.spawning.iter().position(|x| x.serial == s) {
+                            Some(i) => Some(usize::MAX - i),
+                            None => (!self.clone_ids.contains_key(&s)
+                                && self.effects.iter().any(
+                                    |e| matches!(e, Effect::Spawn { serial, .. } if *serial == s),
+                                ))
+                            .then(|| spawn_slot(s)),
+                        };
+                        if let Some(slot) = slot {
                             self.board
                                 .entry(slot)
                                 .or_default()
@@ -3373,6 +3444,27 @@ impl<'a> Vm<'a> {
             if let Some(k) = self.engine_ref_key(&p) {
                 self.engine.insert(k, v);
                 return;
+            }
+            // Another object's `distance`: it moves, measured from the reference point.
+            if let Some(Ref::Handle(h)) = p.last() {
+                let from = match &self.origin {
+                    Some(o) => self.member_id(o),
+                    None => self.self_id,
+                };
+                let target = self.target(&p[..p.len() - 1]);
+                if let (Some([DISTANCE_HASH]), Some(from), Some(t)) = (
+                    self.set.engine_key(&[Ref::Handle(*h)]).as_deref(),
+                    from,
+                    target.filter(|t| !matches!(t, Target::Engine(_) | Target::Clone(..))),
+                ) {
+                    let distance = v.as_f32();
+                    self.emit(t, |target| Effect::Place {
+                        target,
+                        from,
+                        distance,
+                    });
+                    return;
+                }
             }
             match self.target(&p) {
                 Some(Target::Clone(i, k)) => {

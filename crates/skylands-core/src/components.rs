@@ -201,6 +201,16 @@ impl Default for ActorTint {
     }
 }
 
+/// An actor whose `attach node` holds it to another (`Effect::Attach`): it stays at
+/// `offset` from `parent`, plus what its script has displaced it (feet) since attaching
+/// (`displaced`, its `displacement` then).
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct AttachedTo {
+    pub parent: Entity,
+    pub offset: Vec3,
+    pub displaced: [f32; 3],
+}
+
 /// Actor cloned at run time by a script's `OpSpawn` (`Effect::Spawn`).
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedActor {

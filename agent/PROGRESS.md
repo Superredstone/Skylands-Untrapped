@@ -266,8 +266,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     `find variable` on oneself) starts the artillery mod and stage 1 reaches its unload at ~8 s;
     wrapping set indexes let the stages unload and advance (stage 3 by 60 s); field reads measured from their stack's reference point (`distance` from "Nav - Move
     Target"); `global.bld` template spawns, references in record fields and velocity
-    displacement make the dropships fly; script lengths in feet (x 0.3048 into the world) settle the flight; next: the
-    unload and the passengers, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    displacement make the dropships fly; script lengths in feet (x 0.3048 into the world) settle the flight; passengers are found, placed on and attached to their dropship (clones
+    spawned in one tick name each other); next: unloading them, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).

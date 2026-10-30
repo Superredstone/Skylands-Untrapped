@@ -316,9 +316,24 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       by 0.3048. Core answers `distance` / `horizontal distance` in feet. It keeps
       `ActorScriptState::displacement` (and `vertical offset`, velocity) in feet and places
       actors and markers at `x 0.3048` (`FEET_PER_METRE`, `METRES_PER_FOOT`).
-  Now: a stage 1 dropship flies about 640 ft at 70 ft/s, turns back once at ~15 s and
-  settles on a waypoint by ~28 s. It flies level (pitch 0) on one line. Not checked against
-  the game: the turn-back, where it should unload, the passengers.
+  25. Passengers:
+      - "BattleMaster - Spawn Dropship" spawns the dropship, then each passenger, and
+        writes `find variable "enemy1L" on "transport" = @spawn`. In the game a spawned
+        actor exists at once; here clones are made after the tick. So a find on a clone
+        spawned earlier in the run binds a slot that `Vm::fold_spawn_slots` puts into its
+        `Effect::Spawn`. Core reserves every clone's entity first, so `Spawned(serial)`
+        between the spawner's clones of a tick become their entities.
+      - Writing another object's `distance` (`Effect::Place`) moves it along the line from
+        the write's reference point to that many feet ("Activate Enemy":
+        `"enemy".distance = 0` puts it on the transport, then `displace 40 up`).
+      - `<object>.attach node = <parent>` (`Effect::Attach`, `attach node` `5ba11be8`)
+        keeps it at its offset from the parent (`AttachedTo`, `attach_system`), plus what
+        its script displaces it since; `null` lets go where it is.
+      - Not modelled: the transport model's `attach nodes` (`d99e7501`, handle 38), so
+        passengers hang at the transport root plus the script's offsets, all at one point.
+  Now: stage 1 dropships fly with their passengers attached (about 80 ft above them), but
+  the passengers stay "disabled" and are never unloaded: "Transport - Unload Dropship" /
+  "Single Enemy Unload" not traced yet.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

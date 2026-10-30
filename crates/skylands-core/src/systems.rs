@@ -2210,7 +2210,17 @@ pub fn actor_script_system(
                 tint.alpha = alpha;
             }
         }
-        // Clones are made before a removal in the same tick takes effect.
+        // Clones are made before a removal in the same tick takes effect. Their entities
+        // are reserved first: one clone's variables may name another (`Spawned(serial)`).
+        let reserved: std::collections::HashMap<u32, Entity> = spawns
+            .iter()
+            .filter_map(|e| match e {
+                skylands_formats::script::Effect::Spawn { serial, .. } => {
+                    Some((*serial, commands.spawn_empty().id()))
+                }
+                _ => None,
+            })
+            .collect();
         for spawn in spawns {
             spawn_script_clone(
                 &mut commands,
@@ -2220,6 +2230,7 @@ pub fn actor_script_system(
                 entity,
                 &transform,
                 spawn,
+                &reserved,
             );
         }
         if st.removed {
@@ -2329,10 +2340,64 @@ pub fn clone_effect_system(
             };
         }
     }
+    // Where everything is now, for `Place` and `Attach`.
+    let mut at: std::collections::HashMap<Entity, Vec3> = clones
+        .iter()
+        .filter_map(|(e, .., t)| Some((e, t?.translation)))
+        .collect();
     for (entity, effect) in work {
-        let Ok((entity, _, script, tint, transform)) = clones.get_mut(entity) else {
+        let Ok((entity, _, mut script, tint, transform)) = clones.get_mut(entity) else {
             continue;
         };
+        match effect {
+            // Along the line from the reference point, `distance` feet from it.
+            Effect::Place {
+                ref target,
+                from,
+                distance,
+            } if target == &[MY] => {
+                let (Some(&o), Some(mut t)) = (
+                    Entity::try_from_bits(from).ok().and_then(|f| at.get(&f)),
+                    transform,
+                ) else {
+                    continue;
+                };
+                let dir = (t.translation - o).normalize_or_zero();
+                t.translation = o + dir * distance * METRES_PER_FOOT;
+                at.insert(entity, t.translation);
+                if let Some(script) = script.as_mut() {
+                    // The script keeps placing it from its base: rebase.
+                    let feet = Vec3::from(script.state.displacement)
+                        + Vec3::Y * script.state.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
+                    script.base.translation = t.translation - feet * METRES_PER_FOOT;
+                }
+                continue;
+            }
+            Effect::Attach { ref target, parent } if target == &[MY] => {
+                let parent = parent.and_then(|p| Entity::try_from_bits(p).ok());
+                match parent.and_then(|p| Some((p, *at.get(&p)?))) {
+                    Some((p, pos)) => {
+                        let here = at.get(&entity).copied().unwrap_or(pos);
+                        commands.entity(entity).insert(AttachedTo {
+                            parent: p,
+                            offset: here - pos,
+                            displaced: script.as_ref().map_or([0.0; 3], |s| s.state.displacement),
+                        });
+                    }
+                    None => {
+                        commands.entity(entity).remove::<AttachedTo>();
+                        // Let go where it is: its script places it from a new base.
+                        if let (Some(script), Some(&here)) = (script.as_mut(), at.get(&entity)) {
+                            let feet = Vec3::from(script.state.displacement)
+                                + Vec3::Y * script.state.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
+                            script.base.translation = here - feet * METRES_PER_FOOT;
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
         if let Some(mut script) = script {
             script.state.apply(effect);
             continue;
@@ -2365,6 +2430,26 @@ pub fn clone_effect_system(
             }
             other => debug!("Effect on script-less actor skipped: {other:?}"),
         }
+    }
+}
+
+/// Keeps attached actors (`AttachedTo`) with their parent: the parent's position, the
+/// offset they were attached at, and what their script displaced them since. A parent
+/// that is gone lets go.
+pub fn attach_system(
+    mut commands: Commands,
+    mut children: Query<(Entity, &AttachedTo, &mut Transform, Option<&ActorScript>)>,
+    parents: Query<&Transform, Without<AttachedTo>>,
+) {
+    for (e, a, mut t, script) in &mut children {
+        let Ok(p) = parents.get(a.parent) else {
+            commands.entity(e).remove::<AttachedTo>();
+            continue;
+        };
+        let moved = script.map_or(Vec3::ZERO, |s| {
+            Vec3::from(s.state.displacement) - Vec3::from(a.displaced)
+        });
+        t.translation = p.translation + a.offset + moved * METRES_PER_FOOT;
     }
 }
 
@@ -2404,6 +2489,7 @@ fn placed_script_state(
 /// spawner's current one for `my`, a placement's for a `tfbActorInfo`), the yaw
 /// `facing` when given, and the template's scale, then runs the template's script with
 /// the setup block's writes and effects.
+#[allow(clippy::too_many_arguments)]
 fn spawn_script_clone(
     commands: &mut Commands,
     program: &skylands_formats::ScriptProgram,
@@ -2412,6 +2498,7 @@ fn spawn_script_clone(
     parent: Entity,
     parent_tf: &Transform,
     spawn: skylands_formats::script::Effect,
+    reserved: &std::collections::HashMap<u32, Entity>,
 ) {
     use skylands_formats::script_runtime::field::*;
     let skylands_formats::script::Effect::Spawn {
@@ -2438,16 +2525,32 @@ fn spawn_script_clone(
             .copied(),
         SpawnAt::Engine(_) => None,
     };
-    let Some(at_tf) = at_tf else {
-        debug!("Spawn of {} at {at:?} skipped", template.name);
+    let Some(&me) = reserved.get(&serial) else {
         return;
     };
+    let Some(at_tf) = at_tf else {
+        debug!("Spawn of {} at {at:?} skipped", template.name);
+        commands.entity(me).despawn();
+        return;
+    };
+    // The spawner's other clones of this tick, as the engine ids they now have.
+    let named_refs: std::collections::HashMap<_, _> = named_refs
+        .into_iter()
+        .map(|(k, t)| match t {
+            skylands_formats::script::RefTarget::Spawned(s) if reserved.contains_key(&s) => (
+                k,
+                skylands_formats::script::RefTarget::Actor(reserved[&s].to_bits()),
+            ),
+            t => (k, t),
+        })
+        .collect();
     let mut state = skylands_formats::ActorScriptState::default();
     state.engine = seed;
     for effect in setup {
         state.apply(effect);
     }
     if state.removed {
+        commands.entity(me).despawn();
         return;
     }
     let base = Transform {
@@ -2469,7 +2572,8 @@ fn spawn_script_clone(
         .filter(|_| level_placement)
         .cloned()
         .unwrap_or_default();
-    let mut clone = commands.spawn((
+    let mut clone = commands.entity(me);
+    clone.insert((
         LevelEntity,
         SpawnedActor {
             parent,
@@ -4297,6 +4401,90 @@ mod tests {
             snap.waypoint_field(1, 0x40, [0.0, 0.0, 0.0], 0x9f48_1715),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn test_passenger_is_placed_on_and_follows_its_transport() {
+        // "Transport - Activate Enemy": `set "enemy".distance = 0` (from the transport), then
+        // "Attach Enemy": `"enemy".attach node = "transport"`; the transport flies on.
+        use skylands_formats::script::Effect;
+        use skylands_formats::script_runtime::field::*;
+        let mut app = App::new();
+        app.init_resource::<CloneEffects>();
+        app.init_resource::<ActorEffects>();
+        app.init_resource::<PlacementRefs>();
+        app.init_resource::<PendingPlacementRefs>();
+        app.add_systems(
+            Update,
+            (clone_effect_system, apply_deferred, attach_system).chain(),
+        );
+        let spawner = app.world_mut().spawn_empty().id();
+        let transport = app
+            .world_mut()
+            .spawn((
+                SpawnedActor {
+                    parent: spawner,
+                    serial: 1,
+                    template: "GroupTransport_Helecopter".into(),
+                    template_offset: 0,
+                },
+                Transform::from_xyz(10.0, 5.0, 0.0),
+            ))
+            .id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                SpawnedActor {
+                    parent: spawner,
+                    serial: 0,
+                    template: "Enemy".into(),
+                    template_offset: 0,
+                },
+                Transform::from_xyz(0.0, 100.0, 0.0),
+            ))
+            .id();
+        let from = transport.to_bits();
+        app.world_mut().resource_mut::<ActorEffects>().0 = vec![
+            (
+                enemy,
+                Effect::Place {
+                    target: vec![MY],
+                    from,
+                    distance: 0.0,
+                },
+            ),
+            (
+                enemy,
+                Effect::Attach {
+                    target: vec![MY],
+                    parent: Some(from),
+                },
+            ),
+        ];
+        app.update();
+        let at = |app: &App| app.world().get::<Transform>(enemy).unwrap().translation;
+        assert_eq!(at(&app), Vec3::new(10.0, 5.0, 0.0));
+        app.world_mut()
+            .get_mut::<Transform>(transport)
+            .unwrap()
+            .translation = Vec3::new(20.0, 5.0, 3.0);
+        app.update();
+        assert_eq!(at(&app), Vec3::new(20.0, 5.0, 3.0));
+        // `attach node = null` lets go where it is.
+        app.world_mut().resource_mut::<ActorEffects>().0 = vec![(
+            enemy,
+            Effect::Attach {
+                target: vec![MY],
+                parent: None,
+            },
+        )];
+        app.update();
+        app.world_mut()
+            .get_mut::<Transform>(transport)
+            .unwrap()
+            .translation = Vec3::ZERO;
+        app.update();
+        assert_eq!(at(&app), Vec3::new(20.0, 5.0, 3.0));
     }
 
     #[test]

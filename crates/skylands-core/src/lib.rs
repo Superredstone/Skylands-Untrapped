@@ -86,6 +86,8 @@ impl Plugin for SkylandsCorePlugin {
                     systems::actor_script_system,
                     apply_deferred,
                     systems::clone_effect_system,
+                    apply_deferred,
+                    systems::attach_system,
                     save_game::save_progress_system,
                 )
                     .chain(),
