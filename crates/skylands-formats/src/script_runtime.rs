@@ -325,6 +325,10 @@ impl ScriptProgram {
     /// Values of script `si`'s variables by name (initial values until written), for
     /// other actors' `OpFindVariable`.
     pub fn export_vars(&self, si: usize, st: &ActorScriptState) -> HashMap<String, Value> {
+        let fields: Vec<_> = self
+            .record_fields(si, st, st.vars.iter())
+            .map(|(k, v)| (k, *v))
+            .collect();
         self.declared(si, st)
             .map(|(var, name)| {
                 let v = st
@@ -340,6 +344,51 @@ impl ScriptProgram {
                     });
                 (name.to_string(), v)
             })
+            .chain(fields)
+            .collect()
+    }
+
+    /// Fields of script `si`'s record variables in `entries` (vars or refs), by
+    /// `record_key`: other actors reach them through a `RefTarget::Record`.
+    fn record_fields<'a, T: 'a>(
+        &'a self,
+        si: usize,
+        st: &'a ActorScriptState,
+        entries: impl Iterator<Item = (&'a Vec<Ref>, &'a T)> + 'a,
+    ) -> impl Iterator<Item = (String, &'a T)> + 'a {
+        let records: HashSet<usize> = self
+            .declared(si, st)
+            .map(|(v, _)| v)
+            .filter(|v| self.set.records.contains(v))
+            .collect();
+        entries.filter_map(move |(p, v)| match p.split_first()? {
+            (Ref::Obj(var), rest) if !rest.is_empty() && records.contains(var) => {
+                Some((crate::script::record_key(*var, rest), v))
+            }
+            _ => None,
+        })
+    }
+
+    /// Other actors' writes to fields of script `si`'s records (`record_key` names).
+    fn import_record_fields<T: Clone>(
+        &self,
+        si: usize,
+        st: &ActorScriptState,
+        entries: &HashMap<String, T>,
+    ) -> Vec<(Vec<Ref>, T)> {
+        let records: HashSet<usize> = self
+            .declared(si, st)
+            .map(|(v, _)| v)
+            .filter(|v| self.set.records.contains(v))
+            .collect();
+        entries
+            .iter()
+            .filter_map(|(k, v)| {
+                let (var, rest) = crate::script::parse_record_key(k)?;
+                records
+                    .contains(&var)
+                    .then(|| ([Ref::Obj(var)].into_iter().chain(rest).collect(), v.clone()))
+            })
             .collect()
     }
 
@@ -354,6 +403,19 @@ impl ScriptProgram {
                 .contains(&var)
                 .then_some(RefTarget::Record { actor, var })
         };
+        let absolute = |t: RefTarget| match t {
+            RefTarget::Alias(ref p) => match p[..] {
+                [Ref::Obj(v)] => own(v).unwrap_or(t),
+                _ => t,
+            },
+            RefTarget::Engine(ref k) if *k == [field::MY] => st.self_id.map_or(t, RefTarget::Actor),
+            RefTarget::Spawned(s) => st.clone_ids.get(&s).map_or(t, |&id| RefTarget::Actor(id)),
+            t => t,
+        };
+        let fields: Vec<_> = self
+            .record_fields(si, st, st.refs.iter())
+            .map(|(k, t)| (k, absolute(t.clone())))
+            .collect();
         self.declared(si, st)
             .filter_map(|(var, name)| {
                 // A record variable is itself (`Record`); references point where they were set.
@@ -376,6 +438,7 @@ impl ScriptProgram {
                 };
                 Some((name.to_string(), t))
             })
+            .chain(fields)
             .collect()
     }
 
@@ -393,6 +456,9 @@ impl ScriptProgram {
         for (var, t) in found {
             st.refs.insert(vec![Ref::Obj(var)], t);
         }
+        for (p, t) in self.import_record_fields(si, st, refs) {
+            st.refs.insert(p, t);
+        }
     }
 
     /// Takes other actors' writes to script `si`'s variables (`export_vars` names).
@@ -403,6 +469,9 @@ impl ScriptProgram {
             .collect();
         for (var, v) in vars {
             st.vars.insert(vec![Ref::Obj(var)], v);
+        }
+        for (p, v) in self.import_record_fields(si, st, vals) {
+            st.vars.insert(p, v);
         }
     }
 
@@ -1432,6 +1501,112 @@ mod tests {
         assert!((v(LENGTH) - 5.0).abs() < 1e-4, "{}", v(LENGTH));
         assert!((v(HEADING) - 36.869_9).abs() < 1e-3, "{}", v(HEADING));
         assert!((v(HORIZONTAL_LENGTH) - 5.0).abs() < 1e-4);
+    }
+
+    /// Engine distances to placements by offset, from any `me`.
+    #[derive(Debug)]
+    struct PlacementDistances(HashMap<usize, f32>);
+
+    impl crate::script::MemberFields for PlacementDistances {
+        fn field(&self, _me: u64, _member: u64, _field: u32) -> Option<f32> {
+            None
+        }
+        fn placement_field(&self, _me: u64, placement: usize, field: u32) -> Option<f32> {
+            (field == DISTANCE)
+                .then(|| self.0.get(&placement).copied())
+                .flatten()
+        }
+    }
+
+    #[test]
+    fn a_static_set_of_placements_passed_by_reference_is_measured() {
+        // "Transport - Single Enemy Unload": `find subset of "available landing queues"
+        // where .distance < 200`, the parameter bound to `Landing_Queues` (a static
+        // `ScriptSet` of placements), 100 and 500 away.
+        const SETOBJ: usize = 0x700;
+        const PARAM: usize = 0x710;
+        const SUB: usize = 0x720;
+        const N: usize = 0x730;
+        const P1: usize = 0x880;
+        const P2: usize = 0x890;
+        let mut p = program(
+            vec![
+                ins(
+                    0x701,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(PARAM)],
+                        rhs: vec![Ref::Obj(SETOBJ)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    SUB,
+                    1,
+                    Op::FindSubSet {
+                        set: vec![Ref::Obj(PARAM)],
+                        field: vec![h(DISTANCE)],
+                        rel: 3,
+                        rhs: Some(lit(200.0)),
+                    },
+                ),
+                ins(
+                    0x721,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(N)],
+                        rhs: rd(vec![Ref::Obj(SUB), h(COUNT)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        p.set.placements.extend([P1, P2]);
+        p.set.set_members.insert(SETOBJ, vec![P1, P2]);
+        let mut st = ActorScriptState {
+            self_id: Some(1),
+            fields: Some(std::sync::Arc::new(PlacementDistances(HashMap::from([
+                (P1, 100.0),
+                (P2, 500.0),
+            ])))),
+            ..Default::default()
+        };
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.vars.get(&vec![Ref::Obj(N)]), Some(&Value::Int(1)));
+        assert_eq!(st.reference(SUB), Some(&RefTarget::Placement(P1)));
+    }
+
+    #[test]
+    fn record_fields_are_shared_with_other_actors() {
+        // The arena reads `"transport info"."Command - docked"` of the dropship's "My
+        // Info": the owner exports its record's fields by `record_key` and takes other
+        // actors' writes back.
+        const REC: usize = 0x500;
+        const F: usize = 0x510;
+        let mut p = program(Vec::new(), Vec::new());
+        p.set.vars.insert(
+            REC,
+            VarInfo {
+                name: "My Info".into(),
+                type_name: "OpCreateVariable".into(),
+                init: None,
+            },
+        );
+        p.set.records.insert(REC);
+        let mut st = ActorScriptState {
+            tags: vec![REC],
+            ..Default::default()
+        };
+        st.vars
+            .insert(vec![Ref::Obj(REC), Ref::Obj(F)], Value::Int(1));
+        let key = crate::script::record_key(REC, &[Ref::Obj(F)]);
+        assert_eq!(p.export_vars(0, &st)[&key], Value::Int(1));
+        p.import_vars(0, &mut st, &HashMap::from([(key, Value::Int(7))]));
+        assert_eq!(
+            st.vars.get(&vec![Ref::Obj(REC), Ref::Obj(F)]),
+            Some(&Value::Int(7))
+        );
     }
 
     /// Engine distances between positions on a line, by id.

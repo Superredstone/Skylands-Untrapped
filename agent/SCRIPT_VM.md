@@ -188,8 +188,8 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   { owner, index }`; `<placement ref>.waypoints.count`; a path whose prefix is a stored reference
   reads that object's field (`referenced_field`): a waypoint's `orientation.facing/tilt/roll` from
   its angles (order assumed facing = +0x2c, tilt = +0x28, roll = +0x30, all zero in the arena),
-  `distance/horizontal distance/heading/pitch` of a waypoint (core: owner placement transform x
-  local position) or an actor from the engine (`MemberFields`).
+  `distance/horizontal distance/heading/pitch` of a waypoint (core: its position as is,
+  world space; see 27) or an actor from the engine (`MemberFields`).
 - Debugging: `ActorScriptState::trace = Some(vec![])` records the ops one actor's scripts run
   (`(global.bld?, op offset)`, nested `global.bld` runs included); map offsets to the
   `dump_scripts` listings (`@offset`).
@@ -336,11 +336,25 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       the move target by `"Nav - next wp".heading` / `pitch` measured from the move
       target. Core runs `attach_system` after the script tick as well as after effects, so
       a released passenger is let go where it was.
-  Now: a stage 1 dropship flies a straight line to the end of its path (~20 s) and
-  releases its passengers there; they stay "disabled". The arena's "Transport - Unload
-  Dropship" waits for "Command - docked", which the dropship never sets (it reaches its
-  last waypoint instead of a dock waypoint; waypoint `roll` flags, assumed zero, not
-  checked).
+  27. Docking and unload:
+      - `ActorWaypoint` +0x1c..+0x24 are world positions, not in the path placement's
+        space: the arena's dock waypoints sit ~270 m from where the transformed ones
+        were, next to `Landing_Queues`. `+0x28` / `+0x2c` / `+0x30` (tilt, facing, roll)
+        flag stops: roll 1 drops a payload, roll 2 docks (stop within "WP Tolerance -
+        Stop", detach passengers, "Command - docked" = 1); tilt < 0 waits for
+        "Command - go", > 0 waits that many seconds.
+      - Fields of another actor's record are shared (`record_key`; the owner exports
+        its records' fields and imports others' writes; `Vm::remote_record`). "My Info"
+        is a data-object instance, which is shared anyway.
+      - Static `ScriptSet`s keep their member objects (`ScriptSet::set_members`); one
+        passed by reference is an alias of itself, and placements in it are measured by
+        `MemberFields::placement_field` (`find subset of "available landing queues"
+        where .distance < 200`).
+  Now: stage 1 dropships fly to their dock waypoint, dock (~10 s) and unload; the arena
+  moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the passengers stay
+  "disabled" in their own scripts (their activation through the creature state system
+  not traced). After unloading, the dropships fly level past their last waypoint 155 ft
+  higher: "Nav - vert accel" stays 0.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

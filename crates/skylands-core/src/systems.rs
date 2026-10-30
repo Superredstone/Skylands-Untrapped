@@ -2281,11 +2281,14 @@ impl skylands_formats::script::MemberFields for ActorFieldSnapshot {
         Self::towards(*self.actors.get(&member)? - *self.actors.get(&me)?, field)
     }
 
-    fn waypoint_field(&self, me: u64, owner: usize, local: [f32; 3], field: u32) -> Option<f32> {
-        let at = self
-            .placements
-            .get(&owner)?
-            .transform_point(Vec3::from(local));
+    /// `ActorWaypoint` positions are world positions (the arena's dock waypoints sit by
+    /// its landing queues; through the path placement's transform they would not).
+    fn waypoint_field(&self, me: u64, _owner: usize, at: [f32; 3], field: u32) -> Option<f32> {
+        Self::towards(Vec3::from(at) - *self.actors.get(&me)?, field)
+    }
+
+    fn placement_field(&self, me: u64, placement: usize, field: u32) -> Option<f32> {
+        let at = self.placements.get(&placement)?.translation;
         Self::towards(at - *self.actors.get(&me)?, field)
     }
 }
@@ -4392,14 +4395,20 @@ mod tests {
         assert_eq!(snap.field(1, 3, 0x9f48_1715), Some(0.0));
         assert_eq!(snap.field(1, 2, 0x9f48_1715), Some(90.0));
         assert_eq!(snap.field(1, 9, 0x2eb3_1462), None);
-        // A waypoint in its placement's space: (0, 10, 0) from a placement at z = 10.
+        // Waypoints are in world space, whatever the path placement's transform.
         assert_eq!(
-            snap.waypoint_field(1, 0x40, [0.0, 10.0, 0.0], 0xbd32_4ab1),
+            snap.waypoint_field(1, 0x40, [0.0, 10.0, 10.0], 0xbd32_4ab1),
             Some(45.0)
         );
         assert_eq!(
-            snap.waypoint_field(1, 0x40, [0.0, 0.0, 0.0], 0x9f48_1715),
-            Some(0.0)
+            snap.waypoint_field(1, 0x40, [10.0, 0.0, 0.0], 0x9f48_1715),
+            Some(90.0)
+        );
+        // A placement (a landing queue) at its own position: z = 10.
+        assert_eq!(snap.placement_field(1, 0x40, 0x9f48_1715), Some(0.0));
+        assert_eq!(
+            snap.placement_field(1, 0x40, 0x2eb3_1462),
+            Some(10.0 * FEET_PER_METRE)
         );
     }
 
@@ -4840,6 +4849,7 @@ mod tests {
             strings: Default::default(),
             relative: Default::default(),
             relative_reads: Default::default(),
+            set_members: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
@@ -4942,6 +4952,7 @@ mod tests {
             strings: Default::default(),
             relative: Default::default(),
             relative_reads: Default::default(),
+            set_members: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
@@ -5351,5 +5362,27 @@ mod tests {
             .map(|(a, t, _)| t.translation.distance(a.base.translation))
             .fold(0.0f32, f32::max);
         assert!(moved > 50.0, "{moved}");
+        // At their dock waypoint (world positions) they set "Command - docked" in their
+        // "My Info", which the arena reads; "Single Enemy Unload" finds a landing queue
+        // (`Landing_Queues`) within 200 ft and the stage moves on (~25 s).
+        for _ in 0..1200 {
+            step_fixed(&mut app);
+        }
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ActorScript, With<ScriptController>>();
+        let names: Vec<_> = q
+            .iter(world)
+            .filter(|a| {
+                program.set.scripts[a.script]
+                    .name
+                    .ends_with("ArenaScript_300_000.ai")
+            })
+            .filter_map(|a| {
+                a.state
+                    .behavior()
+                    .and_then(|o| program.behavior_name(a.script, o))
+            })
+            .collect();
+        assert_eq!(names, ["Stage 1 - 02 - Unload"]);
     }
 }

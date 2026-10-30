@@ -280,6 +280,9 @@ pub struct ScriptSet {
     /// `ScriptSet` objects (`_list` +0x18 -> members, `+0x08` names): static sets such as
     /// `global.bld` `$72e` (the 22 campaign levels) and `$9a1` (the 4 save slots).
     pub sets: HashMap<usize, Vec<String>>,
+    /// The same sets' member objects (placements such as `Landing_Queues`'
+    /// `landingQueue(n)`).
+    pub set_members: HashMap<usize, Vec<usize>>,
     /// `tfbActorInfo` objects in the file (what `OpSpawn ... at` can name).
     pub placements: HashSet<usize>,
     /// Every `tfbActorInfo` as an `OpSpawn` template, for spawns whose template is a
@@ -854,6 +857,18 @@ impl ScriptSet {
             .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
             .map(|o| (o.offset, r.cstr(o.offset + 0x08)))
             .collect();
+        let set_members: HashMap<usize, Vec<usize>> = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
+            .map(|o| {
+                let list = r
+                    .ptr(o.offset + 0x18)
+                    .map(|l| r.list(l))
+                    .unwrap_or_default();
+                let members = list.into_iter().filter_map(|w| r.decode_ptr(w)).collect();
+                (o.offset, members)
+            })
+            .collect();
         let sets = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("ScriptSet"))
@@ -989,6 +1004,7 @@ impl ScriptSet {
             }
         }
         let mut set = Self {
+            set_members,
             strings,
             relative,
             relative_reads,
@@ -1460,6 +1476,33 @@ pub enum RefTarget {
     Unknown,
 }
 
+/// Board name of field `rest` of record variable `var` (`"My Info"."Command - docked"`),
+/// which other actors reach through a `RefTarget::Record`.
+pub fn record_key(var: usize, rest: &[Ref]) -> String {
+    let mut k = format!("\u{1f}{var}");
+    for r in rest {
+        match r {
+            Ref::Obj(o) => k.push_str(&format!("/o{o}")),
+            Ref::Handle(h) => k.push_str(&format!("/h{h}")),
+        }
+    }
+    k
+}
+
+/// The record variable and field path a `record_key` names.
+pub fn parse_record_key(key: &str) -> Option<(usize, Vec<Ref>)> {
+    let mut parts = key.strip_prefix('\u{1f}')?.split('/');
+    let var = parts.next()?.parse().ok()?;
+    let rest = parts
+        .map(|p| match p.split_at_checked(1)? {
+            ("o", n) => n.parse().ok().map(Ref::Obj),
+            ("h", n) => n.parse().ok().map(Ref::Handle),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((var, rest))
+}
+
 /// Board slot of clone `serial` spawned this run, until `Vm::fold_spawn_slots`.
 fn spawn_slot(serial: u32) -> usize {
     usize::MAX / 2 - serial as usize
@@ -1516,6 +1559,11 @@ pub trait MemberFields: Send + Sync + std::fmt::Debug {
         _field: u32,
     ) -> Option<f32> {
         None
+    }
+    /// `field` of the placement at `placement` (`tfbActorInfo` offset), from `me`
+    /// (`find subset of "available landing queues" where .distance < 200`).
+    fn placement_field(&self, me: u64, placement: usize, field: u32) -> Option<f32> {
+        self.waypoint_field(me, placement, [0.0; 3], field)
     }
 }
 
@@ -1728,8 +1776,8 @@ impl<'a> Vm<'a> {
         let Ok(p) = self.canon(path) else {
             return RefTarget::Unknown;
         };
-        // Another actor's variable (`OpFindVariable`).
-        if let Some((a, name)) = self.found_slot(&p) {
+        // Another actor's variable (`OpFindVariable`), or a field of its record.
+        if let Some((a, name)) = self.found_slot(&p).or_else(|| self.remote_record(&p)) {
             return self
                 .ref_board
                 .get(&a)
@@ -1743,6 +1791,11 @@ impl<'a> Vm<'a> {
             }
             if self.set.strings.contains(&o) {
                 return RefTarget::String(o);
+            }
+            // A static set passed by reference ("Transport - Unload Dropship" "landing
+            // queues" = `Landing_Queues`): paths through the parameter are the set.
+            if self.set.set_members.contains_key(&o) {
+                return RefTarget::Alias(vec![Ref::Obj(o)]);
             }
             if self.index.macros.contains_key(&o) {
                 return RefTarget::Macro(o);
@@ -1817,6 +1870,16 @@ impl<'a> Vm<'a> {
         if let Some(s) = self.engine_set(group) {
             return s.clone();
         }
+        // A static `ScriptSet` of placements (`"landing queues"` = `Landing_Queues`).
+        if let Ok([Ref::Obj(o)]) = self.canon(group).as_deref() {
+            if let Some(m) = self.set.set_members.get(o) {
+                return m
+                    .iter()
+                    .filter(|p| self.set.placements.contains(p))
+                    .map(|&p| RefTarget::Placement(p))
+                    .collect();
+            }
+        }
         match self.ref_target(group) {
             RefTarget::Null | RefTarget::Unknown => Vec::new(),
             t => vec![t],
@@ -1849,6 +1912,19 @@ impl<'a> Vm<'a> {
                 }
             }
         }
+    }
+
+    /// A field of another actor's record (`"transport info"."Command - docked"` with
+    /// "transport info" = the dropship's "My Info"): that actor's board slot and name.
+    fn remote_record(&self, p: &[Ref]) -> Option<(usize, String)> {
+        (1..p.len())
+            .rev()
+            .find_map(|k| match self.refs_of(&p[..k]).get(&p[..k])? {
+                &RefTarget::Record { actor, var } if Some(actor) != self.self_key => {
+                    Some((actor, record_key(var, &p[k..])))
+                }
+                _ => None,
+            })
     }
 
     /// The reference point op `at` measures its LHS from (`ScriptSet::relative`).
@@ -2775,7 +2851,10 @@ impl<'a> Vm<'a> {
                     };
                     // Shared state (`global.bld`, data-object instances): store what every
                     // actor can read.
-                    if let Some((a, name)) = self.canon(lhs).ok().and_then(|p| self.found_slot(&p))
+                    if let Some((a, name)) = self
+                        .canon(lhs)
+                        .ok()
+                        .and_then(|p| self.found_slot(&p).or_else(|| self.remote_record(&p)))
                     {
                         let t = self.absolute(t);
                         self.ref_board.entry(a).or_default().insert(name, t);
@@ -2914,17 +2993,22 @@ impl<'a> Vm<'a> {
                         .members(set)
                         .into_iter()
                         .filter(|m| {
-                            let (Some(me), Some(id), Some([f])) =
-                                (from, self.member_id(m), field.as_deref())
-                            else {
+                            let (Some(me), Some([f])) = (from, field.as_deref()) else {
                                 return false;
                             };
-                            self.fields
-                                .as_ref()
-                                .and_then(|q| q.field(me, id, *f))
-                                .is_some_and(|v| {
-                                    compare(Value::Float(v), *rel, threshold).unwrap_or(false)
-                                })
+                            let v = match (m, self.member_id(m)) {
+                                (_, Some(id)) => {
+                                    self.fields.as_ref().and_then(|q| q.field(me, id, *f))
+                                }
+                                (&RefTarget::Placement(o), None) => self
+                                    .fields
+                                    .as_ref()
+                                    .and_then(|q| q.placement_field(me, o, *f)),
+                                _ => None,
+                            };
+                            v.is_some_and(|v| {
+                                compare(Value::Float(v), *rel, threshold).unwrap_or(false)
+                            })
                         })
                         .collect();
                     match matches.first() {
@@ -3417,6 +3501,14 @@ impl<'a> Vm<'a> {
         if let Some((a, name)) = self.found_slot(&path) {
             return self.board[&a][&name];
         }
+        if let Some((a, key)) = self.remote_record(&path) {
+            return self
+                .board
+                .get(&a)
+                .and_then(|v| v.get(&key))
+                .copied()
+                .unwrap_or(Value::Int(0));
+        }
         if let Some(v) = self.engine_ref_key(&path).and_then(|k| self.engine.get(&k)) {
             return *v;
         }
@@ -3489,6 +3581,10 @@ impl<'a> Vm<'a> {
         if let Ok(p) = self.canon(path) {
             if let Some((a, name)) = self.found_slot(&p) {
                 self.board.entry(a).or_default().insert(name, v);
+                return;
+            }
+            if let Some((a, key)) = self.remote_record(&p) {
+                self.board.entry(a).or_default().insert(key, v);
                 return;
             }
             if let Some(k) = self.engine_ref_key(&p) {
