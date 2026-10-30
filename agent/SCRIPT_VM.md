@@ -217,8 +217,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
      one instance per actor, several instances from one record would share it).
   After these the transport's records resolve (`"My Info"` -> `"New Info"`, `"Transport Type"` ->
   `"Helecopter Dropship"` with its "Airship - *" macros) and it runs its real startup sequence
-  ("Transport - Activate and Attach Enemies", `"startup state"` 7, attaching passengers). It has
-  not set off within 15 s yet; next blocker is further along that sequence (not traced yet).
+  ("Transport - Activate and Attach Enemies", `"startup state"` 7, attaching passengers).
+  6. `global.bld` state is one level-wide table (creature registry `"active"`, locomotion
+     `"actor control datas"`...): its variables, references and sets live in core
+     (`ScriptVarBoard::global_*`) and move into each actor's state for its tick
+     (`ActorScriptState::global_*`, `Vm::global_sets`). References stored there are absolute
+     (`Vm::absolute`: `my` and this actor's clones as `RefTarget::Actor(engine id)`); reference
+     and membership comparisons use absolute forms; an `Actor` reference to oneself is `my`.
+  Still blocking state 7: "Combat - Get Creature Info" walks `"active"` with an indexed
+  `OpSetReference` (`"active"[i]`, indexing a set; only waypoint lists are indexed so far) and
+  compares each entry's creature. Entries are per-creature records spawned from one template, so
+  data-object spawns need real instances (fresh id per spawn, template fields copied, stored in
+  the shared state) instead of aliasing the template.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

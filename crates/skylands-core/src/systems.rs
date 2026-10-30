@@ -2008,7 +2008,7 @@ pub fn actor_script_system(
         *board = ScriptVarBoard {
             program,
             targets: scripts.0.find_targets(),
-            vars: Default::default(),
+            ..Default::default()
         };
         refs.0.clear();
     }
@@ -2098,8 +2098,14 @@ pub fn actor_script_system(
             }
         }
         actor.state.board = std::mem::take(&mut board.vars);
+        actor.state.global_vars = std::mem::take(&mut board.global_vars);
+        actor.state.global_refs = std::mem::take(&mut board.global_refs);
+        actor.state.global_sets = std::mem::take(&mut board.global_sets);
         scripts.0.tick(actor.script, &mut actor.state, dt);
         board.vars = std::mem::take(&mut actor.state.board);
+        board.global_vars = std::mem::take(&mut actor.state.global_vars);
+        board.global_refs = std::mem::take(&mut actor.state.global_refs);
+        board.global_sets = std::mem::take(&mut actor.state.global_sets);
         // The engine mover: `velocity.length` units per second along `velocity.heading` /
         // `pitch` (degrees; heading 0 = +Z, pitch 90 = up, as `OpDisplace`).
         let speed = actor.state.get(&[MY, VELOCITY, LENGTH]).unwrap_or(0.0);

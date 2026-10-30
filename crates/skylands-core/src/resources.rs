@@ -498,6 +498,20 @@ pub struct ScriptVarBoard {
     pub program: usize,
     pub targets: std::collections::HashSet<usize>,
     pub vars: skylands_formats::script::VarBoard,
+    /// `global.bld`'s variables, references and sets: one table for the whole level,
+    /// moved into each actor's script state for its tick.
+    pub global_vars: std::collections::HashMap<
+        Vec<skylands_formats::script::Ref>,
+        skylands_formats::script::Value,
+    >,
+    pub global_refs: std::collections::HashMap<
+        Vec<skylands_formats::script::Ref>,
+        skylands_formats::script::RefTarget,
+    >,
+    pub global_sets: std::collections::HashMap<
+        Vec<skylands_formats::script::Ref>,
+        Vec<skylands_formats::script::RefTarget>,
+    >,
 }
 
 /// Script effects on `OpSpawn` clones through reference variables, by spawner and

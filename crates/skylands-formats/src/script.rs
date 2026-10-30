@@ -1268,6 +1268,9 @@ pub struct Vm<'a> {
     /// calls and ticks, like a macro's own variables).
     pub global_vars: HashMap<Vec<Ref>, Value>,
     pub global_refs: HashMap<Vec<Ref>, RefTarget>,
+    /// Sets of `global.bld` (`"active"` creatures...): one level-wide table, members as
+    /// absolute targets (`Vm::absolute`).
+    pub global_sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// The file that called into this one (`global.bld` runs: the level), for templates.
     home: Option<&'a ScriptSet>,
     /// Setup blocks being run, innermost last.
@@ -1502,6 +1505,7 @@ impl<'a> Vm<'a> {
             global_index: None,
             global_vars: HashMap::new(),
             global_refs: HashMap::new(),
+            global_sets: HashMap::new(),
             home: None,
             spawning: Vec::new(),
         }
@@ -1699,6 +1703,9 @@ impl<'a> Vm<'a> {
         let Some(RefTarget::Actor(id)) = self.refs.get(std::slice::from_ref(first)) else {
             return None;
         };
+        if Some(*id) == self.self_id {
+            return None;
+        }
         let rest = match &p[1..] {
             [] => Vec::new(),
             rest => self.set.engine_key(rest)?,
@@ -1722,15 +1729,28 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// A reference as every actor would read it: `my` and this actor's clones as engine
+    /// ids. `global.bld` state is shared by all actors, so it stores these.
+    fn absolute(&self, t: RefTarget) -> RefTarget {
+        match t {
+            RefTarget::Engine(ref k) if *k == [MY_HASH] => self.self_id.map_or(t, RefTarget::Actor),
+            RefTarget::Spawned(s) => self.clone_ids.get(&s).map_or(t, |&id| RefTarget::Actor(id)),
+            t => t,
+        }
+    }
+
     /// A path through a reference that holds an engine object (`"mover" = my`, then
-    /// `"mover".velocity.length`): that object's engine path.
+    /// `"mover".velocity.length`; also this actor by its engine id): that object's path.
     fn engine_ref_key(&self, p: &[Ref]) -> Option<Vec<u32>> {
         let first @ Ref::Obj(_) = p.first()? else {
             return None;
         };
-        let Some(RefTarget::Engine(k)) = self.refs.get(std::slice::from_ref(first)) else {
-            return None;
+        let k = match self.refs.get(std::slice::from_ref(first)) {
+            Some(RefTarget::Engine(k)) => k.clone(),
+            Some(RefTarget::Actor(id)) if Some(*id) == self.self_id => vec![MY_HASH],
+            _ => return None,
         };
+        let k = &k;
         let rest = match &p[1..] {
             [] => Vec::new(),
             rest => self.set.engine_key(rest)?,
@@ -1927,6 +1947,7 @@ impl<'a> Vm<'a> {
         sub.global_index = None;
         sub.vars = std::mem::take(&mut self.global_vars);
         sub.refs = std::mem::take(&mut self.global_refs);
+        sub.sets = std::mem::take(&mut self.global_sets);
         sub.engine = std::mem::take(&mut self.engine);
         sub.board = std::mem::take(&mut self.board);
         sub.set_counts = std::mem::take(&mut self.set_counts);
@@ -1955,6 +1976,7 @@ impl<'a> Vm<'a> {
             .collect();
         self.global_vars = std::mem::take(&mut sub.vars);
         self.global_refs = std::mem::take(&mut sub.refs);
+        self.global_sets = std::mem::take(&mut sub.sets);
         self.engine = std::mem::take(&mut sub.engine);
         self.board = std::mem::take(&mut sub.board);
         self.set_counts = std::mem::take(&mut sub.set_counts);
@@ -2272,6 +2294,12 @@ impl<'a> Vm<'a> {
                         }
                         None => self.ref_target(rhs),
                     };
+                    // `global.bld` state is shared: store what every actor can read.
+                    let t = if self.home.is_some() {
+                        self.absolute(t)
+                    } else {
+                        t
+                    };
                     if let Ok(p) = self.canon(lhs) {
                         self.refs.insert(p, t);
                     }
@@ -2291,7 +2319,9 @@ impl<'a> Vm<'a> {
                     // `_membershipOp`: 0 includes, 1 excludes, 2 intersects_with, 3 includes_all
                     // (enum table `0x805b5658`); with one known member they agree pairwise.
                     if let (Some(set), [m]) = (&stored, &group[..]) {
-                        if set.contains(m) == (*rel == 1) {
+                        let m = self.absolute(m.clone());
+                        let has = set.iter().any(|x| self.absolute(x.clone()) == m);
+                        if has == (*rel == 1) {
                             pc += skip;
                         }
                         continue;
@@ -2299,7 +2329,7 @@ impl<'a> Vm<'a> {
                     let known = desc.starts_with("OpCheckReference") && matches!(rel, 1 | 5);
                     let holds = match (self.ref_target(lhs), self.ref_target(rhs)) {
                         (a, b) if known && a != RefTarget::Unknown && b != RefTarget::Unknown => {
-                            (a == b) == (*rel == 1)
+                            (self.absolute(a) == self.absolute(b)) == (*rel == 1)
                         }
                         _ => *rel == 5,
                     };
@@ -2334,20 +2364,45 @@ impl<'a> Vm<'a> {
                 }
                 Op::ChangeMembership { set, op, group } => {
                     if let Ok(key) = self.canon(set) {
-                        let group = self.members(group);
+                        // Members compared (and, in shared `global.bld` sets, stored) as
+                        // absolute targets.
+                        let rel_group = self.members(group);
+                        let group: Vec<RefTarget> =
+                            rel_group.iter().map(|m| self.absolute(m.clone())).collect();
+                        // What is stored: absolute in shared `global.bld` sets.
+                        let stored = if self.home.is_some() {
+                            group.clone()
+                        } else {
+                            rel_group
+                        };
+                        let abs: Vec<RefTarget> = self
+                            .sets
+                            .get(&key)
+                            .map(|s| s.iter().map(|x| self.absolute(x.clone())).collect())
+                            .unwrap_or_default();
+                        let keep = |i: usize, inside: bool| group.contains(&abs[i]) == inside;
+                        let kept: Vec<bool> = match op {
+                            1 => (0..abs.len()).map(|i| keep(i, false)).collect(),
+                            2 => (0..abs.len()).map(|i| keep(i, true)).collect(),
+                            _ => vec![true; abs.len()],
+                        };
                         let s = self.sets.entry(key).or_default();
+                        let mut i = 0;
+                        s.retain(|_| {
+                            i += 1;
+                            kept[i - 1]
+                        });
                         match op {
                             0 => {
-                                for m in group {
-                                    if !s.contains(&m) {
+                                for (m, a) in stored.into_iter().zip(&group) {
+                                    if !abs.contains(a) && !s.contains(&m) {
                                         s.push(m);
                                     }
                                 }
                             }
-                            1 => s.retain(|m| !group.contains(m)),
-                            2 => s.retain(|m| group.contains(m)),
-                            3 => *s = group,
-                            4 => s.extend(group),
+                            1 | 2 => {}
+                            3 => *s = stored,
+                            4 => s.extend(stored),
                             _ => s.clear(),
                         }
                     }
@@ -3874,6 +3929,62 @@ mod tests {
         // `"New Info"` has members (a path goes through it).
         s.records.insert(rec);
         assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(3));
+    }
+
+    #[test]
+    fn vm_global_sets_are_shared_and_absolute() {
+        // `Combat.ai` registers each creature (`my`) in `global.bld`'s "active" set; the set
+        // is one table for all actors, so `my` is stored as the actor's engine id.
+        let active = 0x600;
+        let mut g = script_set(
+            vec![
+                ins(
+                    1,
+                    3,
+                    Op::DefineMacro {
+                        name: "Register".into(),
+                    },
+                ),
+                ins(2, 0, Op::Interface),
+                ins(
+                    3,
+                    0,
+                    Op::ChangeMembership {
+                        set: vec![Ref::Obj(active)],
+                        op: 0,
+                        group: vec![Ref::Handle(0)],
+                    },
+                ),
+            ],
+            &[(active, "active")],
+        );
+        g.handle_ids = vec![MY_HASH];
+        g.handle_ns = vec![name_hash("level.bld")];
+        let stub = 0xd00;
+        let mut l = script_set(
+            vec![
+                ins(1, 2, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(3, 1, Op::UseMacro { target: Some(stub) }),
+                ins(4, 0, Op::Interface),
+            ],
+            &[],
+        );
+        l.macro_names.insert(stub, "Register".into());
+        let gi = VmIndex::new(&g);
+        let mut shared = HashMap::new();
+        for id in [5, 6] {
+            let mut vm = Vm::new(&l, Some(&g));
+            vm.global_index = Some(&gi);
+            vm.self_id = Some(id);
+            vm.global_sets = std::mem::take(&mut shared);
+            vm.call("m", &[]).unwrap();
+            shared = std::mem::take(&mut vm.global_sets);
+        }
+        assert_eq!(
+            shared.get(&vec![Ref::Obj(active)]),
+            Some(&vec![RefTarget::Actor(5), RefTarget::Actor(6)])
+        );
     }
 
     #[test]

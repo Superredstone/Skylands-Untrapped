@@ -143,9 +143,11 @@ pub struct ActorScriptState {
     refs: HashMap<Vec<Ref>, RefTarget>,
     /// The script's sets (`OpChangeMembership`), by canonical path.
     sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
-    /// Locals and references of the `global.bld` macros this actor's scripts call.
-    global_vars: HashMap<Vec<Ref>, Value>,
-    global_refs: HashMap<Vec<Ref>, RefTarget>,
+    /// `global.bld` variables, references and sets. One level-wide table in the game:
+    /// the engine keeps a single copy and moves it in for each actor's tick.
+    pub global_vars: HashMap<Vec<Ref>, Value>,
+    pub global_refs: HashMap<Vec<Ref>, RefTarget>,
+    pub global_sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// The script hit an op the VM does not model; it no longer runs.
     pub error: Option<VmError>,
     /// Save slot read by "Get Save Param" (set by the engine each tick).
@@ -409,6 +411,7 @@ impl ScriptProgram {
         vm.global_index = self.global_index.as_ref();
         vm.global_vars = std::mem::take(&mut st.global_vars);
         vm.global_refs = std::mem::take(&mut st.global_refs);
+        vm.global_sets = std::mem::take(&mut st.global_sets);
         vm.clone_ids = std::mem::take(&mut st.clone_ids);
         vm.self_key = st.self_key;
         vm.save = st.save.clone();
@@ -444,6 +447,7 @@ impl ScriptProgram {
         st.refs = std::mem::take(&mut vm.refs);
         st.sets = std::mem::take(&mut vm.sets);
         st.global_vars = std::mem::take(&mut vm.global_vars);
+        st.global_sets = std::mem::take(&mut vm.global_sets);
         st.trace = vm.trace.take();
         st.global_refs = std::mem::take(&mut vm.global_refs);
         st.clone_ids = std::mem::take(&mut vm.clone_ids);
