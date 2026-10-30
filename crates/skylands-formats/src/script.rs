@@ -294,6 +294,8 @@ pub struct ScriptSet {
     /// and `ScriptStructure`s. A record is an object a reference can point at; an unset
     /// variable of an engine type (`"defeated actor"`, `"Enemy - payload"`) is `null`.
     pub records: HashSet<usize>,
+    /// `StringInfo` constants by offset (`RefTarget::String`).
+    pub strings: HashSet<usize>,
     /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
     /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
     pub use_paths: HashMap<usize, Vec<Ref>>,
@@ -809,13 +811,20 @@ impl ScriptSet {
             .collect();
         // A variable's type (+0x24): an `OpDefineStructure` (a record), an
         // `OpDefineMacro` (holds a macro) or an engine handle (an engine class or value).
+        // Its container (+0x20) `ScriptReference` makes it a reference to such a record
+        // (`ArenaRules_AM2.ai` "Selected Mod"), `ScriptStructure` the record itself.
+        let structure = |o: usize| {
+            r.ptr(o + 0x24)
+                .is_some_and(|t| r.ty(t) == "OpDefineStructure")
+        };
         let records = objects
             .iter()
             .filter(|o| match o.type_name.as_deref() {
                 Some("ScriptStructure") => true,
-                Some("OpCreateVariable" | "OpMacroParameter") => r
-                    .ptr(o.offset + 0x24)
-                    .is_some_and(|t| r.ty(t) == "OpDefineStructure"),
+                Some("OpCreateVariable") => {
+                    structure(o.offset) && r.ext(o.offset + 0x20) != "ScriptReference"
+                }
+                Some("OpMacroParameter") => structure(o.offset),
                 _ => false,
             })
             .map(|o| o.offset)
@@ -929,7 +938,9 @@ impl ScriptSet {
             })
             .map(|&g| (g, r.lhs(g + 0x30)))
             .collect();
+        let strings = of_type("StringInfo");
         let mut set = Self {
+            strings,
             scripts,
             master_vars,
             tags,
@@ -1281,6 +1292,11 @@ pub struct Vm<'a> {
     pub ref_board: RefBoard,
     /// `OpFindVariable` ops bound this run: op offset -> (actor, variable name).
     found: HashMap<usize, (usize, String)>,
+    /// This actor's own variables by name (`_masterVarList` and tags), and the
+    /// `OpFindVariable` ops bound to one of them (`find variable "Mod Controller"` on its
+    /// own placement): those read and write the variable itself.
+    pub own_vars: HashMap<String, usize>,
+    found_own: HashMap<usize, usize>,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
     pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// Engine ids of this actor's clones by serial, and this actor's own board key, for
@@ -1363,6 +1379,16 @@ pub enum RefTarget {
     /// A placement object itself (`tfbActorInfo` offset): an enemy or transport template
     /// held in a reference variable (`"natureHeavy" = Enemy_S4_NatureHeavy_`).
     Placement(usize),
+    /// Record variable `var` of the actor on board slot `actor`, as other actors hold it
+    /// (`"Selected Mod" = "Arena Mod - Artillery"` found on the arena master); its owner
+    /// reads it as its own record (`Alias`).
+    Record {
+        actor: usize,
+        var: usize,
+    },
+    /// A `StringInfo` constant (`"Mod - Artillery"`), which scripts use as an identity:
+    /// `"New Mod" == "Arena Mod - Artillery"."Mod ID"`.
+    String(usize),
     /// Something only the live engine knows (macro output...).
     Unknown,
 }
@@ -1520,7 +1546,10 @@ impl VmIndex {
         for (si, s) in set.scripts.iter().enumerate() {
             for (oi, ins) in s.ops.iter().enumerate() {
                 match &ins.op {
-                    Op::CheckValue { .. } | Op::LoopValue { .. } | Op::FindVariable { .. } => {
+                    Op::CheckValue { .. }
+                    | Op::CheckRef { .. }
+                    | Op::LoopValue { .. }
+                    | Op::FindVariable { .. } => {
                         index.aliases.insert(ins.offset, (si, oi));
                     }
                     Op::DefineMacro { name } => {
@@ -1562,6 +1591,8 @@ impl<'a> Vm<'a> {
             board: HashMap::new(),
             ref_board: HashMap::new(),
             found: HashMap::new(),
+            own_vars: HashMap::new(),
+            found_own: HashMap::new(),
             sets: HashMap::new(),
             clone_ids: HashMap::new(),
             self_key: None,
@@ -1588,6 +1619,15 @@ impl<'a> Vm<'a> {
     /// `null` / engine handles resolve to themselves; script reference variables to what
     /// `OpSetReference` stored (members of a `null` reference are `null`).
     fn ref_target(&self, path: &[Ref]) -> RefTarget {
+        match self.ref_target_raw(path) {
+            RefTarget::Record { actor, var } if Some(actor) == self.self_key => {
+                RefTarget::Alias(vec![Ref::Obj(var)])
+            }
+            t => t,
+        }
+    }
+
+    fn ref_target_raw(&self, path: &[Ref]) -> RefTarget {
         if let Some(k) = self.set.engine_key(path) {
             return match k[..] {
                 [NULL_HASH] => RefTarget::Null,
@@ -1609,6 +1649,9 @@ impl<'a> Vm<'a> {
         if let [Ref::Obj(o)] = p[..] {
             if self.set.placements.contains(&o) {
                 return RefTarget::Placement(o);
+            }
+            if self.set.strings.contains(&o) {
+                return RefTarget::String(o);
             }
             if self.index.macros.contains_key(&o) {
                 return RefTarget::Macro(o);
@@ -1935,6 +1978,10 @@ impl<'a> Vm<'a> {
                 p.push(*last);
                 Ok(p)
             }
+            // An `OpFindVariable` bound to this actor's own variable: that variable.
+            Some((Ref::Obj(o), [])) if self.found_own.contains_key(o) => {
+                Ok(vec![Ref::Obj(self.found_own[o])])
+            }
             _ => Ok(lhs.to_vec()),
         }
     }
@@ -1980,6 +2027,12 @@ impl<'a> Vm<'a> {
         match t {
             RefTarget::Engine(ref k) if *k == [MY_HASH] => self.self_id.map_or(t, RefTarget::Actor),
             RefTarget::Spawned(s) => self.clone_ids.get(&s).map_or(t, |&id| RefTarget::Actor(id)),
+            RefTarget::Alias(ref p) => match (&p[..], self.self_key) {
+                (&[Ref::Obj(var)], Some(actor)) if self.set.records.contains(&var) => {
+                    RefTarget::Record { actor, var }
+                }
+                _ => t,
+            },
             t => t,
         }
     }
@@ -2974,6 +3027,14 @@ impl<'a> Vm<'a> {
                             continue;
                         }
                     }
+                    // This actor's own variable.
+                    let own = self.own_vars.get(name).copied();
+                    if let (Some(var), true) = (own, self.board_key(target) == self.self_key) {
+                        self.found.remove(&ins.offset);
+                        self.found_own.insert(ins.offset, var);
+                        continue;
+                    }
+                    self.found_own.remove(&ins.offset);
                     let actor = self
                         .board_key(target)
                         .filter(|a| self.board.get(a).is_some_and(|v| v.contains_key(name)));
@@ -3083,6 +3144,10 @@ impl<'a> Vm<'a> {
                     .rev()
                     .find_map(|k| match self.refs_of(&p[..k]).get(&p[..k]) {
                         Some(RefTarget::Alias(a)) => Some((k, a.clone())),
+                        // One of this actor's records, as another actor stored it.
+                        Some(&RefTarget::Record { actor, var }) if Some(actor) == self.self_key => {
+                            Some((k, vec![Ref::Obj(var)]))
+                        }
                         _ => None,
                     })
             {
@@ -3095,8 +3160,15 @@ impl<'a> Vm<'a> {
                 .get(o)
                 .map(|&(si, oi)| &self.set.scripts[si].ops[oi].op);
             match alias {
-                Some(Op::CheckValue { lhs, .. }) => {
+                // `else if` checks name the first check: its LHS (`check @186d30 == ...`).
+                Some(Op::CheckValue { lhs, .. } | Op::CheckRef { lhs, .. }) => {
                     p = lhs.iter().chain(&p[1..]).copied().collect();
+                }
+                Some(Op::FindVariable { .. }) if self.found_own.contains_key(o) => {
+                    p = [Ref::Obj(self.found_own[o])]
+                        .into_iter()
+                        .chain(p[1..].iter().copied())
+                        .collect();
                 }
                 Some(Op::FindVariable { .. }) if self.found.contains_key(o) => break,
                 Some(Op::FindVariable { name, target }) => {
@@ -4473,6 +4545,132 @@ mod tests {
     }
 
     #[test]
+    fn vm_find_variable_on_itself_binds_its_own_variable() {
+        // `ArenaRules_AM2.ai` "Artillery - Startup": `find variable "Mod Controller"` on its
+        // own placement, then `set reference @find = @spawn`: its own variable changes (the
+        // board copy is replaced by its export after the tick).
+        let (me, mc, fv, other) = (0x300, 0x310, 0x320, 0x330);
+        let mut s = script_set(
+            vec![
+                ins(1, 3, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(
+                    fv,
+                    1,
+                    Op::FindVariable {
+                        name: "Mod Controller".into(),
+                        target: vec![Ref::Obj(me)],
+                    },
+                ),
+                ins(
+                    4,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(fv)],
+                        rhs: vec![Ref::Obj(other)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            &[(mc, "Mod Controller")],
+        );
+        s.placements.extend([me, other]);
+        let mut vm = Vm::new(&s, None);
+        vm.self_key = Some(me);
+        vm.own_vars.insert("Mod Controller".into(), mc);
+        vm.board
+            .entry(me)
+            .or_default()
+            .insert("Mod Controller".into(), I(0));
+        vm.call("m", &[]).unwrap();
+        assert_eq!(
+            vm.refs.get(&vec![Ref::Obj(mc)]),
+            Some(&RefTarget::Placement(other))
+        );
+    }
+
+    #[test]
+    fn vm_string_ids_compare_and_else_if_checks_name_the_first() {
+        // "ArenaMaster - Change Mod": `"New Mod" == "Mod - Artillery"` (`StringInfo`
+        // constants), then `else if` checks that name the first check (`@186d30`).
+        let (v, s1, s2, c1, c2, out1, out2) = (0x300, 0x310, 0x320, 0x330, 0x340, 0x350, 0x360);
+        let check = |rhs: usize, lhs: usize| Op::CheckRef {
+            rel: 1,
+            desc: "OpCheckReference".into(),
+            lhs: vec![Ref::Obj(lhs)],
+            rhs: vec![Ref::Obj(rhs)],
+        };
+        let mut s = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(
+                    3,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(v)],
+                        rhs: vec![Ref::Obj(s2)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(c1, 1, check(s1, v)),
+                ins(5, 0, set(out1, lit(I(1)))),
+                ins(c2, 1, check(s2, c1)),
+                ins(7, 0, set(out2, lit(I(1)))),
+            ],
+            &[(v, "New Mod"), (out1, "o1"), (out2, "o2")],
+        );
+        s.strings.extend([s1, s2]);
+        let mut vm = Vm::new(&s, None);
+        vm.call("m", &[]).unwrap();
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(out1)]), None);
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(out2)]), Some(&I(1)));
+    }
+
+    #[test]
+    fn vm_another_actors_reference_to_its_own_record_is_that_record() {
+        // "Selected Mod" = "Arena Mod - Artillery", set by another actor as a `Record` of
+        // this one: paths through it are the record's own.
+        let (me, sel, rec, f) = (0x300, 0x310, 0x320, 0x330);
+        let mut s = script_set(
+            vec![
+                ins(1, 2, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(
+                    3,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(sel), Ref::Obj(f)],
+                        rhs: lit(I(5)),
+                    },
+                ),
+            ],
+            &[
+                (sel, "Selected Mod"),
+                (rec, "Arena Mod - Artillery"),
+                (f, "x"),
+            ],
+        );
+        s.records.insert(rec);
+        s.vars.get_mut(&rec).unwrap().type_name = "OpCreateVariable".into();
+        let mut vm = Vm::new(&s, None);
+        vm.self_key = Some(me);
+        vm.refs.insert(
+            vec![Ref::Obj(sel)],
+            RefTarget::Record {
+                actor: me,
+                var: rec,
+            },
+        );
+        vm.call("m", &[]).unwrap();
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(rec), Ref::Obj(f)]), Some(&I(5)));
+        assert_eq!(
+            vm.ref_target(&[Ref::Obj(sel)]),
+            RefTarget::Alias(vec![Ref::Obj(rec)])
+        );
+    }
+
+    #[test]
     fn vm_budget() {
         let x = 0x100;
         let s = script_set(
@@ -4539,6 +4737,14 @@ mod tests {
         // "Enemy - payload" is dereferenced too, but typed by an engine class: a reference.
         assert_eq!(arena.var_name(0x1bd340), "Enemy - payload");
         assert!(!arena.records.contains(&0x1bd340));
+        // `ArenaRules_AM2.ai`: "Arena Mod - Artillery" is a record (container
+        // `ScriptStructure`), "Selected Mod" a reference to one (`ScriptReference`); mod ids
+        // are `StringInfo` constants ("Mod - Artillery").
+        assert_eq!(arena.var_name(0x1518d4), "Arena Mod - Artillery");
+        assert!(arena.records.contains(&0x1518d4));
+        assert_eq!(arena.var_name(0x18cf98), "Selected Mod");
+        assert!(!arena.records.contains(&0x18cf98));
+        assert!(arena.strings.contains(&0x120d30));
         assert!(g.records.contains(&0x296dec));
         assert!(!g.records.contains(&0x29fe78));
     }

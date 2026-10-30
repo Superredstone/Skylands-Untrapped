@@ -266,10 +266,29 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       skips the block. Not reversed: which lists the virtual returns.
   18. Result funcs 12 / 13 (`0x80071a4c` / `0x80071a98`) are `cos` / `tan` of degrees (fdlibm
       `0x803d25f4` / `0x803d2bc8`): f32 `* 0.017453292`, double math, rounded to f32 (11 = `sin`).
-  Now: the transport reads its flight path (4 waypoints) and runs "Navigate Waypoints", but
-  `"info"."Transport".distance` (`2eb31462`, its own engine field, set to 0 in startup) is
-  below "WP Tolerance - Moving" at once, so it docks at the first waypoint and waits for
-  "Command - go". What the engine's `distance` of an actor measures is not reversed.
+  19. Actor measurements: `heading` `9f481715`, `pitch` `bd324ab1`, `vertical difference`
+      `ecfb5226`, `horizontal length` `faa02963`, `distance` `2eb31462`, `vertical offset`
+      `6c749d1e`, `horizontal distance` `9059dae4` sit together in `main.dol` (0x804a18xx):
+      polar coordinates of an object relative to `my`, and settable (Transport_Macros places a
+      passenger with `distance = 0`, then displaces it 40 up). `my.distance` is 0, so the
+      dropship spawned on its first waypoint counts as arrived and docks there (that waypoint's
+      roll flags a dock), waiting for "Command - go". The engine code behind the strings is not
+      found (no direct pointers / `lis`+`addi` loads).
+  20. Stage 1 (Auto Offload 0) unloads its dropships itself ("Stage 1 - 01 - Unload") once
+      "ArenaMaster - Modify Artillery" succeeds, i.e. the artillery mod's controller is
+      "ready". Mod switching ("ArenaMaster - Change Mod" -> `ArenaRules_AM2.ai`):
+      - Mod ids are `StringInfo` constants ("Mod - Artillery"), compared by identity
+        (`RefTarget::String`, `ScriptSet::strings`).
+      - An `else if` check names the first check op (`@186d30`): its LHS, for
+        `OpCheckReference` as for `OpCheckValue`.
+      - A variable's container type (+0x20) `ScriptReference` makes it a reference to a
+        record ("Selected Mod", "Current Mod"); `ScriptStructure` is the record itself.
+      - Another actor's record is `RefTarget::Record { actor, var }`; actors export their
+        records so, and the owner reads one as its own record (`Alias`, also through `canon`).
+      - `find variable` on the actor itself binds its own variable (`Vm::own_vars`): "Artillery -
+        Startup" keeps the spawned controller in "Mod Controller" on its own placement.
+  Now: stage 1 reaches "Stage 1 - 01 - Unload" at about 8 s; the dropships still do not fly
+  (docked at their first waypoint).
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

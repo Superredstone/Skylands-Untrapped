@@ -310,16 +310,28 @@ impl ScriptProgram {
     }
 
     /// References in script `si`'s variables by name, as any actor reads them (`my` and
-    /// this actor's clones as engine ids), for other actors' `OpFindVariable`.
+    /// this actor's clones as engine ids, its records as `Record`), for other actors'
+    /// `OpFindVariable`.
     pub fn export_refs(&self, si: usize, st: &ActorScriptState) -> HashMap<String, RefTarget> {
+        let own = |var: usize| {
+            let actor = st.self_key?;
+            self.set
+                .records
+                .contains(&var)
+                .then_some(RefTarget::Record { actor, var })
+        };
         self.declared(si, st)
             .filter_map(|(var, name)| {
-                let t = st
-                    .refs
-                    .get(&vec![Ref::Obj(var)])
-                    .or_else(|| self.set.tag_refs.get(&var))?
-                    .clone();
+                // A record variable is itself (`Record`); references point where they were set.
+                let t = match st.refs.get(&vec![Ref::Obj(var)]) {
+                    Some(t) => t.clone(),
+                    None => own(var).or_else(|| self.set.tag_refs.get(&var).cloned())?,
+                };
                 let t = match t {
+                    RefTarget::Alias(ref p) => match p[..] {
+                        [Ref::Obj(v)] => own(v).unwrap_or(t),
+                        _ => t,
+                    },
                     RefTarget::Engine(ref k) if *k == [field::MY] => {
                         st.self_id.map_or(t, RefTarget::Actor)
                     }
@@ -455,6 +467,10 @@ impl ScriptProgram {
         vm.trace = st.trace.take();
         vm.board = std::mem::take(&mut st.board);
         vm.ref_board = std::mem::take(&mut st.ref_board);
+        vm.own_vars = self
+            .declared(si, st)
+            .map(|(var, name)| (name.to_string(), var))
+            .collect();
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
@@ -698,6 +714,33 @@ mod tests {
     }
 
     const SPAWN: usize = 0x300;
+
+    #[test]
+    fn records_are_exported_as_records_of_their_actor() {
+        // Another actor finds "Arena Mod - Artillery" on the arena master and stores it in
+        // "Selected Mod": both name the master's record (`RefTarget::Record`).
+        const REC: usize = 0x500;
+        let mut p = program(Vec::new(), Vec::new());
+        p.set.vars.insert(
+            REC,
+            VarInfo {
+                name: "Arena Mod - Artillery".into(),
+                type_name: "OpCreateVariable".into(),
+                init: None,
+            },
+        );
+        p.set.records.insert(REC);
+        let mut st = ActorScriptState {
+            tags: vec![REC],
+            ..Default::default()
+        };
+        st.self_key = Some(0x14f154);
+        let rec = RefTarget::Record {
+            actor: 0x14f154,
+            var: REC,
+        };
+        assert_eq!(p.export_refs(0, &st)["Arena Mod - Artillery"], rec);
+    }
 
     #[test]
     fn placement_tags_are_found_like_script_variables() {

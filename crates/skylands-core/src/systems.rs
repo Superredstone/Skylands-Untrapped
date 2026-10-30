@@ -4611,6 +4611,7 @@ mod tests {
             vars,
             tags: Default::default(),
             tag_refs: Default::default(),
+            strings: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
@@ -4710,6 +4711,7 @@ mod tests {
             vars: vars2,
             tags: Default::default(),
             tag_refs: Default::default(),
+            strings: Default::default(),
             master_vars: Default::default(),
             sets: Default::default(),
             set_names: Default::default(),
@@ -5087,5 +5089,28 @@ mod tests {
             Some("Stage 1 - 01 - Spawn"),
             None
         )));
+        // Stage 1 selects the artillery mod ("Change Mod": `StringInfo` ids), `ArenaRules_AM2`
+        // starts it through "Selected Mod" (a reference to one of its records) and keeps the
+        // spawned controller in its own "Mod Controller"; "Modify Artillery" then finds the
+        // controller "ready" and the stage unloads its dropships (about 8 s).
+        for _ in 0..300 {
+            step_fixed(&mut app);
+        }
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ActorScript, With<ScriptController>>();
+        let names: Vec<_> = q
+            .iter(world)
+            .filter(|a| {
+                program.set.scripts[a.script]
+                    .name
+                    .ends_with("ArenaScript_300_000.ai")
+            })
+            .filter_map(|a| {
+                a.state
+                    .behavior()
+                    .and_then(|o| program.behavior_name(a.script, o))
+            })
+            .collect();
+        assert_eq!(names, ["Stage 1 - 01 - Unload"]);
     }
 }
