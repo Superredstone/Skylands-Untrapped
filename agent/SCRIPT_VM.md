@@ -224,11 +224,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
      (`ActorScriptState::global_*`, `Vm::global_sets`). References stored there are absolute
      (`Vm::absolute`: `my` and this actor's clones as `RefTarget::Actor(engine id)`); reference
      and membership comparisons use absolute forms; an `Actor` reference to oneself is `my`.
-  Still blocking state 7: "Combat - Get Creature Info" walks `"active"` with an indexed
-  `OpSetReference` (`"active"[i]`, indexing a set; only waypoint lists are indexed so far) and
-  compares each entry's creature. Entries are per-creature records spawned from one template, so
-  data-object spawns need real instances (fresh id per spawn, template fields copied, stored in
-  the shared state) instead of aliasing the template.
+  7. Data-object instances: `spawn <record>` makes a fresh object (`Obj(INSTANCE_BASE + n)`,
+     counter at `[Obj(INSTANCE_BASE)]`) with the template's current values, references and sets
+     copied under it; instances live in the shared `global.bld` store (`Vm::shared`, `vars_of` /
+     `refs_of` / `sets_of`), so every actor reads the same one. A bare instance path is the object
+     (`Alias`). (Supersedes the earlier "alias the template" shortcut.)
+  8. Indexed `OpSetReference` into a set: `<set>[i]` is its i-th member (`null` out of range).
+  Still blocking state 7: "Combat - Get Creature Info" finds no entry for the passenger in
+  `@e678c."active"` (one entry, not the passenger). `"active"` is filled by
+  `EnemySystem_Global.ai` "Combat - Change Faction" (with "targets" and "attack priority"); the
+  "disabled" passengers (`Enemy_S4_Sporeasaur_`, armored BirdCopters) have not run their creature
+  setup into it. Next layer: the creature/state system the `Enemy_S4_*` scripts drive.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

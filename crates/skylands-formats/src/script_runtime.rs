@@ -1423,6 +1423,46 @@ mod tests {
     }
 
     #[test]
+    fn indexed_reference_takes_a_set_member() {
+        // `Combat.ai` "Get Creature Info": `"entry" = "active"[i]` over a set.
+        let (set_v, entry, setref) = (0x700, 0x7a0, 0x7b0);
+        let (a, b) = (0x880, 0x890);
+        let include = |off, o| {
+            ins(
+                off,
+                0,
+                Op::ChangeMembership {
+                    set: vec![Ref::Obj(set_v)],
+                    op: 0,
+                    group: vec![Ref::Obj(o)],
+                },
+            )
+        };
+        let mut p = program(
+            vec![
+                include(11, a),
+                include(12, b),
+                ins(
+                    setref,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(entry)],
+                        rhs: vec![Ref::Obj(set_v)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        p.set.placements.extend([a, b]);
+        p.set.ref_index.insert(setref, lit(1.0));
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.reference(entry), Some(&RefTarget::Placement(b)));
+    }
+
+    #[test]
     fn spawn_of_unresolved_template_skips_its_block() {
         // Template behind a variable reference: `0x8007c6bc` skips the setup block.
         let p = program(

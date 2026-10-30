@@ -1315,6 +1315,14 @@ pub enum RefTarget {
 const NULL_HASH: u32 = 0x7707_4ba4;
 /// Name hash of `my`, the actor running the script.
 const MY_HASH: u32 = 0x4c2d_fe93;
+/// First object id of data-object instances (`spawn` of a record), above any file
+/// offset; `[Obj(INSTANCE_BASE)]` in the shared store counts them.
+const INSTANCE_BASE: usize = 1 << 40;
+
+fn is_instance(p: &[Ref]) -> bool {
+    matches!(p.first(), Some(Ref::Obj(o)) if *o >= INSTANCE_BASE)
+}
+
 /// Name hash of a set's `count` field.
 const SET_COUNT: u32 = 0x39b1_ddf4;
 /// `waypoints` (a placement's `ActorWaypointList`), and `orientation.facing/tilt/roll`.
@@ -1536,8 +1544,12 @@ impl<'a> Vm<'a> {
                 return RefTarget::Spawned(self.spawning[i].serial);
             }
         }
-        if let Some(t) = self.refs.get(&p) {
+        if let Some(t) = self.refs_of(&p).get(&p) {
             return t.clone();
+        }
+        // A data-object instance itself (`@spawn` of a record, through its alias).
+        if p.len() == 1 && is_instance(&p) {
+            return RefTarget::Alias(p);
         }
         match p.first() {
             Some(Ref::Obj(_)) if self.refs.get(&p[..1]) == Some(&RefTarget::Null) => {
@@ -1567,7 +1579,11 @@ impl<'a> Vm<'a> {
     /// Members of a group path: a stored set's members, else the one object it refers to
     /// (nothing for `null` or what only the live engine knows).
     fn members(&self, group: &[Ref]) -> Vec<RefTarget> {
-        if let Some(s) = self.canon(group).ok().and_then(|k| self.sets.get(&k)) {
+        if let Some(s) = self
+            .canon(group)
+            .ok()
+            .and_then(|k| self.sets_of(&k).get(&k))
+        {
             return s.clone();
         }
         if let Some(s) = self.engine_set(group) {
@@ -1628,12 +1644,22 @@ impl<'a> Vm<'a> {
 
     /// Element `i` of the list a path names: `<placement>.waypoints[i]`.
     fn indexed_target(&self, path: &[Ref], i: i64) -> RefTarget {
-        let Some((Ref::Handle(h), owner)) = path.split_last() else {
-            return RefTarget::Unknown;
+        let waypoints = match path.split_last() {
+            Some((Ref::Handle(h), owner))
+                if self.set.engine_key(&[Ref::Handle(*h)]) == Some(vec![WAYPOINTS]) =>
+            {
+                Some(owner)
+            }
+            _ => None,
         };
-        if self.set.engine_key(&[Ref::Handle(*h)]) != Some(vec![WAYPOINTS]) {
-            return RefTarget::Unknown;
-        }
+        // Element `i` of a set (`"active"[i]` in `Combat.ai` "Get Creature Info").
+        let Some(owner) = waypoints else {
+            let members = self.members(path);
+            return usize::try_from(i)
+                .ok()
+                .and_then(|i| members.get(i).cloned())
+                .unwrap_or(RefTarget::Null);
+        };
         match self.ref_target(owner) {
             RefTarget::Placement(o)
                 if usize::try_from(i)
@@ -1663,7 +1689,7 @@ impl<'a> Vm<'a> {
     fn referenced_field(&self, p: &[Ref]) -> Option<Value> {
         let (k, target) = (1..p.len())
             .rev()
-            .find_map(|k| Some((k, self.refs.get(&p[..k])?.clone())))?;
+            .find_map(|k| Some((k, self.refs_of(&p[..k]).get(&p[..k])?.clone())))?;
         let rest = self.set.engine_key(&p[k..])?;
         match (target, &rest[..]) {
             (RefTarget::Placement(o), [WAYPOINTS, SET_COUNT]) => {
@@ -1692,6 +1718,92 @@ impl<'a> Vm<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Where a path's values, references and sets live: data-object instances are in the
+    /// shared `global.bld` store (this VM's own when it runs `global.bld`).
+    fn shared(&self, p: &[Ref]) -> bool {
+        is_instance(p) && self.home.is_none()
+    }
+    fn vars_of(&self, p: &[Ref]) -> &HashMap<Vec<Ref>, Value> {
+        if self.shared(p) {
+            &self.global_vars
+        } else {
+            &self.vars
+        }
+    }
+    fn vars_of_mut(&mut self, p: &[Ref]) -> &mut HashMap<Vec<Ref>, Value> {
+        if self.shared(p) {
+            &mut self.global_vars
+        } else {
+            &mut self.vars
+        }
+    }
+    fn refs_of(&self, p: &[Ref]) -> &HashMap<Vec<Ref>, RefTarget> {
+        if self.shared(p) {
+            &self.global_refs
+        } else {
+            &self.refs
+        }
+    }
+    fn refs_of_mut(&mut self, p: &[Ref]) -> &mut HashMap<Vec<Ref>, RefTarget> {
+        if self.shared(p) {
+            &mut self.global_refs
+        } else {
+            &mut self.refs
+        }
+    }
+    fn sets_of(&self, p: &[Ref]) -> &HashMap<Vec<Ref>, Vec<RefTarget>> {
+        if self.shared(p) {
+            &self.global_sets
+        } else {
+            &self.sets
+        }
+    }
+    fn sets_of_mut(&mut self, p: &[Ref]) -> &mut HashMap<Vec<Ref>, Vec<RefTarget>> {
+        if self.shared(p) {
+            &mut self.global_sets
+        } else {
+            &mut self.sets
+        }
+    }
+
+    /// A new instance of the record at `template` (`spawn "New Info"`): a fresh object id
+    /// in the shared store, with the template's current values, references and sets
+    /// copied under it (as a clone copies its template's fields).
+    fn instantiate(&mut self, template: &[Ref]) -> Vec<Ref> {
+        let counter = vec![Ref::Obj(INSTANCE_BASE)];
+        let n = self
+            .vars_of(&counter)
+            .get(&counter)
+            .map_or(0, |v| v.as_f32() as usize)
+            + 1;
+        self.vars_of_mut(&counter)
+            .insert(counter.clone(), Value::Int(n as i32));
+        let inst = vec![Ref::Obj(INSTANCE_BASE + n)];
+        let under = |k: &Vec<Ref>| -> Option<Vec<Ref>> {
+            k.starts_with(template)
+                .then(|| inst.iter().chain(&k[template.len()..]).copied().collect())
+        };
+        let vars: Vec<_> = self
+            .vars_of(template)
+            .iter()
+            .filter_map(|(k, v)| Some((under(k)?, *v)))
+            .collect();
+        let refs: Vec<_> = self
+            .refs_of(template)
+            .iter()
+            .filter_map(|(k, v)| Some((under(k)?, v.clone())))
+            .collect();
+        let sets: Vec<_> = self
+            .sets_of(template)
+            .iter()
+            .filter_map(|(k, v)| Some((under(k)?, v.clone())))
+            .collect();
+        self.vars_of_mut(&inst).extend(vars);
+        self.refs_of_mut(&inst).extend(refs);
+        self.sets_of_mut(&inst).extend(sets);
+        inst
     }
 
     /// A path through a reference to another actor (`Current_BattleMaster.x`): its id and
@@ -2301,7 +2413,7 @@ impl<'a> Vm<'a> {
                         t
                     };
                     if let Ok(p) = self.canon(lhs) {
-                        self.refs.insert(p, t);
+                        self.refs_of_mut(&p).insert(p, t);
                     }
                 }
                 Op::CheckRef {
@@ -2314,7 +2426,7 @@ impl<'a> Vm<'a> {
                         .starts_with("OpCheckMembership")
                         .then(|| self.canon(lhs).ok())
                         .flatten()
-                        .and_then(|k| self.sets.get(&k).cloned());
+                        .and_then(|k| self.sets_of(&k).get(&k).cloned());
                     let group = self.members(rhs);
                     // `_membershipOp`: 0 includes, 1 excludes, 2 intersects_with, 3 includes_all
                     // (enum table `0x805b5658`); with one known member they agree pairwise.
@@ -2376,7 +2488,7 @@ impl<'a> Vm<'a> {
                             rel_group
                         };
                         let abs: Vec<RefTarget> = self
-                            .sets
+                            .sets_of(&key)
                             .get(&key)
                             .map(|s| s.iter().map(|x| self.absolute(x.clone())).collect())
                             .unwrap_or_default();
@@ -2386,7 +2498,7 @@ impl<'a> Vm<'a> {
                             2 => (0..abs.len()).map(|i| keep(i, true)).collect(),
                             _ => vec![true; abs.len()],
                         };
-                        let s = self.sets.entry(key).or_default();
+                        let s = self.sets_of_mut(&key).entry(key).or_default();
                         let mut i = 0;
                         s.retain(|_| {
                             i += 1;
@@ -2637,8 +2749,9 @@ impl<'a> Vm<'a> {
                         if let Ok(p) = self.canon(template) {
                             if matches!(p.last(), Some(Ref::Obj(v)) if self.set.records.contains(v))
                             {
+                                let inst = self.instantiate(&p);
                                 self.refs
-                                    .insert(vec![Ref::Obj(ins.offset)], RefTarget::Alias(p));
+                                    .insert(vec![Ref::Obj(ins.offset)], RefTarget::Alias(inst));
                                 continue;
                             }
                         }
@@ -2775,12 +2888,13 @@ impl<'a> Vm<'a> {
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
             // A record reached through an alias at any prefix: that record's path.
-            if let Some((k, a)) = (1..=p.len())
-                .rev()
-                .find_map(|k| match self.refs.get(&p[..k]) {
-                    Some(RefTarget::Alias(a)) => Some((k, a.clone())),
-                    _ => None,
-                })
+            if let Some((k, a)) =
+                (1..=p.len())
+                    .rev()
+                    .find_map(|k| match self.refs_of(&p[..k]).get(&p[..k]) {
+                        Some(RefTarget::Alias(a)) => Some((k, a.clone())),
+                        _ => None,
+                    })
             {
                 p = a.into_iter().chain(p[k..].iter().copied()).collect();
                 continue;
@@ -2859,7 +2973,7 @@ impl<'a> Vm<'a> {
         if let Some(v) = self.referenced_field(&path) {
             return v;
         }
-        if let Some(v) = self.vars.get(&path) {
+        if let Some(v) = self.vars_of(&path).get(&path) {
             return *v;
         }
         if let Some(v) = self
@@ -2958,7 +3072,7 @@ impl<'a> Vm<'a> {
                             self.globals.insert(name.to_string(), v);
                         }
                     }
-                    self.vars.insert(p, v);
+                    self.vars_of_mut(&p).insert(p, v);
                 }
             }
         }
@@ -3859,7 +3973,8 @@ mod tests {
     #[test]
     fn vm_spawned_record_is_returned_by_reference() {
         // `Transport_Macros.ai` "Transport - Startup": fill `"New Info"`, `spawn "New Info"`,
-        // `"returned info" = @spawn`; the caller then writes through `"returned info"`.
+        // `"returned info" = @spawn`; the caller then writes through `"returned info"`,
+        // to a new instance with the template's fields.
         let (rec, f, out, r, sp) = (0x100, 0x110, 0x120, 0x130, 0x200);
         let mut s = script_set(
             vec![
@@ -3907,7 +4022,7 @@ mod tests {
                         r,
                         Rhs {
                             a: Operand::Read {
-                                path: vec![Ref::Obj(rec), Ref::Obj(f)],
+                                path: vec![Ref::Obj(out), Ref::Obj(f)],
                                 kind: NumKind::Int,
                             },
                             arith: -1,
@@ -3928,7 +4043,10 @@ mod tests {
         s.vars.get_mut(&out).unwrap().type_name = "OpCreateVariable".into();
         // `"New Info"` has members (a path goes through it).
         s.records.insert(rec);
-        assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(3));
+        let mut vm = Vm::new(&s, None);
+        // The spawned instance copied x = 2 and was incremented; the template keeps 2.
+        assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(3));
+        assert_eq!(vm.read(&[Ref::Obj(rec), Ref::Obj(f)]), I(2));
     }
 
     #[test]
