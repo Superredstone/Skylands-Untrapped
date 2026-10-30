@@ -259,8 +259,9 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     and three VM gaps it found fixed (null never-set records, dynamic macro dispatch, record aliasing), see
     `agent/SCRIPT_VM.md`; records and data-object spawns now resolve the transport's "info" chain and it runs its
     startup sequence (attaching passengers); `global.bld` state is now shared level-wide; per-instance data objects and
-    indexing into sets done; next: the passengers' creature setup (they never join `global.bld`'s "active" creature
-    registry, so "Combat - Get Creature Info" finds nothing), see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    indexing into sets done; growable record lists, a reference board across actors, record typing, clone setup
+    slots and parameter defaults let the transport finish startup and navigate (stage 1 now spawns its second
+    dropship); next: "Nav - Flight Path" still null in Navigate, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).

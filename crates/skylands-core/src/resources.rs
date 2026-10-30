@@ -498,6 +498,8 @@ pub struct ScriptVarBoard {
     pub program: usize,
     pub targets: std::collections::HashSet<usize>,
     pub vars: skylands_formats::script::VarBoard,
+    /// References in those variables (`RefBoard`, absolute targets).
+    pub refs: skylands_formats::script::RefBoard,
     /// `global.bld`'s variables, references and sets: one table for the whole level,
     /// moved into each actor's script state for its tick.
     pub global_vars: std::collections::HashMap<

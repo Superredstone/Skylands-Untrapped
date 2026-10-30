@@ -230,11 +230,31 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
      `refs_of` / `sets_of`), so every actor reads the same one. A bare instance path is the object
      (`Alias`). (Supersedes the earlier "alias the template" shortcut.)
   8. Indexed `OpSetReference` into a set: `<set>[i]` is its i-th member (`null` out of range).
-  Still blocking state 7: "Combat - Get Creature Info" finds no entry for the passenger in
-  `@e678c."active"` (one entry, not the passenger). `"active"` is filled by
-  `EnemySystem_Global.ai` "Combat - Change Faction" (with "targets" and "attack priority"); the
-  "disabled" passengers (`Enemy_S4_Sporeasaur_`, armored BirdCopters) have not run their creature
-  setup into it. Next layer: the creature/state system the `Enemy_S4_*` scripts drive.
+  9. Lists: `@e678c."active"` is a growable list of creature-info records, not a set creatures
+     join: `Combat.ai` "Get/Adjust Creature Info Struct" runs `inc "active".count` (append a new
+     empty record instance; `dec` drops the last) and `"info" = "active".last` (`first` /
+     `last`, `global.bld` handle 188 = `63e1d819`). `Vm::list_of_count`, `new_instance`.
+  10. Writes of references into shared state (`global.bld`, instances) are absolute too.
+  11. References across actors: `RefBoard` beside `VarBoard` (a bound `OpFindVariable` reads /
+      writes references there, absolute); every script clone is on the board; board actors
+      export their declared references (`ScriptProgram::export_refs` / `import_refs`), seeded
+      before their first tick.
+  12. Records are classified by type, not by use: a variable's `+0x24` names an
+      `OpDefineStructure` (a record), an `OpDefineMacro` or an engine handle (engine class /
+      value). Only a bare record variable is an object (`Alias`); a record-typed field is a
+      reference, `null` until set (`"trapping data"."villain just captured data"`).
+  13. `OpSetReference` rebinds the variable (`Vm::ref_slot`: only the path before the last element
+      is canonicalized), not the record an alias variable stands for.
+  14. `find variable` on the clone being set up (`@spawn` in its setup block) binds a slot that
+      travels with `Effect::Spawn` (`named_vars` / `named_refs`); core imports it into the
+      clone's script state by name ("flight path" = "Transport Path").
+  15. A reference parameter without an argument takes its own default (`RHSReferenceStack`
+      +0x30: "Transport - Startup"'s "transport" = `my`), else `null`.
+  16. A field read through a reference to oneself reads one's own engine state
+      ("info"."Transport".distance), not an engine measurement.
+  Now: the transport finishes its startup and navigates; stage 1 spawns its second dropship at
+  8 s. Neither transport moves yet: "Nav - Flight Path" still reads `null` in Navigate (its
+  waypoint count is 0, so it steps past the end); not traced further.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

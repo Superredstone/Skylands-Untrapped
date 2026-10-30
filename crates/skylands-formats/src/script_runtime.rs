@@ -4,7 +4,8 @@
 //! fields are name-hash paths (`ScriptSet::engine_key`). Notes: `agent/SCRIPT_VM.md`.
 
 use crate::script::{
-    name_hash, Effect, Op, Ref, RefTarget, ScriptSet, Value, VarBoard, Vm, VmError, VmIndex,
+    name_hash, Effect, Op, Ref, RefBoard, RefTarget, ScriptSet, Value, VarBoard, Vm, VmError,
+    VmIndex,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -130,6 +131,7 @@ pub struct ActorScriptState {
     /// Other actors' variables for `OpFindVariable`; the engine moves its board in for
     /// the tick and takes it back after.
     pub board: VarBoard,
+    pub ref_board: RefBoard,
     /// Sum of `OpDisplace` moves of `my`, world units (heading 0 = +Z, pitch 90 = up).
     pub displacement: [f32; 3],
     /// `OpRemove my` ran.
@@ -298,6 +300,42 @@ impl ScriptProgram {
             .collect()
     }
 
+    /// References in script `si`'s variables by name, as any actor reads them (`my` and
+    /// this actor's clones as engine ids), for other actors' `OpFindVariable`.
+    pub fn export_refs(&self, si: usize, st: &ActorScriptState) -> HashMap<String, RefTarget> {
+        self.declared(si)
+            .filter_map(|(var, name)| {
+                let t = st.refs.get(&vec![Ref::Obj(var)])?.clone();
+                let t = match t {
+                    RefTarget::Engine(ref k) if *k == [field::MY] => {
+                        st.self_id.map_or(t, RefTarget::Actor)
+                    }
+                    RefTarget::Spawned(s) => {
+                        st.clone_ids.get(&s).map_or(t, |&id| RefTarget::Actor(id))
+                    }
+                    t => t,
+                };
+                Some((name.to_string(), t))
+            })
+            .collect()
+    }
+
+    /// Takes other actors' reference writes to script `si`'s variables.
+    pub fn import_refs(
+        &self,
+        si: usize,
+        st: &mut ActorScriptState,
+        refs: &HashMap<String, RefTarget>,
+    ) {
+        let found: Vec<_> = self
+            .declared(si)
+            .filter_map(|(var, name)| Some((var, refs.get(name)?.clone())))
+            .collect();
+        for (var, t) in found {
+            st.refs.insert(vec![Ref::Obj(var)], t);
+        }
+    }
+
     /// Takes other actors' writes to script `si`'s variables (`export_vars` names).
     pub fn import_vars(&self, si: usize, st: &mut ActorScriptState, vals: &HashMap<String, Value>) {
         let vars: Vec<_> = self
@@ -403,6 +441,7 @@ impl ScriptProgram {
         vm.fields = st.fields.clone();
         vm.trace = st.trace.take();
         vm.board = std::mem::take(&mut st.board);
+        vm.ref_board = std::mem::take(&mut st.ref_board);
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
@@ -482,6 +521,7 @@ impl ScriptProgram {
         st.vars = std::mem::take(&mut vm.vars);
         st.rng = vm.rng;
         st.board = std::mem::take(&mut vm.board);
+        st.ref_board = std::mem::take(&mut vm.ref_board);
         st.time += dt;
     }
 
@@ -728,6 +768,8 @@ mod tests {
                     heading: 0.0,
                     pitch: 90.0,
                 }],
+                named_vars: HashMap::new(),
+                named_refs: HashMap::new(),
             }]
         );
         // The spawner keeps its own facing and does not move.
@@ -1460,6 +1502,119 @@ mod tests {
         p.tick(0, &mut st, 1.0 / 60.0);
         assert!(st.error.is_none(), "{:?}", st.error);
         assert_eq!(st.reference(entry), Some(&RefTarget::Placement(b)));
+    }
+
+    #[test]
+    fn find_variable_on_the_clone_being_set_up_travels_with_the_spawn() {
+        // "BattleMaster - Spawn Dropship": `spawn "Transport Template" { find variable
+        // "flight path" on @spawn { @find = "Transport Path" } }`.
+        const FIND: usize = 0x520;
+        const PATH: usize = 0x880;
+        let p = {
+            let mut p = program(
+                vec![
+                    ins(
+                        SPAWN,
+                        2,
+                        Op::Spawn {
+                            template: vec![Ref::Obj(0x400)],
+                            actor: Some(coin()),
+                            at: vec![h(MY)],
+                            facing: None,
+                        },
+                    ),
+                    ins(
+                        FIND,
+                        1,
+                        Op::FindVariable {
+                            name: "flight path".into(),
+                            target: vec![Ref::Obj(SPAWN)],
+                        },
+                    ),
+                    ins(
+                        11,
+                        0,
+                        Op::SetRef {
+                            lhs: vec![Ref::Obj(FIND)],
+                            rhs: vec![Ref::Obj(PATH)],
+                            desc: String::new(),
+                        },
+                    ),
+                ],
+                vec![],
+            );
+            p.set.placements.insert(PATH);
+            p
+        };
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let Effect::Spawn { named_refs, .. } = &st.spawns[0] else {
+            panic!()
+        };
+        assert_eq!(
+            named_refs.get("flight path"),
+            Some(&RefTarget::Placement(PATH))
+        );
+        assert!(st.board.is_empty() && st.ref_board.is_empty());
+    }
+
+    #[test]
+    fn reference_written_through_find_variable_reaches_the_other_actor() {
+        // `find variable "enemy1L" on "transport" { @find = @spawn }` from another actor:
+        // the reference lands on that actor's board slot, as an engine id.
+        const FIND: usize = 0x520;
+        const OTHER: usize = 0x900;
+        let p = program(
+            vec![
+                ins(
+                    SPAWN,
+                    0,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(0x400)],
+                        actor: Some(coin()),
+                        at: vec![h(MY)],
+                        facing: None,
+                    },
+                ),
+                ins(
+                    11,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(LOCAL)],
+                        rhs: vec![h(MY)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    FIND,
+                    1,
+                    Op::FindVariable {
+                        name: "enemy1L".into(),
+                        target: vec![Ref::Obj(OTHER)],
+                    },
+                ),
+                ins(
+                    12,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(FIND)],
+                        rhs: vec![Ref::Obj(LOCAL)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState {
+            self_id: Some(42),
+            ..Default::default()
+        };
+        st.board
+            .insert(OTHER, HashMap::from([("enemy1L".into(), Value::Int(0))]));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.ref_board[&OTHER]["enemy1L"], RefTarget::Actor(42));
     }
 
     #[test]

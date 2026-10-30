@@ -284,9 +284,9 @@ pub struct ScriptSet {
     /// `OpSetReference._indexRHS` (+0x24) by op offset: the element of a list the
     /// reference takes (`.waypoints[i]`).
     pub ref_index: HashMap<usize, Rhs>,
-    /// Variables with members: some path in the file goes through them to another
-    /// object (`"New Info"."Transport Type"`). Such a record is an object a reference can
-    /// point at; an unset reference field (`"defeated actor"`) is `null`.
+    /// Record variables: typed (+0x24) by an `OpDefineStructure` (`"New Info"`, `"My Info"`),
+    /// and `ScriptStructure`s. A record is an object a reference can point at; an unset
+    /// variable of an engine type (`"defeated actor"`, `"Enemy - payload"`) is `null`.
     pub records: HashSet<usize>,
     /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
     /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
@@ -792,18 +792,18 @@ impl ScriptSet {
             .filter(|o| o.type_name.as_deref() == Some("OpSetReference"))
             .filter_map(|o| Some((o.offset, r.rhs_at(o.offset + 0x24)?)))
             .collect();
+        // A variable's type (+0x24): an `OpDefineStructure` (a record), an
+        // `OpDefineMacro` (holds a macro) or an engine handle (an engine class or value).
         let records = objects
             .iter()
-            .filter(|o| o.type_name.as_deref().is_some_and(|t| t.ends_with("Stack")))
-            .flat_map(|o| {
-                let path = r.path(o.offset);
-                path.windows(2)
-                    .filter_map(|w| match w {
-                        [Ref::Obj(a), _] => Some(*a),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
+            .filter(|o| match o.type_name.as_deref() {
+                Some("ScriptStructure") => true,
+                Some("OpCreateVariable" | "OpMacroParameter") => r
+                    .ptr(o.offset + 0x24)
+                    .is_some_and(|t| r.ty(t) == "OpDefineStructure"),
+                _ => false,
             })
+            .map(|o| o.offset)
             .collect();
         let use_paths = objects
             .iter()
@@ -1227,6 +1227,8 @@ pub struct Vm<'a> {
     pub set_counts: HashMap<String, i32>,
     /// Other actors' variables `OpFindVariable` can bind (`VarBoard`); writes land here.
     pub board: VarBoard,
+    /// References of the same variables (`RefBoard`).
+    pub ref_board: RefBoard,
     /// `OpFindVariable` ops bound this run: op offset -> (actor, variable name).
     found: HashMap<usize, (usize, String)>,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
@@ -1281,6 +1283,10 @@ pub struct Vm<'a> {
 /// for `OpFindVariable` (`find variable "state" on _ArenaMaster2`).
 pub type VarBoard = HashMap<usize, HashMap<String, Value>>;
 
+/// References in other actors' variables, like `VarBoard` (absolute targets:
+/// `"transport"."enemy1L" = @spawn` from the BattleMaster's dropship macro).
+pub type RefBoard = HashMap<usize, HashMap<String, RefTarget>>;
+
 /// Object a script reference points at, as far as the VM can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefTarget {
@@ -1325,6 +1331,9 @@ fn is_instance(p: &[Ref]) -> bool {
 
 /// Name hash of a set's `count` field.
 const SET_COUNT: u32 = 0x39b1_ddf4;
+/// `first` / `last` members of a list.
+const FIRST: u32 = 0x4881_d841;
+const LAST: u32 = 0x63e1_d819;
 /// `waypoints` (a placement's `ActorWaypointList`), and `orientation.facing/tilt/roll`.
 const WAYPOINTS: u32 = 0x7a0a_bb2b;
 const ORIENTATION_HASH: u32 = 0xc545_bc21;
@@ -1369,6 +1378,8 @@ const GET_SAVE_PARAM: &str = "System - Save - Get Save Param";
 const SET_SAVE_PARAM: &str = "Set Save Param";
 
 /// Engine action requested by a script op.
+// `Spawn` carries its setup (seed, setup effects, named writes); spawns are rare.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// `OpSlideValue` at op `op` started: `lhs` goes `from` -> `to` over `seconds`,
@@ -1415,6 +1426,10 @@ pub enum Effect {
         serial: u32,
         seed: HashMap<Vec<u32>, Value>,
         setup: Vec<Effect>,
+        /// Script variables of the clone written in the setup block through
+        /// `OpFindVariable` (`"flight path" = "Transport Path"`), by name.
+        named_vars: HashMap<String, Value>,
+        named_refs: HashMap<String, RefTarget>,
     },
 }
 
@@ -1495,6 +1510,7 @@ impl<'a> Vm<'a> {
             globals: HashMap::new(),
             set_counts: HashMap::new(),
             board: HashMap::new(),
+            ref_board: HashMap::new(),
             found: HashMap::new(),
             sets: HashMap::new(),
             clone_ids: HashMap::new(),
@@ -1531,6 +1547,15 @@ impl<'a> Vm<'a> {
         let Ok(p) = self.canon(path) else {
             return RefTarget::Unknown;
         };
+        // Another actor's variable (`OpFindVariable`).
+        if let Some((a, name)) = self.found_slot(&p) {
+            return self
+                .ref_board
+                .get(&a)
+                .and_then(|v| v.get(&name))
+                .cloned()
+                .unwrap_or(RefTarget::Null);
+        }
         if let [Ref::Obj(o)] = p[..] {
             if self.set.placements.contains(&o) {
                 return RefTarget::Placement(o);
@@ -1547,6 +1572,20 @@ impl<'a> Vm<'a> {
         if let Some(t) = self.refs_of(&p).get(&p) {
             return t.clone();
         }
+        // `<list>.first` / `.last`: its first / last member.
+        if let Some((Ref::Handle(h), list)) = p.split_last() {
+            let end = match self.set.engine_key(&[Ref::Handle(*h)]).as_deref() {
+                Some([FIRST]) => Some(true),
+                Some([LAST]) => Some(false),
+                _ => None,
+            };
+            if let Some(first) = end {
+                if let Some(s) = self.sets_of(list).get(list) {
+                    let m = if first { s.first() } else { s.last() };
+                    return m.cloned().unwrap_or(RefTarget::Null);
+                }
+            }
+        }
         // A data-object instance itself (`@spawn` of a record, through its alias).
         if p.len() == 1 && is_instance(&p) {
             return RefTarget::Alias(p);
@@ -1558,17 +1597,22 @@ impl<'a> Vm<'a> {
             // A script's own variable that no `OpSetReference` ever pointed anywhere (nor
             // any record it is part of) is `null`: `Sky_Traps.ai` asks
             // `"trapping data".<defeat sequence> != null`, which only the trap sequence sets.
+            // Fields of a data-object instance follow the same rule.
             Some(Ref::Obj(v))
-                if self.set.vars.get(v).is_some_and(|i| {
-                    matches!(
-                        i.type_name.as_str(),
-                        "ValueInfo" | "OpCreateVariable" | "ScriptStructure"
-                    )
-                }) && (1..=p.len()).all(|k| !self.refs.contains_key(&p[..k])) =>
+                if (is_instance(&p)
+                    || self.set.vars.get(v).is_some_and(|i| {
+                        matches!(
+                            i.type_name.as_str(),
+                            "ValueInfo" | "OpCreateVariable" | "ScriptStructure"
+                        )
+                    }))
+                    && (1..=p.len()).all(|k| !self.refs_of(&p[..k]).contains_key(&p[..k])) =>
             {
-                // The record itself (`"New Info"`, returned by reference) or an unset field.
-                match p.last() {
-                    Some(Ref::Obj(last)) if self.set.records.contains(last) => RefTarget::Alias(p),
+                // A record variable is the record itself (`"New Info"`, returned by
+                // reference); a field of a record, record-typed or not, is a reference that
+                // is `null` until set (`"trapping data"."villain just captured data"`).
+                match p[..] {
+                    [Ref::Obj(v)] if self.set.records.contains(&v) => RefTarget::Alias(p),
                     _ => RefTarget::Null,
                 }
             }
@@ -1711,6 +1755,15 @@ impl<'a> Vm<'a> {
                     .waypoint_field(self.self_id?, owner, wp.local, *f)?;
                 Some(Value::Float(v))
             }
+            // This actor itself: its own engine state ("info"."Transport".distance).
+            (RefTarget::Engine(k), _) if k == [MY_HASH] => self
+                .engine
+                .get(&[MY_HASH].into_iter().chain(rest).collect::<Vec<_>>())
+                .copied(),
+            (RefTarget::Actor(id), _) if Some(id) == self.self_id => self
+                .engine
+                .get(&[MY_HASH].into_iter().chain(rest).collect::<Vec<_>>())
+                .copied(),
             (t, [f]) => {
                 let id = self.member_id(&t)?;
                 let v = self.fields.as_ref()?.field(self.self_id?, id, *f)?;
@@ -1768,10 +1821,8 @@ impl<'a> Vm<'a> {
         }
     }
 
-    /// A new instance of the record at `template` (`spawn "New Info"`): a fresh object id
-    /// in the shared store, with the template's current values, references and sets
-    /// copied under it (as a clone copies its template's fields).
-    fn instantiate(&mut self, template: &[Ref]) -> Vec<Ref> {
+    /// A fresh, empty data object in the shared store.
+    fn new_instance(&mut self) -> Vec<Ref> {
         let counter = vec![Ref::Obj(INSTANCE_BASE)];
         let n = self
             .vars_of(&counter)
@@ -1780,7 +1831,26 @@ impl<'a> Vm<'a> {
             + 1;
         self.vars_of_mut(&counter)
             .insert(counter.clone(), Value::Int(n as i32));
-        let inst = vec![Ref::Obj(INSTANCE_BASE + n)];
+        vec![Ref::Obj(INSTANCE_BASE + n)]
+    }
+
+    /// The list a `<list>.count` path names, when it is a script variable path (not an
+    /// engine or global-export field).
+    fn list_of_count(&self, lhs: &[Ref]) -> Option<Vec<Ref>> {
+        let p = self.canon(lhs).ok()?;
+        let (Ref::Handle(c), list) = p.split_last()? else {
+            return None;
+        };
+        (self.set.engine_key(&[Ref::Handle(*c)]) == Some(vec![SET_COUNT])
+            && matches!(list.first(), Some(Ref::Obj(_))))
+        .then(|| list.to_vec())
+    }
+
+    /// A new instance of the record at `template` (`spawn "New Info"`): a fresh object id
+    /// in the shared store, with the template's current values, references and sets
+    /// copied under it (as a clone copies its template's fields).
+    fn instantiate(&mut self, template: &[Ref]) -> Vec<Ref> {
+        let inst = self.new_instance();
         let under = |k: &Vec<Ref>| -> Option<Vec<Ref>> {
             k.starts_with(template)
                 .then(|| inst.iter().chain(&k[template.len()..]).copied().collect())
@@ -1804,6 +1874,19 @@ impl<'a> Vm<'a> {
         self.refs_of_mut(&inst).extend(refs);
         self.sets_of_mut(&inst).extend(sets);
         inst
+    }
+
+    /// The slot an `OpSetReference` rebinds: the variable path itself, with only what leads
+    /// to it canonicalized (a variable holding an alias is rebound, not its target).
+    fn ref_slot(&self, lhs: &[Ref]) -> Result<Vec<Ref>, i32> {
+        match lhs.split_last() {
+            Some((last, prefix)) if !prefix.is_empty() => {
+                let mut p = self.canon(prefix)?;
+                p.push(*last);
+                Ok(p)
+            }
+            _ => Ok(lhs.to_vec()),
+        }
     }
 
     /// A path through a reference to another actor (`Current_BattleMaster.x`): its id and
@@ -2062,6 +2145,7 @@ impl<'a> Vm<'a> {
         sub.sets = std::mem::take(&mut self.global_sets);
         sub.engine = std::mem::take(&mut self.engine);
         sub.board = std::mem::take(&mut self.board);
+        sub.ref_board = std::mem::take(&mut self.ref_board);
         sub.set_counts = std::mem::take(&mut self.set_counts);
         sub.globals = std::mem::take(&mut self.globals);
         sub.clone_ids = std::mem::take(&mut self.clone_ids);
@@ -2091,6 +2175,7 @@ impl<'a> Vm<'a> {
         self.global_sets = std::mem::take(&mut sub.sets);
         self.engine = std::mem::take(&mut sub.engine);
         self.board = std::mem::take(&mut sub.board);
+        self.ref_board = std::mem::take(&mut sub.ref_board);
         self.set_counts = std::mem::take(&mut sub.set_counts);
         self.globals = std::mem::take(&mut sub.globals);
         self.clone_ids = std::mem::take(&mut sub.clone_ids);
@@ -2175,6 +2260,8 @@ impl<'a> Vm<'a> {
                 serial,
                 seed,
                 setup,
+                named_vars,
+                named_refs,
             } => Effect::Spawn {
                 op,
                 template,
@@ -2186,6 +2273,8 @@ impl<'a> Vm<'a> {
                     .into_iter()
                     .filter_map(|e| self.localize_global(g, e))
                     .collect(),
+                named_vars,
+                named_refs,
             },
             e => e,
         })
@@ -2223,10 +2312,14 @@ impl<'a> Vm<'a> {
             if rhs.is_none() {
                 let name = self.set.var_name(var);
                 let ref_args = ref_args.unwrap_or_default();
-                let t = ref_args
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map_or(RefTarget::Null, |(_, t)| t.clone());
+                // Without an argument: the param's own default (`RHSReferenceStack` +0x30,
+                // e.g. `my` for "Transport - Startup"'s "transport"), else `null`.
+                let t = match ref_args.iter().find(|(n, _)| n == name) {
+                    Some((_, t)) => t.clone(),
+                    None => self
+                        .ref_arg_path(var)
+                        .map_or(RefTarget::Null, |p| self.ref_target(&p)),
+                };
                 self.refs.insert(vec![Ref::Obj(var)], t);
             }
         }
@@ -2388,6 +2481,20 @@ impl<'a> Vm<'a> {
                     } else {
                         1
                     };
+                    // `inc <list>.count` appends a new (empty) record, `dec` drops the last
+                    // (`Combat.ai`: `inc @e678c."active".count`, then `.last`).
+                    if let Some(list) = self.list_of_count(lhs) {
+                        if d == 0 {
+                            let inst = self.new_instance();
+                            self.sets_of_mut(&list)
+                                .entry(list)
+                                .or_default()
+                                .push(RefTarget::Alias(inst));
+                        } else if let Some(s) = self.sets_of_mut(&list).get_mut(&list) {
+                            s.pop();
+                        }
+                        continue;
+                    }
                     let v = arith(self.read(lhs), d, Value::Int(1))?;
                     self.write(lhs, v);
                 }
@@ -2406,13 +2513,20 @@ impl<'a> Vm<'a> {
                         }
                         None => self.ref_target(rhs),
                     };
-                    // `global.bld` state is shared: store what every actor can read.
-                    let t = if self.home.is_some() {
-                        self.absolute(t)
-                    } else {
-                        t
-                    };
-                    if let Ok(p) = self.canon(lhs) {
+                    // Shared state (`global.bld`, data-object instances): store what every
+                    // actor can read.
+                    if let Some((a, name)) = self.canon(lhs).ok().and_then(|p| self.found_slot(&p))
+                    {
+                        let t = self.absolute(t);
+                        self.ref_board.entry(a).or_default().insert(name, t);
+                        continue;
+                    }
+                    if let Ok(p) = self.ref_slot(lhs) {
+                        let t = if self.home.is_some() || is_instance(&p) {
+                            self.absolute(t)
+                        } else {
+                            t
+                        };
                         self.refs_of_mut(&p).insert(p, t);
                     }
                 }
@@ -2481,8 +2595,8 @@ impl<'a> Vm<'a> {
                         let rel_group = self.members(group);
                         let group: Vec<RefTarget> =
                             rel_group.iter().map(|m| self.absolute(m.clone())).collect();
-                        // What is stored: absolute in shared `global.bld` sets.
-                        let stored = if self.home.is_some() {
+                        // What is stored: absolute in shared sets (`global.bld`, instances).
+                        let stored = if self.home.is_some() || is_instance(&key) {
                             group.clone()
                         } else {
                             rel_group
@@ -2776,6 +2890,7 @@ impl<'a> Vm<'a> {
                     let end = (pc + skip).min(to);
                     let flow = self.run(si, pc, end);
                     let done = self.spawning.pop().expect("pushed above");
+                    let slot = usize::MAX - self.spawning.len();
                     self.effects.push(Effect::Spawn {
                         op: ins.offset,
                         template: template.clone(),
@@ -2784,6 +2899,8 @@ impl<'a> Vm<'a> {
                         serial,
                         seed: done.seed,
                         setup: done.setup,
+                        named_vars: self.board.remove(&slot).unwrap_or_default(),
+                        named_refs: self.ref_board.remove(&slot).unwrap_or_default(),
                     });
                     if let Flow::Return = flow? {
                         return Ok(Flow::Return);
@@ -2793,6 +2910,20 @@ impl<'a> Vm<'a> {
                 // A variable of another placed actor: the block runs with the op meaning
                 // that variable. Anything else is not found: the block is skipped.
                 Op::FindVariable { name, target } => {
+                    // The clone being set up (`find variable "flight path" on @spawn` in its
+                    // setup block): a slot that travels with its `Effect::Spawn`.
+                    if let RefTarget::Spawned(s) = self.ref_target(target) {
+                        if let Some(i) = self.spawning.iter().position(|x| x.serial == s) {
+                            let slot = usize::MAX - i;
+                            self.board
+                                .entry(slot)
+                                .or_default()
+                                .entry(name.clone())
+                                .or_insert(Value::Int(0));
+                            self.found.insert(ins.offset, (slot, name.clone()));
+                            continue;
+                        }
+                    }
                     let actor = self
                         .board_key(target)
                         .filter(|a| self.board.get(a).is_some_and(|v| v.contains_key(name)));
@@ -3005,9 +3136,9 @@ impl<'a> Vm<'a> {
             // `<script set>.count`.
             [ref set @ .., Ref::Handle(c)]
                 if self.set.engine_key(&[Ref::Handle(c)]) == Some(vec![SET_COUNT])
-                    && self.sets.contains_key(set) =>
+                    && self.sets_of(set).contains_key(set) =>
             {
-                Some(Value::Int(self.sets[set].len() as i32))
+                Some(Value::Int(self.sets_of(set)[set].len() as i32))
             }
             // `<global set>.count`: what the engine put in it, else its static members.
             [Ref::Handle(h), Ref::Handle(c)]
@@ -4106,6 +4237,180 @@ mod tests {
     }
 
     #[test]
+    fn vm_inc_count_grows_a_list_of_records() {
+        // `Combat.ai`: `inc "active".count; "info" = "active".last; "info".creature = ...`.
+        let (list, info, f, n, r) = (0x100, 0x110, 0x120, 0x130, 0x140);
+        let mut s = script_set(
+            vec![
+                ins(1, 9, Op::DefineMacro { name: "m".into() }),
+                ins(2, 2, Op::Interface),
+                param(n, PARAM_OUTPUT, Some(lit(I(0)))),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(list), Ref::Handle(0)],
+                    },
+                ),
+                ins(
+                    4,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(list), Ref::Handle(0)],
+                    },
+                ),
+                ins(
+                    5,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(info)],
+                        rhs: vec![Ref::Obj(list), Ref::Handle(1)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    6,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(info), Ref::Obj(f)],
+                        rhs: lit(I(5)),
+                    },
+                ),
+                ins(
+                    7,
+                    0,
+                    set(
+                        n,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(list), Ref::Handle(0)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+                ins(
+                    8,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(info), Ref::Obj(f)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[
+                (list, "active"),
+                (info, "info"),
+                (f, "creature"),
+                (n, "n"),
+                (r, "r"),
+            ],
+        );
+        s.handle_ids = vec![SET_COUNT, LAST];
+        s.handle_ns = vec![name_hash("level.bld"); 2];
+        let out = Vm::new(&s, None).call("m", &[]).unwrap();
+        assert_eq!(out_of(out.clone(), "n"), I(2));
+        assert_eq!(out_of(out, "r"), I(5));
+    }
+
+    #[test]
+    fn vm_reference_param_takes_its_default() {
+        // "Transport - Startup"'s "transport" defaults to `my` (`RHSReferenceStack` +0x30)
+        // when the call passes none.
+        let (p, out, r) = (0x200, 0x210, 0x220);
+        let mut s = script_set(
+            vec![
+                ins(1, 3, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(p, 0, None),
+                ins(
+                    3,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(out)],
+                        rhs: vec![Ref::Obj(p)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    10,
+                    3,
+                    Op::DefineMacro {
+                        name: "caller".into(),
+                    },
+                ),
+                ins(11, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(12, 0, Op::UseMacro { target: Some(1) }),
+            ],
+            &[(p, "transport"), (out, "out"), (r, "r")],
+        );
+        s.handle_ids = vec![MY_HASH];
+        s.handle_ns = vec![name_hash("level.bld")];
+        s.opaque_operands.insert(
+            p,
+            vec![(
+                0x30,
+                OpaqueOperand::Path {
+                    stack: "RHSReferenceStack".into(),
+                    path: vec![Ref::Handle(0)],
+                },
+            )],
+        );
+        let mut vm = Vm::new(&s, None);
+        vm.call("caller", &[]).unwrap();
+        assert_eq!(
+            vm.ref_target(&[Ref::Obj(out)]),
+            RefTarget::Engine(vec![MY_HASH])
+        );
+    }
+
+    #[test]
+    fn vm_set_reference_rebinds_an_alias_variable() {
+        // `"My Info" = <other>` rebinds the variable; the record it stood for keeps its own
+        // binding.
+        let (rec, v, other) = (0x300, 0x310, 0x320);
+        let mut s = script_set(
+            vec![
+                ins(1, 2, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(
+                    3,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(v)],
+                        rhs: vec![Ref::Obj(other)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            &[(rec, "New Info"), (v, "My Info"), (other, "Other")],
+        );
+        s.placements.insert(other);
+        let mut vm = Vm::new(&s, None);
+        vm.refs
+            .insert(vec![Ref::Obj(v)], RefTarget::Alias(vec![Ref::Obj(rec)]));
+        vm.call("m", &[]).unwrap();
+        assert_eq!(
+            vm.refs.get(&vec![Ref::Obj(v)]),
+            Some(&RefTarget::Placement(other))
+        );
+        assert_eq!(vm.refs.get(&vec![Ref::Obj(rec)]), None);
+    }
+
+    #[test]
     fn vm_budget() {
         let x = 0x100;
         let s = script_set(
@@ -4157,17 +4462,21 @@ mod tests {
     }
 
     #[test]
-    fn rom_records_are_variables_with_members() {
+    fn rom_records_are_structure_typed_variables() {
         let (Some(arena), Some(g)) = (
             read_bld("level", "Arena_Challenge_300_000").and_then(|d| ScriptSet::parse(&d)),
             read_bld("permanent", "global").and_then(|d| ScriptSet::parse(&d)),
         ) else {
             return;
         };
-        // `Transport_Macros.ai` "New Info" (spawned and returned by reference) has members;
-        // `Sky_Traps.ai` "trapping data" too, but its "defeated actor" field is a leaf.
+        // `Transport_Macros.ai` "New Info" (spawned and returned by reference) is typed by an
+        // `OpDefineStructure`; `Sky_Traps.ai` "trapping data" is a `ScriptStructure`, its
+        // "defeated actor" field is not a record.
         assert_eq!(arena.var_name(0x1bb1f8), "New Info");
         assert!(arena.records.contains(&0x1bb1f8));
+        // "Enemy - payload" is dereferenced too, but typed by an engine class: a reference.
+        assert_eq!(arena.var_name(0x1bd340), "Enemy - payload");
+        assert!(!arena.records.contains(&0x1bd340));
         assert!(g.records.contains(&0x296dec));
         assert!(!g.records.contains(&0x29fe78));
     }

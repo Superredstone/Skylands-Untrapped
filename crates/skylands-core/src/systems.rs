@@ -2012,7 +2012,14 @@ pub fn actor_script_system(
         };
         refs.0.clear();
     }
-    let held: Vec<Entity> = refs.0.values().copied().collect();
+    // On the board too: actors a `PlacementReference` holds and every script clone (scripts
+    // reach those through references: `find variable "enemy1L" on "transport"`).
+    let held: Vec<Entity> = refs
+        .0
+        .values()
+        .copied()
+        .chain(clones.iter().map(|(e, _)| e))
+        .collect();
     let mut clone_ids: std::collections::HashMap<Entity, Vec<(u32, Entity)>> = Default::default();
     for (e, c) in &clones {
         clone_ids.entry(c.parent).or_default().push((c.serial, e));
@@ -2044,6 +2051,10 @@ pub fn actor_script_system(
                 .vars
                 .entry(key)
                 .or_insert_with(|| scripts.0.export_vars(actor.script, &actor.state));
+            board
+                .refs
+                .entry(key)
+                .or_insert_with(|| scripts.0.export_refs(actor.script, &actor.state));
         }
     }
     let talking_npc = dialogue.as_ref().and_then(|d| d.npc);
@@ -2074,6 +2085,9 @@ pub fn actor_script_system(
         if let Some(vals) = on_board.and_then(|p| board.vars.get(&p)) {
             scripts.0.import_vars(actor.script, &mut actor.state, vals);
         }
+        if let Some(refs) = on_board.and_then(|p| board.refs.get(&p)) {
+            scripts.0.import_refs(actor.script, &mut actor.state, refs);
+        }
         // References as this actor sees them: itself is `my`, its clones are serials.
         let own_clones = clone_ids
             .get(&entity)
@@ -2098,11 +2112,13 @@ pub fn actor_script_system(
             }
         }
         actor.state.board = std::mem::take(&mut board.vars);
+        actor.state.ref_board = std::mem::take(&mut board.refs);
         actor.state.global_vars = std::mem::take(&mut board.global_vars);
         actor.state.global_refs = std::mem::take(&mut board.global_refs);
         actor.state.global_sets = std::mem::take(&mut board.global_sets);
         scripts.0.tick(actor.script, &mut actor.state, dt);
         board.vars = std::mem::take(&mut actor.state.board);
+        board.refs = std::mem::take(&mut actor.state.ref_board);
         board.global_vars = std::mem::take(&mut actor.state.global_vars);
         board.global_refs = std::mem::take(&mut actor.state.global_refs);
         board.global_sets = std::mem::take(&mut actor.state.global_sets);
@@ -2126,6 +2142,8 @@ pub fn actor_script_system(
         if let Some(p) = on_board {
             let vars = scripts.0.export_vars(actor.script, &actor.state);
             board.vars.insert(p, vars);
+            let refs = scripts.0.export_refs(actor.script, &actor.state);
+            board.refs.insert(p, refs);
         }
         {
             for (pr, before) in seeded {
@@ -2348,6 +2366,8 @@ fn spawn_script_clone(
         serial,
         seed,
         setup,
+        named_vars,
+        named_refs,
         ..
     } = spawn
     else {
@@ -2393,6 +2413,9 @@ fn spawn_script_clone(
         ActorAnimation::default(),
     ));
     if let Some(si) = script {
+        // Its script variables the setup block wrote through `OpFindVariable`.
+        program.import_vars(si, &mut state, &named_vars);
+        program.import_refs(si, &mut state, &named_refs);
         if state.get(&[MY, SCALE, UNIFORM]).is_none() {
             state.set(&[MY, SCALE, UNIFORM], 100.0);
         }
