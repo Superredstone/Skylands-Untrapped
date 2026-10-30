@@ -284,6 +284,10 @@ pub struct ScriptSet {
     /// `OpSetReference._indexRHS` (+0x24) by op offset: the element of a list the
     /// reference takes (`.waypoints[i]`).
     pub ref_index: HashMap<usize, Rhs>,
+    /// Variables with members: some path in the file goes through them to another
+    /// object (`"New Info"."Transport Type"`). Such a record is an object a reference can
+    /// point at; an unset reference field (`"defeated actor"`) is `null`.
+    pub records: HashSet<usize>,
     /// `OpUseMacro` ops whose target is a variable holding a macro (`ScriptGroupStack`
     /// path `"info"."Transport Type".<macro>`, `_editType` +0x18 = the base macro), by op.
     pub use_paths: HashMap<usize, Vec<Ref>>,
@@ -788,6 +792,19 @@ impl ScriptSet {
             .filter(|o| o.type_name.as_deref() == Some("OpSetReference"))
             .filter_map(|o| Some((o.offset, r.rhs_at(o.offset + 0x24)?)))
             .collect();
+        let records = objects
+            .iter()
+            .filter(|o| o.type_name.as_deref().is_some_and(|t| t.ends_with("Stack")))
+            .flat_map(|o| {
+                let path = r.path(o.offset);
+                path.windows(2)
+                    .filter_map(|w| match w {
+                        [Ref::Obj(a), _] => Some(*a),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let use_paths = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("OpUseMacro"))
@@ -889,6 +906,7 @@ impl ScriptSet {
             templates,
             waypoints,
             ref_index,
+            records,
             use_paths,
             placement_refs,
             set_names,
@@ -1532,7 +1550,11 @@ impl<'a> Vm<'a> {
                     )
                 }) && (1..=p.len()).all(|k| !self.refs.contains_key(&p[..k])) =>
             {
-                RefTarget::Null
+                // The record itself (`"New Info"`, returned by reference) or an unset field.
+                match p.last() {
+                    Some(Ref::Obj(last)) if self.set.records.contains(last) => RefTarget::Alias(p),
+                    _ => RefTarget::Null,
+                }
             }
             _ => RefTarget::Unknown,
         }
@@ -2552,6 +2574,20 @@ impl<'a> Vm<'a> {
                             _ => None,
                         },
                     };
+                    // `0x8007c6bc` step 2: a template that is not a placement (a record such
+                    // as `"New Info"`) makes a data object, not an actor; the op means it in
+                    // its block and after. Here it stands for the template record itself
+                    // (copy semantics not reversed; exact for one instance per actor).
+                    if actor.is_none() && referenced.is_none() {
+                        if let Ok(p) = self.canon(template) {
+                            if matches!(p.last(), Some(Ref::Obj(v)) if self.set.records.contains(v))
+                            {
+                                self.refs
+                                    .insert(vec![Ref::Obj(ins.offset)], RefTarget::Alias(p));
+                                continue;
+                            }
+                        }
+                    }
                     let (Some(template), Some(at)) = (actor.as_ref().or(referenced), at) else {
                         pc += skip;
                         continue;
@@ -2683,8 +2719,15 @@ impl<'a> Vm<'a> {
         let mut p = path.to_vec();
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
-            if let Some(RefTarget::Alias(a)) = self.refs.get(&p[..1]) {
-                p = a.iter().chain(&p[1..]).copied().collect();
+            // A record reached through an alias at any prefix: that record's path.
+            if let Some((k, a)) = (1..=p.len())
+                .rev()
+                .find_map(|k| match self.refs.get(&p[..k]) {
+                    Some(RefTarget::Alias(a)) => Some((k, a.clone())),
+                    _ => None,
+                })
+            {
+                p = a.into_iter().chain(p[k..].iter().copied()).collect();
                 continue;
             }
             let alias = self
@@ -3759,6 +3802,81 @@ mod tests {
     }
 
     #[test]
+    fn vm_spawned_record_is_returned_by_reference() {
+        // `Transport_Macros.ai` "Transport - Startup": fill `"New Info"`, `spawn "New Info"`,
+        // `"returned info" = @spawn`; the caller then writes through `"returned info"`.
+        let (rec, f, out, r, sp) = (0x100, 0x110, 0x120, 0x130, 0x200);
+        let mut s = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(rec), Ref::Obj(f)],
+                        rhs: lit(I(2)),
+                    },
+                ),
+                ins(
+                    sp,
+                    0,
+                    Op::Spawn {
+                        template: vec![Ref::Obj(rec)],
+                        actor: None,
+                        at: Vec::new(),
+                        facing: Some(lit(I(0))),
+                    },
+                ),
+                ins(
+                    4,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(out)],
+                        rhs: vec![Ref::Obj(sp)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    5,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(out), Ref::Obj(f)],
+                    },
+                ),
+                ins(
+                    6,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(rec), Ref::Obj(f)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[
+                (rec, "New Info"),
+                (f, "x"),
+                (out, "returned info"),
+                (r, "r"),
+            ],
+        );
+        s.vars.get_mut(&rec).unwrap().type_name = "OpCreateVariable".into();
+        s.vars.get_mut(&out).unwrap().type_name = "OpCreateVariable".into();
+        // `"New Info"` has members (a path goes through it).
+        s.records.insert(rec);
+        assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(3));
+    }
+
+    #[test]
     fn vm_budget() {
         let x = 0x100;
         let s = script_set(
@@ -3807,6 +3925,22 @@ mod tests {
         let g = ScriptSet::parse(&read_bld("permanent", "global")?)?;
         let l = ScriptSet::parse(&read_bld("level", "Level_302_Chompywurm")?)?;
         Some((g, l))
+    }
+
+    #[test]
+    fn rom_records_are_variables_with_members() {
+        let (Some(arena), Some(g)) = (
+            read_bld("level", "Arena_Challenge_300_000").and_then(|d| ScriptSet::parse(&d)),
+            read_bld("permanent", "global").and_then(|d| ScriptSet::parse(&d)),
+        ) else {
+            return;
+        };
+        // `Transport_Macros.ai` "New Info" (spawned and returned by reference) has members;
+        // `Sky_Traps.ai` "trapping data" too, but its "defeated actor" field is a leaf.
+        assert_eq!(arena.var_name(0x1bb1f8), "New Info");
+        assert!(arena.records.contains(&0x1bb1f8));
+        assert!(g.records.contains(&0x296dec));
+        assert!(!g.records.contains(&0x29fe78));
     }
 
     #[test]

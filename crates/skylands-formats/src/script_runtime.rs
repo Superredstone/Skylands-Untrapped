@@ -173,6 +173,11 @@ impl ActorScriptState {
         self.behavior
     }
 
+    /// Every stored reference (path -> target), for debugging.
+    pub fn references(&self) -> impl Iterator<Item = (&Vec<Ref>, &RefTarget)> {
+        self.refs.iter()
+    }
+
     /// What the reference variable or `PlacementReference` object `obj` holds.
     pub fn reference(&self, obj: usize) -> Option<&RefTarget> {
         self.refs.get(&vec![Ref::Obj(obj)])

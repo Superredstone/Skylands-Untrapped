@@ -257,7 +257,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     field through the subset not yet) for the next waypoint; "Movement - Set Velocity" + core mover (done: weight seeded,
     velocity moves scripted actors); waypoint lists, indexed references and fields of referenced objects done; op trace added
     and three VM gaps it found fixed (null never-set records, dynamic macro dispatch, record aliasing), see
-    `agent/SCRIPT_VM.md`; the transport still keeps velocity 0, next: re-trace from "Airship - Movement"); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    `agent/SCRIPT_VM.md`; records and data-object spawns now resolve the transport's "info" chain and it runs its
+    startup sequence (attaching passengers); it has not set off within 15 s, next: trace "Activate and Attach Enemies"); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).

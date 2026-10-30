@@ -208,7 +208,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   3. Records passed by reference: a reference argument whose path is a plain variable no reference
      was stored in (`"My Info"` passed as `"info"`) becomes `RefTarget::Alias(path)`; `canon`
      rewrites paths through the param to the caller's variable.
-  The transport still keeps `velocity.length = 0` after these (not traced further yet).
+  4. Records: a variable with members (a path goes through it to another object,
+     `ScriptSet::records`) is an object; an unset path naming one means the record itself
+     (`Alias`), an unset leaf field stays `null`. `canon` follows an alias at any prefix.
+  5. Data objects: `"Transport - Startup"` fills `"New Info"`, `spawn "New Info"` (a record, not a
+     placement: `0x8007c6bc` step 2 makes a data object) and returns `"returned info" = @spawn`.
+     The VM makes `@spawn` an alias of the template record (copy semantics not reversed; exact for
+     one instance per actor, several instances from one record would share it).
+  After these the transport's records resolve (`"My Info"` -> `"New Info"`, `"Transport Type"` ->
+  `"Helecopter Dropship"` with its "Airship - *" macros) and it runs its real startup sequence
+  ("Transport - Activate and Attach Enemies", `"startup state"` 7, attaching passengers). It has
+  not set off within 15 s yet; next blocker is further along that sequence (not traced yet).
+  `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
+  lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and
   headless runners that run the schedule directly.
 - `tint.alpha` (`5c35de8c.5d8b6dab`, 0..255; the only `tint` field hub scripts use, 124 times):

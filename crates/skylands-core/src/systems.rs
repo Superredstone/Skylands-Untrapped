@@ -4556,6 +4556,7 @@ mod tests {
             waypoints: Default::default(),
             ref_index: Default::default(),
             use_paths: Default::default(),
+            records: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -4652,6 +4653,7 @@ mod tests {
             waypoints: Default::default(),
             ref_index: Default::default(),
             use_paths: Default::default(),
+            records: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
