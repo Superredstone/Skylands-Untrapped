@@ -350,11 +350,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         passed by reference is an alias of itself, and placements in it are measured by
         `MemberFields::placement_field` (`find subset of "available landing queues"
         where .distance < 200`).
-  Now: stage 1 dropships fly to their dock waypoint, dock (~10 s) and unload; the arena
-  moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the passengers stay
-  "disabled" in their own scripts (their activation through the creature state system
-  not traced). After unloading, the dropships fly level past their last waypoint 155 ft
-  higher: "Nav - vert accel" stays 0.
+  28. Vertical flight: "Nav - vert accel" maps the transport's `vertical offset`
+      (`6c749d1e`) measured from "Nav - Move Target" onto [max vert accel, 0]. That read
+      is a macro argument: reads in an argument are keyed by the parameter op
+      (`Vm::cur_op` = the parameter while its argument evaluates). Core answers
+      `vertical offset` / `vertical difference` (`ecfb5226`) as the object's height above
+      the reference, in feet.
+  Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
+  unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
+  passengers stay "disabled" in their own scripts (their activation through the creature
+  state system not traced). After unloading, the dropships fly on past their last
+  waypoint and keep climbing; what should end their flight is not traced.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

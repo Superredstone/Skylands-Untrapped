@@ -2614,6 +2614,7 @@ impl<'a> Vm<'a> {
         let params = self.param_rhs(si, oi);
         for &(var, _, rhs) in &params {
             if let Some(rhs) = rhs {
+                self.cur_op = var;
                 let v = self.eval(rhs)?;
                 self.write(&[Ref::Obj(var)], v);
             }
@@ -2727,7 +2728,11 @@ impl<'a> Vm<'a> {
         let mut ref_args = Vec::new();
         for &(var, flags, rhs) in &site {
             match (flags & PARAM_OUTPUT, rhs) {
-                (0, Some(rhs)) => args.push((self.set.var_name(var).to_string(), self.eval(rhs)?)),
+                (0, Some(rhs)) => {
+                    // Reads in the argument are keyed by the parameter op (its `+0x30`).
+                    self.cur_op = var;
+                    args.push((self.set.var_name(var).to_string(), self.eval(rhs)?))
+                }
                 // A reference argument: the call site's `RHSReferenceStack` (+0x30).
                 (0, None) => {
                     if let Some(path) = self.ref_arg_path(var) {

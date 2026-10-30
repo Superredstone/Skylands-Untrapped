@@ -2269,6 +2269,8 @@ impl ActorFieldSnapshot {
         match field {
             0x2eb3_1462 => Some(d.length() * FEET_PER_METRE),
             0x9059_dae4 => Some(flat * FEET_PER_METRE),
+            // `vertical offset` / `vertical difference`: the object above the reference.
+            0x6c74_9d1e | 0xecfb_5226 => Some(d.y * FEET_PER_METRE),
             0x9f48_1715 => Some(d.x.atan2(d.z).to_degrees()),
             0xbd32_4ab1 => Some(d.y.atan2(flat).to_degrees()),
             _ => None,
@@ -4395,6 +4397,9 @@ mod tests {
         assert_eq!(snap.field(1, 3, 0x9f48_1715), Some(0.0));
         assert_eq!(snap.field(1, 2, 0x9f48_1715), Some(90.0));
         assert_eq!(snap.field(1, 9, 0x2eb3_1462), None);
+        // `vertical offset` / `vertical difference`: 4 m above, in feet.
+        assert_eq!(snap.field(1, 2, 0x6c74_9d1e), Some(4.0 * FEET_PER_METRE));
+        assert_eq!(snap.field(1, 2, 0xecfb_5226), Some(4.0 * FEET_PER_METRE));
         // Waypoints are in world space, whatever the path placement's transform.
         assert_eq!(
             snap.waypoint_field(1, 0x40, [0.0, 10.0, 10.0], 0xbd32_4ab1),
@@ -5362,6 +5367,15 @@ mod tests {
             .map(|(a, t, _)| t.translation.distance(a.base.translation))
             .fold(0.0f32, f32::max);
         assert!(moved > 50.0, "{moved}");
+        // They climb to the dock waypoint's height (155.9): "Nav - vert accel" maps the
+        // transport's `vertical offset` from its move target (a macro argument's reference
+        // point).
+        let top = q
+            .iter(world)
+            .filter(|(_, _, c)| c.template == "GroupTransport_Helecopter")
+            .map(|(_, t, _)| t.translation.y)
+            .fold(f32::MIN, f32::max);
+        assert!((top - 155.9).abs() < 1.0, "{top}");
         // At their dock waypoint (world positions) they set "Command - docked" in their
         // "My Info", which the arena reads; "Single Enemy Unload" finds a landing queue
         // (`Landing_Queues`) within 200 ft and the stage moves on (~25 s).
