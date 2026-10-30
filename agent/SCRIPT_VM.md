@@ -311,9 +311,14 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       - `displace my.velocity len heading pitch` adds that vector to the velocity (length,
         heading, pitch, horizontal length, vertical difference). This is how
         Transport_Macros accelerates.
-  Now: the arena's dropships fly (velocity up to about 70) after their move targets, through
-  the stages. They overshoot and turn back (heading flips); the feet factor of
-  `distance` (tolerances are in feet) is a likely cause. Not checked against the game.
+  24. Units: scripts measure in feet, the world is in metres. The `distance` getter
+      multiplies by 3.2808399, its setter (`0x80075348`) and `OpDisplace` (`0x8007d58c`)
+      by 0.3048. Core answers `distance` / `horizontal distance` in feet. It keeps
+      `ActorScriptState::displacement` (and `vertical offset`, velocity) in feet and places
+      actors and markers at `x 0.3048` (`FEET_PER_METRE`, `METRES_PER_FOOT`).
+  Now: a stage 1 dropship flies about 640 ft at 70 ft/s, turns back once at ~15 s and
+  settles on a waypoint by ~28 s. It flies level (pitch 0) on one line. Not checked against
+  the game: the turn-back, where it should unload, the passengers.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

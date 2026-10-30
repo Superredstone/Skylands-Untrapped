@@ -135,7 +135,8 @@ pub struct ActorScriptState {
     /// the tick and takes it back after.
     pub board: VarBoard,
     pub ref_board: RefBoard,
-    /// Sum of `OpDisplace` moves of `my`, world units (heading 0 = +Z, pitch 90 = up).
+    /// Sum of `OpDisplace` moves of `my`, in feet as scripts measure (heading 0 = +Z,
+    /// pitch 90 = up); the engine places the actor in metres (`0.3048` per foot).
     pub displacement: [f32; 3],
     /// `OpRemove my` ran.
     pub removed: bool,

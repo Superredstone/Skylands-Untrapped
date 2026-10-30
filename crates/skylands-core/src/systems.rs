@@ -2199,7 +2199,8 @@ pub fn actor_script_system(
         let turn = Quat::from_euler(EulerRot::ZYX, angle(ROLL), angle(FACING), angle(TILT));
         let lift = Vec3::Y * st.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
         let scale = st.get(&[MY, SCALE, UNIFORM]).unwrap_or(100.0) / 100.0;
-        transform.translation = actor.base.translation + lift + Vec3::from(st.displacement);
+        transform.translation =
+            actor.base.translation + (lift + Vec3::from(st.displacement)) * METRES_PER_FOOT;
         transform.rotation = actor.base.rotation * turn;
         transform.scale = actor.base.scale * scale;
         if let Some(mut tint) = tint {
@@ -2255,8 +2256,8 @@ impl ActorFieldSnapshot {
     fn towards(d: Vec3, field: u32) -> Option<f32> {
         let flat = Vec2::new(d.x, d.z).length();
         match field {
-            0x2eb3_1462 => Some(d.length()),
-            0x9059_dae4 => Some(flat),
+            0x2eb3_1462 => Some(d.length() * FEET_PER_METRE),
+            0x9059_dae4 => Some(flat * FEET_PER_METRE),
             0x9f48_1715 => Some(d.x.atan2(d.z).to_degrees()),
             0xbd32_4ab1 => Some(d.y.atan2(flat).to_degrees()),
             _ => None,
@@ -2359,13 +2360,19 @@ pub fn clone_effect_system(
                 if let Some(mut t) = transform {
                     let (sh, ch) = heading.to_radians().sin_cos();
                     let (sp, cp) = pitch.to_radians().sin_cos();
-                    t.translation += len * Vec3::new(cp * sh, sp, cp * ch);
+                    t.translation += len * METRES_PER_FOOT * Vec3::new(cp * sh, sp, cp * ch);
                 }
             }
             other => debug!("Effect on script-less actor skipped: {other:?}"),
         }
     }
 }
+
+/// Scripts measure in feet, the world in metres: the `distance` getter (`0x80075154`)
+/// multiplies by this, its setter (`0x80075348`) and `OpDisplace` (`0x8007d58c`) by
+/// `METRES_PER_FOOT`.
+const FEET_PER_METRE: f32 = 3.280_84;
+const METRES_PER_FOOT: f32 = 0.3048;
 
 /// Engine state a placed actor's script starts with: `scale.uniform` 100, `tint.alpha`
 /// from its `Placement._tint` and `collision volume.weight` from its `CollisionInfo`.
@@ -2501,7 +2508,8 @@ fn spawn_script_clone(
     } else {
         let lift = Vec3::Y * state.get(&[MY, VERTICAL_OFFSET]).unwrap_or(0.0);
         clone.insert(Transform {
-            translation: base.translation + lift + Vec3::from(state.displacement),
+            translation: base.translation
+                + (lift + Vec3::from(state.displacement)) * METRES_PER_FOOT,
             ..base
         });
     }
@@ -4273,8 +4281,9 @@ mod tests {
                 Transform::from_xyz(0.0, 0.0, 10.0),
             )]),
         };
-        assert_eq!(snap.field(1, 2, 0x2eb3_1462), Some(5.0));
-        assert_eq!(snap.field(1, 2, 0x9059_dae4), Some(3.0));
+        // Lengths in feet (`0x80075154`: metres x 3.2808399).
+        assert_eq!(snap.field(1, 2, 0x2eb3_1462), Some(5.0 * FEET_PER_METRE));
+        assert_eq!(snap.field(1, 2, 0x9059_dae4), Some(3.0 * FEET_PER_METRE));
         // Heading 0 = +Z, 90 = +X (as `OpDisplace`).
         assert_eq!(snap.field(1, 3, 0x9f48_1715), Some(0.0));
         assert_eq!(snap.field(1, 2, 0x9f48_1715), Some(90.0));
@@ -4351,12 +4360,12 @@ mod tests {
             a.state.set(&[MY, VELOCITY, LENGTH], 60.0);
             a.state.set(&[MY, VELOCITY, HEADING], 90.0);
         }
-        // 1 s at 60 Hz: 60 units towards heading 90 (+X).
+        // 1 s at 60 Hz: 60 feet (18.288 m) towards heading 90 (+X).
         for _ in 0..60 {
             step_fixed(&mut app);
         }
         let t = app.world().get::<Transform>(mover).unwrap().translation;
-        assert!((t - Vec3::new(61.0, 2.0, 3.0)).length() < 1e-2, "{t}");
+        assert!((t - Vec3::new(19.288, 2.0, 3.0)).length() < 1e-2, "{t}");
     }
 
     #[test]
