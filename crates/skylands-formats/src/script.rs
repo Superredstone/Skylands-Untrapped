@@ -1781,6 +1781,9 @@ impl<'a> Vm<'a> {
 
     /// Element `i` of the list a path names: `<placement>.waypoints[i]`.
     fn indexed_target(&self, path: &[Ref], i: i64) -> RefTarget {
+        // `0x8008ca38`: the index wraps (`i % count`, plus `count` when negative); an empty
+        // list gives `null`. `"active dropships"[count - loop]` visits 0, then count - 1...
+        let wrap = |n: usize| (n > 0).then(|| i.rem_euclid(n as i64) as usize);
         let waypoints = match path.split_last() {
             Some((Ref::Handle(h), owner))
                 if self.set.engine_key(&[Ref::Handle(*h)]) == Some(vec![WAYPOINTS]) =>
@@ -1792,21 +1795,15 @@ impl<'a> Vm<'a> {
         // Element `i` of a set (`"active"[i]` in `Combat.ai` "Get Creature Info").
         let Some(owner) = waypoints else {
             let members = self.members(path);
-            return usize::try_from(i)
-                .ok()
+            return wrap(members.len())
                 .and_then(|i| members.get(i).cloned())
                 .unwrap_or(RefTarget::Null);
         };
         match self.ref_target(owner) {
-            RefTarget::Placement(o)
-                if usize::try_from(i)
-                    .is_ok_and(|i| i < self.home_waypoints(o).map_or(0, Vec::len)) =>
-            {
-                RefTarget::Waypoint {
-                    owner: o,
-                    index: i as usize,
-                }
-            }
+            RefTarget::Placement(o) => match wrap(self.home_waypoints(o).map_or(0, Vec::len)) {
+                Some(index) => RefTarget::Waypoint { owner: o, index },
+                None => RefTarget::Null,
+            },
             _ => RefTarget::Null,
         }
     }

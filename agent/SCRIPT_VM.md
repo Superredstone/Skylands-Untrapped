@@ -287,8 +287,15 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         records so, and the owner reads one as its own record (`Alias`, also through `canon`).
       - `find variable` on the actor itself binds its own variable (`Vm::own_vars`): "Artillery -
         Startup" keeps the spawned controller in "Mod Controller" on its own placement.
-  Now: stage 1 reaches "Stage 1 - 01 - Unload" at about 8 s; the dropships still do not fly
-  (docked at their first waypoint).
+  21. Indexed references wrap (`0x8008c99c`, at `0x8008ca38`): `i % count`, plus `count` when
+      negative; an empty list gives `null`. Loop counters are `OpLoop._index` (+0x1c), 0-based
+      (`OpLoopValue` execute `0x8008fecc` zeroes it, `0x8009009c` steps it), so "Stage 1 - 01 -
+      Unload"'s `"active dropships"[count - loop]` visits element 0 first.
+  Now: the arena runs its stages (stage 2 at ~30 s, "Stage 3 - 01 - Check" by 60 s), but no
+  dropship moves. Each one reads its own `distance` as 0, takes every waypoint as reached in
+  one go, runs "Transport - Shutdown" and is left parked. So an actor's `distance` cannot be
+  measured from itself: the engine measures it against something else, probably the move
+  target that "Nav - Move Target" displaces. Not reversed; that is the next blocker.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
 - Script time steps by `Time<Fixed>::timestep()` (1/60 s per `FixedUpdate`), also under test and

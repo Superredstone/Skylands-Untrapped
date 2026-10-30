@@ -1557,6 +1557,14 @@ mod tests {
 
     #[test]
     fn indexed_reference_takes_a_set_member() {
+        indexed_member(1.0, 1);
+        // `0x8008ca38` wraps the index: "Stage 1 - 01 - Unload" reads
+        // `"active dropships"[count - loop]`, element 0 first (2 % 2), then 1; -1 is the last.
+        indexed_member(2.0, 0);
+        indexed_member(-1.0, 1);
+    }
+
+    fn indexed_member(i: f32, expect: usize) {
         // `Combat.ai` "Get Creature Info": `"entry" = "active"[i]` over a set.
         let (set_v, entry, setref) = (0x700, 0x7a0, 0x7b0);
         let (a, b) = (0x880, 0x890);
@@ -1588,11 +1596,14 @@ mod tests {
             vec![],
         );
         p.set.placements.extend([a, b]);
-        p.set.ref_index.insert(setref, lit(1.0));
+        p.set.ref_index.insert(setref, lit(i));
         let mut st = ActorScriptState::default();
         p.tick(0, &mut st, 1.0 / 60.0);
         assert!(st.error.is_none(), "{:?}", st.error);
-        assert_eq!(st.reference(entry), Some(&RefTarget::Placement(b)));
+        assert_eq!(
+            st.reference(entry),
+            Some(&RefTarget::Placement([a, b][expect]))
+        );
     }
 
     #[test]

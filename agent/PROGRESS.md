@@ -264,7 +264,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     dropship); placement tags (`TagList` variables such as "flight path") and the `cos` / `tan` result
     funcs bring it to its first waypoint; arena mod switching (`StringInfo` ids, references to records,
     `find variable` on oneself) starts the artillery mod and stage 1 reaches its unload at ~8 s;
-    next: "Transport - Unload Dropship" and the dropships' flight, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
+    wrapping set indexes let the stages unload and advance (stage 3 by 60 s); next: what an
+    actor's `distance` measures, so the dropships fly, see `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.
   - [ ] Per-enemy-type stats (call sites pass `"enemy type"` references + difficulty levels), difficulty mode selection (save param via a `global.bld` macro).
