@@ -1503,6 +1503,10 @@ pub fn parse_record_key(key: &str) -> Option<(usize, Vec<Ref>)> {
     Some((var, rest))
 }
 
+/// Engine `Object Namer` and its `Name checksum` (cracked against `main.dol` strings).
+const OBJECT_NAMER: u32 = 0x9aae_6bad;
+const NAME_CHECKSUM: u32 = 0xba57_384d;
+
 /// Board slot of clone `serial` spawned this run, until `Vm::fold_spawn_slots`.
 fn spawn_slot(serial: u32) -> usize {
     usize::MAX / 2 - serial as usize
@@ -1929,6 +1933,28 @@ impl<'a> Vm<'a> {
                 }
                 _ => None,
             })
+    }
+
+    /// `Name checksum` of what the Object Namer `namer` (its handle) refers to: a reference
+    /// stored in one of its fields (`"Object Namer".<object> = enemyType`). ponytail: the
+    /// engine's checksum is not reversed; the name hash keeps equal names equal.
+    fn object_namer_checksum(&self, namer: &[Ref]) -> Option<Value> {
+        let held = self
+            .refs
+            .iter()
+            .find(|(k, _)| k.len() == 2 && k[..1] == *namer)?
+            .1;
+        let name = match *held {
+            RefTarget::Placement(o) => self
+                .set
+                .templates
+                .get(&o)
+                .or_else(|| self.home?.templates.get(&o))?
+                .name
+                .clone(),
+            _ => return None,
+        };
+        Some(Value::Int(name_hash(&name) as i32))
     }
 
     /// The reference point op `at` measures its LHS from (`ScriptSet::relative`).
@@ -3460,6 +3486,26 @@ impl<'a> Vm<'a> {
                 p = a.into_iter().chain(p[k..].iter().copied()).collect();
                 continue;
             }
+            // `<set>.first` / `.last` inside a longer path: that member's record
+            // (`"EnemyTypeDatas".last."lookupID" = ...`).
+            if let Some((k, a)) = (2..p.len()).find_map(|k| {
+                let Ref::Handle(h) = p[k - 1] else {
+                    return None;
+                };
+                let set = self.sets_of(&p[..k - 1]).get(&p[..k - 1])?;
+                let m = match self.set.engine_key(&[Ref::Handle(h)]).as_deref()? {
+                    [FIRST] => set.first()?,
+                    [LAST] => set.last()?,
+                    _ => return None,
+                };
+                match m {
+                    RefTarget::Alias(a) => Some((k, a.clone())),
+                    _ => None,
+                }
+            }) {
+                p = a.into_iter().chain(p[k..].iter().copied()).collect();
+                continue;
+            }
             let alias = self
                 .index
                 .aliases
@@ -3560,6 +3606,14 @@ impl<'a> Vm<'a> {
         }
         if let Some(v) = self.set.engine_key(&path).and_then(|k| self.engine.get(&k)) {
             return *v;
+        }
+        // `"Object Namer"."Name checksum"`: a checksum of the name of the object the
+        // namer was pointed at ("Enemy System - System - Init": the enemy type's
+        // "lookupID").
+        if self.set.engine_key(&path).as_deref() == Some(&[OBJECT_NAMER, NAME_CHECKSUM]) {
+            if let Some(v) = self.object_namer_checksum(&path[..1]) {
+                return v;
+            }
         }
         let init = match path[..] {
             [Ref::Obj(o)] => {

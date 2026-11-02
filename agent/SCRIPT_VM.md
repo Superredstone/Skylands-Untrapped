@@ -376,17 +376,23 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       - The creature's setup is the level stub "Enemy System - System - Init" (a
         `global.bld` macro): it spawns `"EnemySystem_Globals"."ForCloning_EnemyInfo"` as
         its "enemyInfo", finds its type in `"EnemySystem_Globals"."EnemyTypeDatas"` by
-        `lookupID` (`$9aae6bad.$ba57384d` of `my`, not named; it reads 0 here, so every
-        enemy type matches the first) or appends one ("returned - need things defined" =
-        1 for the first of a type), sets `"enemyInfo"."enemyTypeData" = @find.first` (or
+        `lookupID` or appends one ("returned - need things defined" = 1 for the first of
+        a type). `lookupID` is `"Object Namer"."Name checksum"` (`9aae6bad` /
+        `ba57384d`, cracked from `main.dol`) after `"Object Namer".$06254b22 =
+        enemyType`: a checksum of the enemy type placement's name. The engine's checksum
+        is not reversed; the VM uses the name hash (`Vm::object_namer_checksum`), which
+        keeps equal names equal. Writes through `<set>.first` / `.last` inside a longer
+        path (`"EnemyTypeDatas".last."lookupID" = ...`) land in that member's record
+        (`canon`). The arena now has one entry per enemy type (4). sets `"enemyInfo"."enemyTypeData" = @find.first` (or
         `.last`), and `"return creature info "."enemyInfo" = "enemyInfo"` (@147c04,
         which works).
       - `<find subset op>.first` / `.last` apply to the op as written: the op also stands
         for its first match, which `canon` follows.
-      - Still not activating, not resolved: the lookup's list path stops at the
-        creature-info instance (its "enemyInfo" reference is not followed for the
-        passengers' instances), and "Add State" no longer ran once the type lookup worked.
-        Needs a read of "System - Init" and "Combat - Creature Startup" order.
+      - Still not activating, not resolved: "Set State"'s list path stops at the
+        passengers' creature-info instance (its "enemyInfo" reference is not found
+        there), though "Init" writes `"return creature info "."enemyInfo"` (@147c04)
+        for every creature. Whether those are the same instances (or copies made when the
+        description is spawned) is not checked.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the

@@ -759,7 +759,7 @@ mod tests {
         }
     }
     /// Handles: one per engine name, in this order.
-    const NAMES: [u32; 20] = [
+    const NAMES: [u32; 24] = [
         MY,
         ORIENTATION,
         RELATIVE_FACING,
@@ -780,8 +780,17 @@ mod tests {
         WAYPOINTS,
         ROLL,
         FIRST,
+        LAST,
+        OBJECT_NAMER,
+        NAMER_OBJECT,
+        NAME_CHECKSUM,
     ];
     const FIRST: u32 = 0x4881_d841;
+    const LAST: u32 = 0x63e1_d819;
+    const OBJECT_NAMER: u32 = 0x9aae_6bad;
+    /// The namer's field "Enemy System - System - Init" points at the object (not named).
+    const NAMER_OBJECT: u32 = 0x0625_4b22;
+    const NAME_CHECKSUM: u32 = 0xba57_384d;
     const WAYPOINTS: u32 = 0x7a0a_bb2b;
     const COUNT: u32 = 0x39b1_ddf4;
     const DISTANCE: u32 = 0x2eb3_1462;
@@ -1709,6 +1718,106 @@ mod tests {
         assert_eq!(
             st.reference(OUT),
             Some(&RefTarget::Alias(vec![Ref::Obj(R1)]))
+        );
+    }
+
+    #[test]
+    fn writes_through_last_of_a_list_land_in_that_record() {
+        // "Enemy System - System - Init": `inc "EnemyTypeDatas".count`, then
+        // `"EnemyTypeDatas".last."lookupID" = ...`; a later lookup reads the member's field.
+        const LIST: usize = 0x700;
+        const F: usize = 0x710;
+        const M: usize = 0x720;
+        const OUT: usize = 0x730;
+        let p = program(
+            vec![
+                ins(
+                    0x701,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(LIST), h(COUNT)],
+                    },
+                ),
+                ins(
+                    0x702,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(LIST), h(COUNT)],
+                    },
+                ),
+                ins(
+                    0x703,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(LIST), h(LAST), Ref::Obj(F)],
+                        rhs: lit(5.0),
+                    },
+                ),
+                ins(
+                    0x704,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(M)],
+                        rhs: vec![Ref::Obj(LIST), h(LAST)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    0x705,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(OUT)],
+                        rhs: rd(vec![Ref::Obj(M), Ref::Obj(F)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.vars.get(&vec![Ref::Obj(OUT)]).map(|v| v.as_f32()),
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn object_namer_checksums_the_name_of_its_object() {
+        // "Enemy System - System - Init": `"Object Namer".<object> = enemyType`, then
+        // "lookupID" = `"Object Namer"."Name checksum"`: equal for equal names.
+        const P: usize = 0x400;
+        const OUT: usize = 0x730;
+        let mut p = program(
+            vec![
+                ins(
+                    0x701,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![h(OBJECT_NAMER), h(NAMER_OBJECT)],
+                        rhs: vec![Ref::Obj(P)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    0x702,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(OUT)],
+                        rhs: rd(vec![h(OBJECT_NAMER), h(NAME_CHECKSUM)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        p.set.placements.insert(P);
+        p.set.templates.insert(P, coin());
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.vars.get(&vec![Ref::Obj(OUT)]),
+            Some(&Value::Int(crate::script::name_hash("Coin_Art_01") as i32))
         );
     }
 
