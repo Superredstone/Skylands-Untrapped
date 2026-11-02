@@ -441,10 +441,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         when `"internalCleanupState"` = 1. "Single Enemy Unload" calls "Enemy System -
         Setups - Set Queue" (`forceIntoThisState` = 1). For each enemy it finds the
         registry entry (`@e678c."enemies"`, by creature); if the enemy's description
-        `state` is 901 (disabled), it does not apply the queue but appends a request to
-        `"EnemySystem_Globals"."DelayedQueues"` (enemy, queue, override, `forceQueue`).
-        Next: what processes `DelayedQueues` (a global update on some controller) and
-        whether it runs here.
+        `state` is 901, it appends a request to `"EnemySystem_Globals"."DelayedQueues"`
+        instead of applying it. Nothing consumes `DelayedQueues`: besides "Set Queue",
+        only `item/Sky_Systems_LevelSwitch.bld` ("Enemy System - Do - Cleanup All Enemy
+        Data") touches it, to clear it on a level switch. In our run the passengers'
+        `description.state` is 0, so "Set Queue" takes its direct branch instead
+        (`currentQueue` / `noAlertOnDmg` = 0, then the creature's "spawnQueue").
+      - "Return From Disabled Logic" runs when `description.state` has been above 0 (the
+        update sets `internalCleanupState` to 1 then) and is 0 again. Here it never rises
+        above 0, and no script in `global.bld` or the arena passes a non-default state to
+        the creature state setter (`@ea128`). Next: read the enemy queue / state machine
+        ("currentQueue", "spawnQueue", the per-state logic after `@14ce24`) systematically,
+        to find which branch is meant to leave the "disabled" state after an unload.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
