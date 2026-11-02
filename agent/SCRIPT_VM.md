@@ -356,10 +356,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       (`Vm::cur_op` = the parameter while its argument evaluates). Core answers
       `vertical offset` / `vertical difference` (`ecfb5226`) as the object's height above
       the reference, in feet.
+  29. Passenger activation runs through `EnemySystem_Global.ai`: after the unload,
+      "Enemy System - State Logic - Return From Disabled Logic" (currentQueue / alertLevel
+      0) calls "Enemy System - State - Set State", which looks the state up with `find
+      subset of "enemyInfo"."enemyTypeData"."states" where ."key" == stateName`.
+      `OpFindSubSet` on a script field (not an engine handle) now reads `<member>.<field>`
+      for record members. It still finds nothing:
+      - "states" is empty: "enemyInfo" resolves to a plain path in the `global.bld` VM,
+        not to the creature's info record (the binding not traced).
+      - `stateName` reads 0: state keys look like string identities, and values cannot
+        hold strings.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
-  passengers stay "disabled" in their own scripts (their activation through the creature
-  state system not traced). After unloading, the dropships fly on past their last
+  passengers stay "disabled" (29). After unloading, the dropships fly on past their last
   waypoint and keep climbing; what should end their flight is not traced.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.

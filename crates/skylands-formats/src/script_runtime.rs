@@ -1578,6 +1578,67 @@ mod tests {
     }
 
     #[test]
+    fn find_subset_compares_a_script_field_of_record_members() {
+        // "Enemy System - State - Set State": `find subset of "states" where ."key" ==
+        // stateName`, over a set of records.
+        const SET: usize = 0x700;
+        const R1: usize = 0x710;
+        const R2: usize = 0x720;
+        const KEY: usize = 0x730;
+        const SUB: usize = 0x740;
+        let include = |off, o| {
+            ins(
+                off,
+                0,
+                Op::ChangeMembership {
+                    set: vec![Ref::Obj(SET)],
+                    op: 0,
+                    group: vec![Ref::Obj(o)],
+                },
+            )
+        };
+        let mut p = program(
+            vec![
+                include(0x701, R1),
+                include(0x702, R2),
+                ins(
+                    SUB,
+                    0,
+                    Op::FindSubSet {
+                        set: vec![Ref::Obj(SET)],
+                        field: vec![Ref::Obj(KEY)],
+                        rel: 1,
+                        rhs: Some(lit(2.0)),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        for r in [R1, R2] {
+            p.set.vars.insert(
+                r,
+                VarInfo {
+                    name: format!("state {r:x}"),
+                    type_name: "OpCreateVariable".into(),
+                    init: None,
+                },
+            );
+            p.set.records.insert(r);
+        }
+        let mut st = ActorScriptState::default();
+        st.vars
+            .insert(vec![Ref::Obj(R1), Ref::Obj(KEY)], Value::Int(1));
+        st.vars
+            .insert(vec![Ref::Obj(R2), Ref::Obj(KEY)], Value::Int(2));
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.reference(SUB),
+            Some(&RefTarget::Alias(vec![Ref::Obj(R2)]))
+        );
+    }
+
+    #[test]
     fn record_fields_are_shared_with_other_actors() {
         // The arena reads `"transport info"."Command - docked"` of the dropship's "My
         // Info": the owner exports its record's fields by `record_key` and takes other

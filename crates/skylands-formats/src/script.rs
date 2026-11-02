@@ -2989,13 +2989,29 @@ impl<'a> Vm<'a> {
                         Some(r) => self.eval(r)?,
                         None => Value::Int(0),
                     };
+                    let script_field = field.clone();
                     let field = self.set.engine_key(field);
                     let from = match self.relative_origin(ins.offset) {
                         Some(o) => self.member_id(&o),
                         None => self.self_id,
                     };
-                    let matches: Vec<RefTarget> = self
-                        .members(set)
+                    let members = self.members(set);
+                    // A script field of record members (`"Enemy System - State - Set State"`:
+                    // `find subset of "enemyTypeData"."states" where ."key" == stateName`).
+                    let mut by_script = Vec::new();
+                    if field.is_none() {
+                        for m in &members {
+                            if let RefTarget::Alias(p) = m {
+                                let path: Vec<Ref> =
+                                    p.iter().chain(&script_field).copied().collect();
+                                let v = self.read(&path);
+                                if compare(v, *rel, threshold).unwrap_or(false) {
+                                    by_script.push(m.clone());
+                                }
+                            }
+                        }
+                    }
+                    let matches: Vec<RefTarget> = members
                         .into_iter()
                         .filter(|m| {
                             let (Some(me), Some([f])) = (from, field.as_deref()) else {
@@ -3015,6 +3031,7 @@ impl<'a> Vm<'a> {
                                 compare(Value::Float(v), *rel, threshold).unwrap_or(false)
                             })
                         })
+                        .chain(by_script)
                         .collect();
                     match matches.first() {
                         None => pc += skip,
