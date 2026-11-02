@@ -1342,6 +1342,10 @@ pub enum VmError {
 enum Flow {
     Next,
     Return,
+    /// A `jump` past the end of the block being run (out of a loop body: "Combat -
+    /// Get/Adjust Creature Info Struct" leaves its search loop on a match); the
+    /// enclosing range continues at that op.
+    Goto(usize),
 }
 
 /// Deterministic evaluator for the value logic of one `ScriptSet`.
@@ -2945,18 +2949,26 @@ impl<'a> Vm<'a> {
                         pc += skip;
                     }
                 }
+                Op::Jump if pc + skip > to => return Ok(Flow::Goto(pc + skip)),
                 Op::Jump | Op::DefineMacro { .. } => pc += skip,
                 Op::End => return Ok(Flow::Return),
                 Op::LoopValue { count } => {
                     let n = self.eval(count)?.as_f32() as i32;
                     let end = (pc + skip).min(to);
+                    let mut next = end;
                     for i in 0..n {
                         self.loops.insert(ins.offset, i);
-                        if let Flow::Return = self.run(si, pc, end)? {
-                            return Ok(Flow::Return);
+                        match self.run(si, pc, end)? {
+                            Flow::Return => return Ok(Flow::Return),
+                            Flow::Goto(t) if t > to => return Ok(Flow::Goto(t)),
+                            Flow::Goto(t) => {
+                                next = t;
+                                break;
+                            }
+                            Flow::Next => {}
                         }
                     }
-                    pc = end;
+                    pc = next;
                 }
                 Op::UseMacro { target } => {
                     // A dynamic call runs the macro its target variable holds; failing
@@ -3094,15 +3106,27 @@ impl<'a> Vm<'a> {
                         _ => {}
                     }
                     let me = vec![Ref::Obj(ins.offset)];
+                    let mut next = end;
                     for m in members {
                         self.refs.insert(me.clone(), m);
-                        if let Flow::Return = self.run(si, pc, end)? {
-                            self.refs.remove(&me);
-                            return Ok(Flow::Return);
+                        match self.run(si, pc, end)? {
+                            Flow::Return => {
+                                self.refs.remove(&me);
+                                return Ok(Flow::Return);
+                            }
+                            Flow::Goto(t) if t > to => {
+                                self.refs.remove(&me);
+                                return Ok(Flow::Goto(t));
+                            }
+                            Flow::Goto(t) => {
+                                next = t;
+                                break;
+                            }
+                            Flow::Next => {}
                         }
                     }
                     self.refs.remove(&me);
-                    pc = end;
+                    pc = next;
                 }
                 // Event blocks other than the one being run.
                 Op::StartUp | Op::ShutDown => pc += skip,
@@ -3318,10 +3342,12 @@ impl<'a> Vm<'a> {
                         named_vars: self.board.remove(&slot).unwrap_or_default(),
                         named_refs: self.ref_board.remove(&slot).unwrap_or_default(),
                     });
-                    if let Flow::Return = flow? {
-                        return Ok(Flow::Return);
+                    match flow? {
+                        Flow::Return => return Ok(Flow::Return),
+                        Flow::Goto(t) if t > to => return Ok(Flow::Goto(t)),
+                        Flow::Goto(t) => pc = t,
+                        Flow::Next => pc = end,
                     }
-                    pc = end;
                 }
                 // A variable of another placed actor: the block runs with the op meaning
                 // that variable. Anything else is not found: the block is skipped.
@@ -5124,6 +5150,43 @@ mod tests {
             vm.ref_target(&[Ref::Obj(sel)]),
             RefTarget::Alias(vec![Ref::Obj(rec)])
         );
+    }
+
+    #[test]
+    fn vm_jump_out_of_a_loop_body_leaves_the_loop() {
+        // "Combat - Get/Adjust Creature Info Struct": `loop "active".count { ... if found {
+        // jump past the loop } }`; the loop stops, it does not carry on to the append.
+        let (x, y) = (0x100, 0x110);
+        let s = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 0, Op::Interface),
+                ins(3, 3, Op::LoopValue { count: lit(I(5)) }),
+                ins(
+                    4,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(x)],
+                    },
+                ),
+                ins(
+                    5,
+                    1,
+                    Op::CheckValue {
+                        lhs: vec![Ref::Obj(x)],
+                        rel: 1,
+                        rhs: lit(I(2)),
+                    },
+                ),
+                ins(6, 1, Op::Jump),
+                ins(7, 0, set(y, lit(I(9)))),
+            ],
+            &[(x, "x"), (y, "y")],
+        );
+        let mut vm = Vm::new(&s, None);
+        vm.call("m", &[]).unwrap();
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(x)]), Some(&I(2)));
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(y)]), None);
     }
 
     #[test]

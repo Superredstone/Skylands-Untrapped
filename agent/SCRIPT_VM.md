@@ -388,11 +388,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         which works).
       - `<find subset op>.first` / `.last` apply to the op as written: the op also stands
         for its first match, which `canon` follows.
-      - Still not activating, not resolved: "Set State"'s list path stops at the
-        passengers' creature-info instance (its "enemyInfo" reference is not found
-        there), though "Init" writes `"return creature info "."enemyInfo"` (@147c04)
-        for every creature. Whether those are the same instances (or copies made when the
-        description is spawned) is not checked.
+      - A `jump` past the end of the block being run leaves the block (`Flow::Goto`):
+        "Combat - Get/Adjust Creature Info Struct" searches `@e678c."active"` for the
+        creature in a loop and jumps out on a match. The VM used to end only that loop
+        iteration, so every call appended a new entry and the creature's description and
+        "Init" held different creature-info records. Now they share one.
+      - Next blocker: data-object instances are shared between files, but their fields
+        are keyed by each file's own field objects. `global.bld` writes
+        `[description instance, 914656 "creature info"]`, and the level (its own copy of
+        the structure) reads `[same instance, 605040 "creature info"]`. So the
+        Sporeasaur's `"returned - description"."creature info"."enemyInfo"` is `null`,
+        and "Add State" (through `call_global`, which also binds reference arguments with
+        plain `ref_target`) never reaches the type's "states". Fields need matching across
+        files (by structure and field name).
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
