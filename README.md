@@ -4,6 +4,8 @@
 
 Skylanders Trap Team (Wii version) PC reimplementation (AI assisted)
 
+![Logo](.github/assets/Logo.svg)
+
 ## Objectives
 - [ ] Support EU (en) version of the game
 - [ ] Support Linux and Windows
