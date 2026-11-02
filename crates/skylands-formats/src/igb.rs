@@ -3869,7 +3869,7 @@ impl IgbModel {
                 let path = ptr(state.offset + 0x14)
                     .filter(|&list| rd(list + 0x08).unwrap_or(0) > 0)
                     .and_then(|list| ptr(list + 0x14))
-                    .and_then(&ptr)
+                    .and_then(ptr)
                     .and_then(|clip| ptr(clip + 0x38))
                     .map(|anim| cstr(anim + 0x08));
                 AnimationStateInfo {
