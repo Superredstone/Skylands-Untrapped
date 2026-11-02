@@ -361,11 +361,20 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       0) calls "Enemy System - State - Set State", which looks the state up with `find
       subset of "enemyInfo"."enemyTypeData"."states" where ."key" == stateName`.
       `OpFindSubSet` on a script field (not an engine handle) now reads `<member>.<field>`
-      for record members. It still finds nothing:
-      - "states" is empty: "enemyInfo" resolves to a plain path in the `global.bld` VM,
-        not to the creature's info record (the binding not traced).
-      - `stateName` reads 0: state keys look like string identities, and values cannot
-        hold strings.
+      for record members.
+      - A reference argument, or a reference parameter's default, naming a variable no
+        reference was stored in, or a field of a data-object instance, stands for that
+        variable (`Vm::ref_arg`). "stateName" defaults to
+        `"EnemySystem_Globals"."State_Idle"` (a `ScriptReference` to a `ValueInfo`), so
+        state keys are values, not strings. "enemyInfo" now binds to
+        `<creature description instance>."creature info"."enemyInfo"`.
+      - Still empty: that "enemyInfo"'s "enemyTypeData" is `null`. The creature's setup
+        ("returned - need things defined" = 1) runs "Enemy System - State - Add State"
+        through `call_global` with `"enemyInfo"."enemyTypeData"`, where its own
+        "enemyInfo" = `"returned - description"."creature info"."enemyInfo"`. Those are
+        `ScriptReference` fields, `null` here; what fills them during creature setup
+        is not traced. `call_global` binds reference arguments with plain
+        `ref_target`, so "Add State" appends to its own unbound parameter.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
   passengers stay "disabled" (29). After unloading, the dropships fly on past their last

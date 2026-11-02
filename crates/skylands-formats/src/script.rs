@@ -2521,6 +2521,26 @@ impl<'a> Vm<'a> {
         true
     }
 
+    /// A reference argument (or a reference parameter's default): what `path` refers to,
+    /// or, for a variable no reference was stored in, the variable itself
+    /// ("Set State"'s "stateName" defaults to `"EnemySystem_Globals"."State_Idle"`).
+    fn ref_arg(&self, path: &[Ref]) -> RefTarget {
+        match self.ref_target(path) {
+            t @ (RefTarget::Null | RefTarget::Unknown) => match self.canon(path) {
+                // Also a field of a data-object instance ("Return From Disabled Logic"
+                // passes `"description"."creature info"."enemyInfo"`).
+                Ok(p)
+                    if is_instance(&p)
+                        || matches!(p.first(), Some(Ref::Obj(v)) if self.set.vars.contains_key(v)) =>
+                {
+                    RefTarget::Alias(p)
+                }
+                _ => t,
+            },
+            t => t,
+        }
+    }
+
     /// Call-site reference argument of param `var` (`RHSReferenceStack` at +0x30).
     fn ref_arg_path(&self, var: usize) -> Option<Vec<Ref>> {
         self.set
@@ -2634,7 +2654,7 @@ impl<'a> Vm<'a> {
                     Some((_, t)) => t.clone(),
                     None => self
                         .ref_arg_path(var)
-                        .map_or(RefTarget::Null, |p| self.ref_target(&p)),
+                        .map_or(RefTarget::Null, |p| self.ref_arg(&p)),
                 };
                 self.refs.insert(vec![Ref::Obj(var)], t);
             }
@@ -2736,19 +2756,7 @@ impl<'a> Vm<'a> {
                 // A reference argument: the call site's `RHSReferenceStack` (+0x30).
                 (0, None) => {
                     if let Some(path) = self.ref_arg_path(var) {
-                        // A variable no reference was stored in is passed as itself.
-                        let t = match self.ref_target(&path) {
-                            t @ (RefTarget::Null | RefTarget::Unknown) => match self.canon(&path) {
-                                Ok(p)
-                                    if matches!(p.first(), Some(Ref::Obj(v))
-                                        if self.set.vars.contains_key(v)) =>
-                                {
-                                    RefTarget::Alias(p)
-                                }
-                                _ => t,
-                            },
-                            t => t,
-                        };
+                        let t = self.ref_arg(&path);
                         ref_args.push((self.set.var_name(var).to_string(), t));
                     }
                 }
@@ -4836,6 +4844,69 @@ mod tests {
             vm.ref_target(&[Ref::Obj(out)]),
             RefTarget::Engine(vec![MY_HASH])
         );
+    }
+
+    #[test]
+    fn vm_reference_param_defaults_to_a_variable_as_itself() {
+        // "Enemy System - State - Set State": "stateName" defaults to
+        // `"EnemySystem_Globals"."State_Idle"`, a value no reference was stored in: the
+        // parameter stands for that variable, and reads through it read the value.
+        let (p, out, g, f) = (0x200, 0x210, 0x230, 0x240);
+        let mut s = script_set(
+            vec![
+                ins(1, 3, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(p, 0, None),
+                ins(
+                    3,
+                    0,
+                    set(
+                        out,
+                        Rhs {
+                            a: rd(p),
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+                ins(
+                    10,
+                    3,
+                    Op::DefineMacro {
+                        name: "caller".into(),
+                    },
+                ),
+                ins(11, 1, Op::Interface),
+                param(0x250, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(12, 0, Op::UseMacro { target: Some(1) }),
+            ],
+            &[
+                (p, "stateName"),
+                (out, "out"),
+                (g, "EnemySystem_Globals"),
+                (f, "State_Idle"),
+            ],
+        );
+        s.vars.get_mut(&g).unwrap().type_name = "OpCreateVariable".into();
+        s.opaque_operands.insert(
+            p,
+            vec![(
+                0x30,
+                OpaqueOperand::Path {
+                    stack: "RHSReferenceStack".into(),
+                    path: vec![Ref::Obj(g), Ref::Obj(f)],
+                },
+            )],
+        );
+        let mut vm = Vm::new(&s, None);
+        vm.vars.insert(vec![Ref::Obj(g), Ref::Obj(f)], I(4));
+        vm.call("caller", &[]).unwrap();
+        assert_eq!(
+            vm.refs.get(&vec![Ref::Obj(p)]),
+            Some(&RefTarget::Alias(vec![Ref::Obj(g), Ref::Obj(f)]))
+        );
+        assert_eq!(vm.vars.get(&vec![Ref::Obj(out)]), Some(&I(4)));
     }
 
     #[test]
