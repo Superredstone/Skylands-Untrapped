@@ -372,9 +372,22 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         ("returned - need things defined" = 1) runs "Enemy System - State - Add State"
         through `call_global` with `"enemyInfo"."enemyTypeData"`, where its own
         "enemyInfo" = `"returned - description"."creature info"."enemyInfo"`. Those are
-        `ScriptReference` fields, `null` here; what fills them during creature setup
-        is not traced. `call_global` binds reference arguments with plain
-        `ref_target`, so "Add State" appends to its own unbound parameter.
+        `ScriptReference` fields, `null` here.
+      - The creature's setup is the level stub "Enemy System - System - Init" (a
+        `global.bld` macro): it spawns `"EnemySystem_Globals"."ForCloning_EnemyInfo"` as
+        its "enemyInfo", finds its type in `"EnemySystem_Globals"."EnemyTypeDatas"` by
+        `lookupID` (`$9aae6bad.$ba57384d` of `my`, not named; it reads 0 here, so every
+        enemy type matches the first) or appends one ("returned - need things defined" =
+        1 for the first of a type), sets `"enemyInfo"."enemyTypeData" = @find.first` (or
+        `.last`), and `"return creature info "."enemyInfo" = "enemyInfo"` (@147c04,
+        which works).
+      - `<find subset op>.first` / `.last` apply to the op as written: the op also stands
+        for its first match, which `canon` follows.
+      - Still not activating, not resolved: the lookup's list path stops at the
+        creature-info instance (its "enemyInfo" reference is not followed for the
+        passengers' instances), and "Add State" no longer ran once the type lookup worked.
+        Needs a read of "System - Init" and "Combat - Creature Startup" order.
+        `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
   passengers stay "disabled" (29). After unloading, the dropships fly on past their last

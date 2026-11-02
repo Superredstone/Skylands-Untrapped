@@ -1809,17 +1809,21 @@ impl<'a> Vm<'a> {
         if let Some(t) = self.refs_of(&p).get(&p) {
             return t.clone();
         }
-        // `<list>.first` / `.last`: its first / last member.
-        if let Some((Ref::Handle(h), list)) = p.split_last() {
-            let end = match self.set.engine_key(&[Ref::Handle(*h)]).as_deref() {
-                Some([FIRST]) => Some(true),
-                Some([LAST]) => Some(false),
-                _ => None,
-            };
-            if let Some(first) = end {
-                if let Some(s) = self.sets_of(list).get(list) {
-                    let m = if first { s.first() } else { s.last() };
-                    return m.cloned().unwrap_or(RefTarget::Null);
+        // `<list>.first` / `.last`: its first / last member. The list as written too: a
+        // `find subset` op is also a reference to its first match, which `canon` follows
+        // (`"@find".first` in "Enemy System - System - Init").
+        for q in [&p[..], path] {
+            if let Some((Ref::Handle(h), list)) = q.split_last() {
+                let end = match self.set.engine_key(&[Ref::Handle(*h)]).as_deref() {
+                    Some([FIRST]) => Some(true),
+                    Some([LAST]) => Some(false),
+                    _ => None,
+                };
+                if let Some(first) = end {
+                    if let Some(s) = self.sets_of(list).get(list) {
+                        let m = if first { s.first() } else { s.last() };
+                        return m.cloned().unwrap_or(RefTarget::Null);
+                    }
                 }
             }
         }
