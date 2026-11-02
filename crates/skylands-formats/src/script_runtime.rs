@@ -1895,6 +1895,58 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_to_an_unassigned_variable_reads_as_its_identity() {
+        // "Enemy System - State - Add State": `."key" = "stateName"` (a reference to
+        // `"EnemySystem_Globals".State_Spawn`, never assigned); "Set State" then compares
+        // keys with `"stateName":Int`. Equal references read equal, different ones differ.
+        const SPAWN_VAR: usize = 0x700;
+        const IDLE_VAR: usize = 0x710;
+        const A: usize = 0x720;
+        const B: usize = 0x730;
+        const C: usize = 0x740;
+        const OA: usize = 0x750;
+        const OB: usize = 0x760;
+        const OC: usize = 0x770;
+        let read = |off, out, from| {
+            ins(
+                off,
+                0,
+                Op::SetValue {
+                    lhs: vec![Ref::Obj(out)],
+                    rhs: rd(vec![Ref::Obj(from)]),
+                },
+            )
+        };
+        let mut p = program(
+            vec![read(0x784, OA, A), read(0x785, OB, B), read(0x786, OC, C)],
+            vec![],
+        );
+        for (v, name) in [(SPAWN_VAR, "State_Spawn"), (IDLE_VAR, "State_Idle")] {
+            p.set.vars.insert(
+                v,
+                VarInfo {
+                    name: name.into(),
+                    type_name: "OpCreateVariable".into(),
+                    init: None,
+                },
+            );
+        }
+        let mut st = ActorScriptState::default();
+        for (r, v) in [(A, SPAWN_VAR), (B, SPAWN_VAR), (C, IDLE_VAR)] {
+            st.set_reference(r, RefTarget::Alias(vec![Ref::Obj(v)]));
+        }
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        let v = |o| st.vars.get(&vec![Ref::Obj(o)]).copied();
+        assert_eq!(
+            v(OA),
+            Some(Value::Int(crate::script::name_hash("State_Spawn") as i32))
+        );
+        assert_eq!(v(OA), v(OB));
+        assert_ne!(v(OA), v(OC));
+    }
+
+    #[test]
     fn object_namer_checksums_the_name_of_its_object() {
         // "Enemy System - System - Init": `"Object Namer".<object> = enemyType`, then
         // "lookupID" = `"Object Namer"."Name checksum"`: equal for equal names.

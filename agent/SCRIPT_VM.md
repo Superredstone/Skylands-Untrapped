@@ -415,9 +415,17 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         by-name variable staying a reference) put the right reference into the state's
         `key` write, but the write's slot kept `.last` unresolved; fixed (`canon` now
         resolves a trailing `.first` / `.last`, which `ref_slot`'s prefix ends with). The
-        identity changes were reverted again: in that run the "Set State" lookup did not
-        run at all within 40 s, so their effect is not shown. Next: redo them on top of the
-        `.last` fix and trace "Return From Disabled Logic" again.
+        identity changes were reverted again, then redone on top of the `.last` fix:
+        - A reference read as a value is the referenced variable's identity, when that
+          variable holds no value (`Vm::referenced_identity`; name hash, since each file
+          reaches the variable through its own copy of the field).
+        - Into `global.bld` (`call_global`), an unset reference argument passes an instance
+          path as itself, or a value variable by name (`named_var`); a reference to such a
+          by-name variable stays a reference (`ref_target`).
+        With these, the passengers get a `currentState` and run the state logic after the
+        unload ("currentState"."key" against `State_Spawn` / `State_Idle`, patrols). Their
+        script behaviour stays "disabled": what switches it from the state (the state's
+        "stateBehavior") is not traced.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the

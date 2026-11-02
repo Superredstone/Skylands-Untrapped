@@ -272,8 +272,8 @@ Current gaps: `main.dol` is converted to ELF but not analyzed, gameplay constant
     displacement make the dropships fly; script lengths in feet (x 0.3048 into the world) settle the flight; passengers are found, placed on and attached to their dropship (clones
     spawned in one tick name each other); right-hand reference points steer the move target, so dropships fly
     their path and release the passengers; world-space waypoints, shared record fields and static placement sets let
-    them dock and the stages unload; vertical acceleration from argument reference points; next: passenger
-    activation (instance fields shared across files) and the end of the flight, see
+    them dock and the stages unload; vertical acceleration from argument reference points; passengers now reach a current state (instance fields keyed by name, state keys by
+    reference identity); next: their behaviour switch and the end of the flight, see
     `agent/SCRIPT_VM.md`); `BattleMaster - Spawn Dropship` (transport template + path, payload enemies as `Enemy` entities from their templates);
     stage completion from the live enemy set; arena level geometry (`Arena_Mesh_<arena>`).
 - [x] Enemy tuning: `LevelSystems.ai` "Game - Define Enemy Stats" (archetype 3 Near / 4 Far, difficulty level 1, normal mode) -> `EnemyTuning`, computed on level load. Level 302: Near 55 HP / 11 dmg, Far 40 HP / 7 dmg.

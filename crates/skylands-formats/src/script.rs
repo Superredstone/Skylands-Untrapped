@@ -1529,6 +1529,11 @@ const INSTANCE_BASE: usize = 1 << 40;
 /// `605040`), and instances are shared between files.
 const FIELD_BASE: usize = 1 << 41;
 
+/// A variable by name, the way field keys name fields (`Vm::cross_file_ref_arg`).
+fn named_var(name: &str) -> usize {
+    FIELD_BASE | name_hash(name) as usize
+}
+
 fn is_instance(p: &[Ref]) -> bool {
     matches!(p.first(), Some(Ref::Obj(o)) if *o >= INSTANCE_BASE)
 }
@@ -1799,6 +1804,10 @@ impl<'a> Vm<'a> {
                 .unwrap_or(RefTarget::Null);
         }
         if let [Ref::Obj(o)] = p[..] {
+            // A variable passed by name across files: references to it stay references.
+            if o >= FIELD_BASE {
+                return RefTarget::Alias(p);
+            }
             if self.set.placements.contains(&o) {
                 return RefTarget::Placement(o);
             }
@@ -2235,6 +2244,27 @@ impl<'a> Vm<'a> {
         inst
     }
 
+    /// The identity of the variable a reference at `path` refers to, when that variable
+    /// holds no value (a by-name variable from `cross_file_ref_arg`, or one of this file's
+    /// value variables).
+    fn referenced_identity(&self, path: &[Ref]) -> Option<i32> {
+        let slot = self.ref_slot(path).ok()?;
+        let RefTarget::Alias(a) = self.refs_of(&slot).get(&slot)? else {
+            return None;
+        };
+        let a = self.canon(a).ok()?;
+        if self.vars_of(&a).contains_key(&a) {
+            return None;
+        }
+        match *a.last()? {
+            Ref::Obj(f) if f >= FIELD_BASE => Some(f as u32 as i32),
+            Ref::Obj(f) if self.set.vars.contains_key(&f) && !self.set.records.contains(&f) => {
+                Some(name_hash(self.set.var_name(f)) as i32)
+            }
+            _ => None,
+        }
+    }
+
     /// A data-object instance path with its fields keyed by name (`FIELD_BASE`), so every
     /// file names them alike; other paths as they are.
     fn field_keys(&self, mut p: Vec<Ref>) -> Vec<Ref> {
@@ -2502,7 +2532,7 @@ impl<'a> Vm<'a> {
                 },
                 None => {
                     if let Some(path) = self.ref_arg_path(var) {
-                        let t = self.ref_target(&path);
+                        let t = self.cross_file_ref_arg(&path);
                         ref_args.push((pname, t));
                     }
                 }
@@ -2594,6 +2624,30 @@ impl<'a> Vm<'a> {
                 _ => t,
             },
             t => t,
+        }
+    }
+
+    /// A reference argument into `global.bld`: what `path` refers to, else, for something
+    /// no reference was stored in, what both files can name: a data-object instance path,
+    /// or a value variable by its name ("Add State"'s "stateName" =
+    /// `"EnemySystem_Globals".State_Spawn`, which the level reaches through its own copy
+    /// of the field).
+    fn cross_file_ref_arg(&self, path: &[Ref]) -> RefTarget {
+        let t = self.ref_target(path);
+        if !matches!(t, RefTarget::Null | RefTarget::Unknown) {
+            return t;
+        }
+        match self.canon(path) {
+            Ok(p) if is_instance(&p) => RefTarget::Alias(p),
+            Ok(p) => match p.last() {
+                Some(&Ref::Obj(f))
+                    if self.set.vars.contains_key(&f) && !self.set.records.contains(&f) =>
+                {
+                    RefTarget::Alias(vec![Ref::Obj(named_var(self.set.var_name(f)))])
+                }
+                _ => t,
+            },
+            Err(_) => t,
         }
     }
 
@@ -3624,6 +3678,14 @@ impl<'a> Vm<'a> {
     }
 
     fn read(&mut self, path: &[Ref]) -> Value {
+        // A reference read as a value is the referenced object's identity: a state's
+        // `."key"` (`= "stateName"`, a reference to `"EnemySystem_Globals".State_Idle`) is
+        // compared with `"stateName":Int` in "Enemy System - State - Set State", and no
+        // script assigns the `State_*` variables. Variables are identified by name, since
+        // each file reaches them through its own copy of the fields.
+        if let Some(id) = self.referenced_identity(path) {
+            return Value::Int(id);
+        }
         let path = match self.canon(path) {
             Ok(p) => p,
             Err(i) => return Value::Int(i),
