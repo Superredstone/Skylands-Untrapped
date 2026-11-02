@@ -3535,9 +3535,9 @@ impl<'a> Vm<'a> {
                 p = a.into_iter().chain(p[k..].iter().copied()).collect();
                 continue;
             }
-            // `<set>.first` / `.last` inside a longer path: that member's record
-            // (`"EnemyTypeDatas".last."lookupID" = ...`).
-            if let Some((k, a)) = (2..p.len()).find_map(|k| {
+            // `<set>.first` / `.last`: that member's record (`"EnemyTypeDatas".last."lookupID"
+            // = ...`; also at the end, for the prefix `ref_slot` resolves).
+            if let Some((k, a)) = (2..=p.len()).find_map(|k| {
                 let Ref::Handle(h) = p[k - 1] else {
                     return None;
                 };

@@ -1849,6 +1849,52 @@ mod tests {
     }
 
     #[test]
+    fn reference_writes_through_last_of_a_list_land_in_that_record() {
+        // "Enemy System - State - Add State": `inc "states".count`, then
+        // `set reference "states".last."key" = ...`: the reference belongs to the new
+        // state's record (`ref_slot` resolves the trailing `.last` of its prefix).
+        const LIST: usize = 0x700;
+        const KEY: usize = 0x710;
+        const M: usize = 0x720;
+        const P: usize = 0x880;
+        let mut p = program(
+            vec![
+                ins(
+                    0x701,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(LIST), h(COUNT)],
+                    },
+                ),
+                ins(
+                    0x702,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(LIST), h(LAST), Ref::Obj(KEY)],
+                        rhs: vec![Ref::Obj(P)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    0x703,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(M)],
+                        rhs: vec![Ref::Obj(LIST), h(LAST), Ref::Obj(KEY)],
+                        desc: String::new(),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        p.set.placements.insert(P);
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.reference(M), Some(&RefTarget::Placement(P)));
+    }
+
+    #[test]
     fn object_namer_checksums_the_name_of_its_object() {
         // "Enemy System - System - Init": `"Object Namer".<object> = enemyType`, then
         // "lookupID" = `"Object Namer"."Name checksum"`: equal for equal names.

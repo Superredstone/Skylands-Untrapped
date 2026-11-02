@@ -405,9 +405,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         must compare references by identity there. Two attempts were reverted (they did
         not make the keys match): reading a reference to an unset value variable as its
         name identity, and passing value variables into `call_global` by name (the level's
-        `[Handle(29), Obj(605708)]` means nothing inside `global.bld`). Next: how the
-        engine reads a reference as a value (`RHSValueStack` read of a reference
-        variable).
+        `[Handle(29), Obj(605708)]` means nothing inside `global.bld`).
+      - Engine side: the value evaluator `0x80091790` calls a function pointer stored in
+        the RHS object at `+0x14` (set when it loads), so the read path of a reference is
+        not visible statically; the level reaches `State_*` through `global.bld`'s
+        exported record (`Handle(29)`), so in the game both sides point at the same
+        objects, and identity is the likely meaning.
+      - A second try (identity reads, by-name cross-file arguments, and a reference to a
+        by-name variable staying a reference) put the right reference into the state's
+        `key` write, but the write's slot kept `.last` unresolved; fixed (`canon` now
+        resolves a trailing `.first` / `.last`, which `ref_slot`'s prefix ends with). The
+        identity changes were reverted again: in that run the "Set State" lookup did not
+        run at all within 40 s, so their effect is not shown. Next: redo them on top of the
+        `.last` fix and trace "Return From Disabled Logic" again.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
