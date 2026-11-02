@@ -435,7 +435,16 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       - The starting-state switch (`@14bb10`) now resolves to the creature's "disabled"
         behaviour (the right one while carried). The later switch on a state change
         (`@14cb54`, when "changeState" = 1) is not reached yet: passengers stay
-        "disabled". Next: why "Set State" does not set "changeState" after the unload.
+        "disabled".
+      - Why: after the unload a passenger's current state is neither "Spawn" nor "Idle"
+        (still its starting "disabled" one), and "Return From Disabled Logic" only runs
+        when `"internalCleanupState"` = 1. "Single Enemy Unload" calls "Enemy System -
+        Setups - Set Queue" (`forceIntoThisState` = 1). For each enemy it finds the
+        registry entry (`@e678c."enemies"`, by creature); if the enemy's description
+        `state` is 901 (disabled), it does not apply the queue but appends a request to
+        `"EnemySystem_Globals"."DelayedQueues"` (enemy, queue, override, `forceQueue`).
+        Next: what processes `DelayedQueues` (a global update on some controller) and
+        whether it runs here.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
