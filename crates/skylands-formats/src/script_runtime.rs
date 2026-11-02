@@ -1783,6 +1783,72 @@ mod tests {
     }
 
     #[test]
+    fn instance_fields_are_named_alike_by_every_file() {
+        // `global.bld` writes `<description instance>."creature info"` (its own field
+        // object), the arena reads the same instance through its own copy of the
+        // structure: fields of a data-object instance are keyed by name.
+        const LIST: usize = 0x700;
+        const GLOBAL_FIELD: usize = 0x710;
+        const LEVEL_FIELD: usize = 0x720;
+        const M: usize = 0x730;
+        const OUT: usize = 0x740;
+        let mut p = program(
+            vec![
+                ins(
+                    0x701,
+                    0,
+                    Op::IncValue {
+                        lhs: vec![Ref::Obj(LIST), h(COUNT)],
+                    },
+                ),
+                ins(
+                    0x702,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(LIST), h(LAST), Ref::Obj(GLOBAL_FIELD)],
+                        rhs: lit(7.0),
+                    },
+                ),
+                ins(
+                    0x703,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(M)],
+                        rhs: vec![Ref::Obj(LIST), h(LAST)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    0x704,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(OUT)],
+                        rhs: rd(vec![Ref::Obj(M), Ref::Obj(LEVEL_FIELD)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        for f in [GLOBAL_FIELD, LEVEL_FIELD] {
+            p.set.vars.insert(
+                f,
+                VarInfo {
+                    name: "creature info".into(),
+                    type_name: "OpCreateVariable".into(),
+                    init: None,
+                },
+            );
+        }
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 1.0 / 60.0);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(
+            st.vars.get(&vec![Ref::Obj(OUT)]).map(|v| v.as_f32()),
+            Some(7.0)
+        );
+    }
+
+    #[test]
     fn object_namer_checksums_the_name_of_its_object() {
         // "Enemy System - System - Init": `"Object Namer".<object> = enemyType`, then
         // "lookupID" = `"Object Namer"."Name checksum"`: equal for equal names.

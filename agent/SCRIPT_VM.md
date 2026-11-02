@@ -393,14 +393,21 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         creature in a loop and jumps out on a match. The VM used to end only that loop
         iteration, so every call appended a new entry and the creature's description and
         "Init" held different creature-info records. Now they share one.
-      - Next blocker: data-object instances are shared between files, but their fields
-        are keyed by each file's own field objects. `global.bld` writes
-        `[description instance, 914656 "creature info"]`, and the level (its own copy of
-        the structure) reads `[same instance, 605040 "creature info"]`. So the
-        Sporeasaur's `"returned - description"."creature info"."enemyInfo"` is `null`,
-        and "Add State" (through `call_global`, which also binds reference arguments with
-        plain `ref_target`) never reaches the type's "states". Fields need matching across
-        files (by structure and field name).
+      - Data-object instances are shared between files, but each file has its own copy
+        of a structure (`global.bld` "creature info" is `914656`, the arena's `605040`).
+        Fields of an instance are now keyed by name (`FIELD_BASE | name_hash`,
+        `Vm::field_keys`): `canon` walks the path as written and uses name keys for
+        lookups and its result; `ref_slot` and `instantiate` key the same way. With that,
+        the type data's "states" fill (6-7 per enemy type).
+      - Still not activating: each state's `key` reads 0. "Add State" sets
+        `."key" = "stateName"`, a reference to `"EnemySystem_Globals".State_*`, which no
+        script assigns; the lookup compares it with `"stateName":Int`. So the engine
+        must compare references by identity there. Two attempts were reverted (they did
+        not make the keys match): reading a reference to an unset value variable as its
+        name identity, and passing value variables into `call_global` by name (the level's
+        `[Handle(29), Obj(605708)]` means nothing inside `global.bld`). Next: how the
+        engine reads a reference as a value (`RHSValueStack` read of a reference
+        variable).
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the

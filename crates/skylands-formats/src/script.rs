@@ -1524,6 +1524,11 @@ const MY_HASH: u32 = 0x4c2d_fe93;
 /// offset; `[Obj(INSTANCE_BASE)]` in the shared store counts them.
 const INSTANCE_BASE: usize = 1 << 40;
 
+/// Fields of data-object instances are keyed by name, above any instance id: each file has
+/// its own copy of a structure (`global.bld` "creature info" is `914656`, the arena's
+/// `605040`), and instances are shared between files.
+const FIELD_BASE: usize = 1 << 41;
+
 fn is_instance(p: &[Ref]) -> bool {
     matches!(p.first(), Some(Ref::Obj(o)) if *o >= INSTANCE_BASE)
 }
@@ -2205,8 +2210,9 @@ impl<'a> Vm<'a> {
     fn instantiate(&mut self, template: &[Ref]) -> Vec<Ref> {
         let inst = self.new_instance();
         let under = |k: &Vec<Ref>| -> Option<Vec<Ref>> {
-            k.starts_with(template)
-                .then(|| inst.iter().chain(&k[template.len()..]).copied().collect())
+            k.starts_with(template).then(|| {
+                self.field_keys(inst.iter().chain(&k[template.len()..]).copied().collect())
+            })
         };
         let vars: Vec<_> = self
             .vars_of(template)
@@ -2229,6 +2235,22 @@ impl<'a> Vm<'a> {
         inst
     }
 
+    /// A data-object instance path with its fields keyed by name (`FIELD_BASE`), so every
+    /// file names them alike; other paths as they are.
+    fn field_keys(&self, mut p: Vec<Ref>) -> Vec<Ref> {
+        if is_instance(&p) {
+            for r in &mut p[1..] {
+                if let Ref::Obj(f) = *r {
+                    let name = self.set.var_name(f);
+                    if f < INSTANCE_BASE && !name.is_empty() {
+                        *r = Ref::Obj(FIELD_BASE | name_hash(name) as usize);
+                    }
+                }
+            }
+        }
+        p
+    }
+
     /// The slot an `OpSetReference` rebinds: the variable path itself, with only what leads
     /// to it canonicalized (a variable holding an alias is rebound, not its target).
     fn ref_slot(&self, lhs: &[Ref]) -> Result<Vec<Ref>, i32> {
@@ -2236,7 +2258,7 @@ impl<'a> Vm<'a> {
             Some((last, prefix)) if !prefix.is_empty() => {
                 let mut p = self.canon(prefix)?;
                 p.push(*last);
-                Ok(p)
+                Ok(self.field_keys(p))
             }
             // An `OpFindVariable` bound to this actor's own variable: that variable.
             Some((Ref::Obj(o), [])) if self.found_own.contains_key(o) => {
@@ -3496,19 +3518,20 @@ impl<'a> Vm<'a> {
         let mut p = path.to_vec();
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
-            // A record reached through an alias at any prefix: that record's path.
-            if let Some((k, a)) =
-                (1..=p.len())
-                    .rev()
-                    .find_map(|k| match self.refs_of(&p[..k]).get(&p[..k]) {
-                        Some(RefTarget::Alias(a)) => Some((k, a.clone())),
-                        // One of this actor's records, as another actor stored it.
-                        Some(&RefTarget::Record { actor, var }) if Some(actor) == self.self_key => {
-                            Some((k, vec![Ref::Obj(var)]))
-                        }
-                        _ => None,
-                    })
-            {
+            // A record reached through an alias at any prefix: that record's path. The path
+            // stays as written (an alias may lead out of an instance into a file's own
+            // record); lookups use instance field keys.
+            if let Some((k, a)) = (1..=p.len()).rev().find_map(|k| {
+                let key = self.field_keys(p[..k].to_vec());
+                match self.refs_of(&key).get(&key) {
+                    Some(RefTarget::Alias(a)) => Some((k, a.clone())),
+                    // One of this actor's records, as another actor stored it.
+                    Some(&RefTarget::Record { actor, var }) if Some(actor) == self.self_key => {
+                        Some((k, vec![Ref::Obj(var)]))
+                    }
+                    _ => None,
+                }
+            }) {
                 p = a.into_iter().chain(p[k..].iter().copied()).collect();
                 continue;
             }
@@ -3518,7 +3541,8 @@ impl<'a> Vm<'a> {
                 let Ref::Handle(h) = p[k - 1] else {
                     return None;
                 };
-                let set = self.sets_of(&p[..k - 1]).get(&p[..k - 1])?;
+                let list = self.field_keys(p[..k - 1].to_vec());
+                let set = self.sets_of(&list).get(&list)?;
                 let m = match self.set.engine_key(&[Ref::Handle(h)]).as_deref()? {
                     [FIRST] => set.first()?,
                     [LAST] => set.last()?,
@@ -3588,7 +3612,7 @@ impl<'a> Vm<'a> {
                 _ => break,
             }
         }
-        Ok(p)
+        Ok(self.field_keys(p))
     }
 
     /// Board slot of a path that names a bound `OpFindVariable`.
