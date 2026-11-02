@@ -598,7 +598,11 @@ impl ScriptProgram {
                 .get(body.1)
                 .filter(|i| matches!(i.op, Op::Behavior { .. }))
                 .map(|i| i.offset);
+            // A `set behavior` in the start-up block wins ("Transport - Startup" switches to
+            // "Init Enemies").
+            vm.behavior = st.behavior;
             result = vm.run_range(si, startup.0, startup.1);
+            st.behavior = vm.behavior;
         }
         vm.behavior = st.behavior;
         if result.is_ok() {
@@ -2842,7 +2846,14 @@ mod tests {
         let ops = vec![
             ins(0, 3, Op::PreScript),
             ins(10, 1, Op::StartUp),
-            ins(20, 0, Op::SetBehavior { target: Some(40) }),
+            ins(
+                20,
+                0,
+                Op::SetBehavior {
+                    target: Some(40),
+                    path: vec![],
+                },
+            ),
             ins(30, 0, Op::Jump), // empty prescript body dummy
             ins(
                 40,
@@ -2851,7 +2862,14 @@ mod tests {
                     name: "StateA".into(),
                 },
             ),
-            ins(41, 0, Op::SetBehavior { target: Some(50) }),
+            ins(
+                41,
+                0,
+                Op::SetBehavior {
+                    target: Some(50),
+                    path: vec![],
+                },
+            ),
             ins(
                 50,
                 1,
@@ -2899,6 +2917,61 @@ mod tests {
         // Tick 3: Behavior 50 executes again.
         p.tick(0, &mut st, 0.1);
         assert_eq!(st.vars.get(&vec![Ref::Obj(LOCAL)]), Some(&Value::Int(2)));
+    }
+
+    #[test]
+    fn set_behavior_through_a_reference_switches_to_the_held_behavior() {
+        // "Enemy System" prescript: `set behavior @find.first."behavior"`, where "Add
+        // State" stored one of the creature's own behaviours in the state record.
+        const HELD: usize = 0x700;
+        let ops = vec![
+            ins(0, 4, Op::PreScript),
+            ins(10, 2, Op::StartUp),
+            ins(
+                20,
+                0,
+                Op::SetRef {
+                    lhs: vec![Ref::Obj(HELD)],
+                    rhs: vec![Ref::Obj(50)],
+                    desc: String::new(),
+                },
+            ),
+            ins(
+                21,
+                0,
+                Op::SetBehavior {
+                    target: None,
+                    path: vec![Ref::Obj(HELD)],
+                },
+            ),
+            ins(30, 0, Op::Jump),
+            ins(
+                40,
+                0,
+                Op::Behavior {
+                    name: "disabled".into(),
+                },
+            ),
+            ins(
+                50,
+                0,
+                Op::Behavior {
+                    name: "idle".into(),
+                },
+            ),
+        ];
+        let set = ScriptSet {
+            scripts: vec![Script {
+                name: "Enemy.ai".into(),
+                ops,
+            }],
+            ..Default::default()
+        };
+        let p = ScriptProgram::new(set, None);
+        let mut st = ActorScriptState::default();
+        p.tick(0, &mut st, 0.1);
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(st.behavior, Some(50));
     }
 
     fn read_level(name: &str) -> Option<Vec<u8>> {

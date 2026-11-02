@@ -154,9 +154,12 @@ pub enum Op {
     Behavior {
         name: String,
     },
-    /// `OpSetBehavior`: make the `OpUserBehavior` at op offset `target` current.
+    /// `OpSetBehavior`: make the `OpUserBehavior` at op offset `target` current; or, with
+    /// no literal one, the behaviour a reference at `path` (`_NP` +0x1c) holds (the enemy
+    /// state system's `set behavior <state>."stateBehavior"`).
     SetBehavior {
         target: Option<usize>,
+        path: Vec<Ref>,
     },
     /// Event blocks of a script (`OpPreScript` / `OpStartUp` / `OpShutDown`).
     PreScript,
@@ -675,6 +678,7 @@ impl Reader<'_> {
                         _ => None,
                     })
                 }),
+                path: self.lhs(o + 0x1c),
             },
             "OpSpawn" => {
                 let template = self.lhs(o + 0x20);
@@ -1272,7 +1276,7 @@ impl ScriptSet {
                     format!("turn {} to {}", self.path_str(target), self.rhs_str(facing))
                 }
                 Op::Behavior { name } => format!("behavior {name:?}"),
-                Op::SetBehavior { target } => format!(
+                Op::SetBehavior { target, .. } => format!(
                     "set behavior {}",
                     target.map_or("?".into(), |t| format!("@{t:x}"))
                 ),
@@ -1473,6 +1477,9 @@ pub enum RefTarget {
         actor: usize,
         var: usize,
     },
+    /// An `OpUserBehavior` of the actor's script (op offset) held in a reference ("Enemy
+    /// System - State - Add State" keeps the creature's behaviour for each state).
+    Behavior(usize),
     /// A `StringInfo` constant (`"Mod - Artillery"`), which scripts use as an identity:
     /// `"New Mod" == "Arena Mod - Artillery"."Mod ID"`.
     String(usize),
@@ -1691,6 +1698,8 @@ pub struct VmIndex {
     /// A path through a check op means its LHS; through a loop op, its counter.
     aliases: HashMap<usize, (usize, usize)>,
     macros: HashMap<usize, (usize, usize)>,
+    /// `OpUserBehavior` op offsets (`RefTarget::Behavior`).
+    behaviors: HashSet<usize>,
     /// Macro definitions by name (calls from other files name them).
     by_name: HashMap<String, (usize, usize)>,
 }
@@ -1710,6 +1719,9 @@ impl VmIndex {
                     Op::DefineMacro { name } => {
                         index.macros.entry(ins.offset).or_insert((si, oi));
                         index.by_name.entry(name.clone()).or_insert((si, oi));
+                    }
+                    Op::Behavior { .. } => {
+                        index.behaviors.insert(ins.offset);
                     }
                     _ => {}
                 }
@@ -1821,6 +1833,9 @@ impl<'a> Vm<'a> {
             }
             if self.index.macros.contains_key(&o) {
                 return RefTarget::Macro(o);
+            }
+            if self.index.behaviors.contains(&o) {
+                return RefTarget::Behavior(o);
             }
         }
         if let Some((i, k)) = self.clone_key(&p) {
@@ -2560,6 +2575,7 @@ impl<'a> Vm<'a> {
         sub.spawned = self.spawned;
         sub.steps = self.steps;
         sub.depth = self.depth + 1;
+        sub.behavior = self.behavior;
         let result = sub.run_macro_with(gsi, goi, &args, Some(&ref_args));
         // Outputs by name, read before the sub VM gives its state back.
         let (defs, _) = sub.params(gsi, goi);
@@ -2584,6 +2600,8 @@ impl<'a> Vm<'a> {
         self.trace = sub.trace.take();
         self.rng = sub.rng;
         self.spawned = sub.spawned;
+        // `set behavior` in `global.bld` (the enemy state system) switches this actor.
+        self.behavior = sub.behavior;
         self.steps = sub.steps;
         if result.is_err() {
             return false;
@@ -3319,9 +3337,16 @@ impl<'a> Vm<'a> {
                     None => pc += skip,
                 },
                 // `0x8006fad0`: only swaps the current behaviour; it runs from next tick.
-                Op::SetBehavior { target } => {
-                    if target.is_some() {
-                        self.behavior = *target;
+                Op::SetBehavior { target, path } => {
+                    let held = match target {
+                        Some(_) => None,
+                        None => match self.ref_target(path) {
+                            RefTarget::Behavior(b) => Some(b),
+                            _ => None,
+                        },
+                    };
+                    if let Some(b) = target.or(held) {
+                        self.behavior = Some(b);
                     }
                 }
                 // Behaviour blocks run only when current (`ScriptProgram::tick`).
@@ -3572,25 +3597,10 @@ impl<'a> Vm<'a> {
         let mut p = path.to_vec();
         for _ in 0..8 {
             let Some(Ref::Obj(o)) = p.first() else { break };
-            // A record reached through an alias at any prefix: that record's path. The path
-            // stays as written (an alias may lead out of an instance into a file's own
-            // record); lookups use instance field keys.
-            if let Some((k, a)) = (1..=p.len()).rev().find_map(|k| {
-                let key = self.field_keys(p[..k].to_vec());
-                match self.refs_of(&key).get(&key) {
-                    Some(RefTarget::Alias(a)) => Some((k, a.clone())),
-                    // One of this actor's records, as another actor stored it.
-                    Some(&RefTarget::Record { actor, var }) if Some(actor) == self.self_key => {
-                        Some((k, vec![Ref::Obj(var)]))
-                    }
-                    _ => None,
-                }
-            }) {
-                p = a.into_iter().chain(p[k..].iter().copied()).collect();
-                continue;
-            }
             // `<set>.first` / `.last`: that member's record (`"EnemyTypeDatas".last."lookupID"
-            // = ...`; also at the end, for the prefix `ref_slot` resolves).
+            // = ...`; also at the end, for the prefix `ref_slot` resolves). Before the alias
+            // step: a `find subset` op is also a reference to its first match
+            // (`@find.first."behavior"`).
             if let Some((k, a)) = (2..=p.len()).find_map(|k| {
                 let Ref::Handle(h) = p[k - 1] else {
                     return None;
@@ -3604,6 +3614,23 @@ impl<'a> Vm<'a> {
                 };
                 match m {
                     RefTarget::Alias(a) => Some((k, a.clone())),
+                    _ => None,
+                }
+            }) {
+                p = a.into_iter().chain(p[k..].iter().copied()).collect();
+                continue;
+            }
+            // A record reached through an alias at any prefix: that record's path. The path
+            // stays as written (an alias may lead out of an instance into a file's own
+            // record); lookups use instance field keys.
+            if let Some((k, a)) = (1..=p.len()).rev().find_map(|k| {
+                let key = self.field_keys(p[..k].to_vec());
+                match self.refs_of(&key).get(&key) {
+                    Some(RefTarget::Alias(a)) => Some((k, a.clone())),
+                    // One of this actor's records, as another actor stored it.
+                    Some(&RefTarget::Record { actor, var }) if Some(actor) == self.self_key => {
+                        Some((k, vec![Ref::Obj(var)]))
+                    }
                     _ => None,
                 }
             }) {

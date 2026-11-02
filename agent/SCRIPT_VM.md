@@ -423,9 +423,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
           path as itself, or a value variable by name (`named_var`); a reference to such a
           by-name variable stays a reference (`ref_target`).
         With these, the passengers get a `currentState` and run the state logic after the
-        unload ("currentState"."key" against `State_Spawn` / `State_Idle`, patrols). Their
-        script behaviour stays "disabled": what switches it from the state (the state's
-        "stateBehavior") is not traced.
+        unload ("currentState"."key" against `State_Spawn` / `State_Idle`, patrols).
+      - Behaviour switches: "Add State" stores the creature's own behaviour in the state
+        record ("behavior"), and the prescript runs `set behavior <state>."behavior"`
+        (`OpSetBehavior` `_NP` +0x1c is a path; `RefTarget::Behavior`, VM index of
+        `OpUserBehavior` ops). The switch runs in the `global.bld` VM, so `call_global`
+        carries `behavior` in and back. `canon` tries `.first` / `.last` before following
+        a prefix alias (`@find.first."behavior"`: the find op is also a reference to its
+        first match). `ScriptProgram::tick` also keeps a `set behavior` made in the start-up
+        block (it used to be overwritten by the first behaviour).
+      - The starting-state switch (`@14bb10`) now resolves to the creature's "disabled"
+        behaviour (the right one while carried). The later switch on a state change
+        (`@14cb54`, when "changeState" = 1) is not reached yet: passengers stay
+        "disabled". Next: why "Set State" does not set "changeState" after the unload.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
