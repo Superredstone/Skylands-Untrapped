@@ -481,7 +481,24 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         are not records (`"villain just captured data"`) stay null until set. Now `@14cb54
         set behavior <currentState.behavior>` runs, and every passenger is in "idle" by
         30 s.
-      - Next: leaving Idle. The Sporeasaur "idle" behaviour calls the targeting macro
+      - Leaving Idle is blocked before targeting: unloaded passengers are detached
+        ("Transport - Detach Enemy" `@1c118c`, `attach node = null`, 37 runs) but stay
+        where they were let go, ~180 m up (several stacked on one spot), ~280 m from
+        the arena test's hero. Detach also sets `"can fall to death"` = 1; in the
+        original they fall to the floor. Nothing makes a detached scripted actor fall
+        here (engine physics, not the VM). Targeting itself runs ("Targeting Update"
+        `@15cfe0`, throttled by `updateTimer`), and the unload sets their
+        `enemyInfo.noticeRange` = 500 (Transport_Macros [32]).
+      - Falling tried and reverted: a `Falling` marker on detach plus gravity on the
+        script base (`env.gravity`) until the collision mesh. It needs the arena floor
+        first. Our arena collision is only the level model's own mesh (20564 triangles,
+        x -225..-161, y 134..176, z -61..-9), not the arena floor (`Arena_Mesh_<arena>`,
+        not loaded). Passengers detached before docking (Navigate Waypoints [464], when
+        `"Command - docked"` = 0) then fall into the void. "Single Enemy Unload" finds no
+        landing queue within 200 ft of them, "Unload Dropship" never finishes, and the
+        arena stays in "Stage 1 - 01 - Unload". The dock height (~156 m) suggests the
+        floor is about there.
+      - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
         ([1058]). The arena test's hero stands at the origin.
