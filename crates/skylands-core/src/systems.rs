@@ -1655,6 +1655,25 @@ pub fn state_transition_update_system(
     }
 }
 
+/// Collision of an arena challenge's arena: `Arena_Challenge_<arena>_<nnn>` stands on
+/// `Arena_Mesh_<arena>` (the challenge level holds only its own props; `global.bld` keeps
+/// an `"Arena_Mesh_BaseString"`). How the engine pairs them is not reversed.
+fn arena_floor(
+    loader: &skylands_formats::AssetLoader,
+    level_name: &str,
+) -> Option<crate::collision::CollisionMesh> {
+    let stem = level_name.strip_suffix(".bld").unwrap_or(level_name);
+    let arena = stem.strip_prefix("Arena_Challenge_")?.split('_').next()?;
+    let models = loader
+        .load_level_models(&format!("Arena_Mesh_{arena}.bld"))
+        .ok()?;
+    let triangles: Vec<_> = models
+        .iter()
+        .flat_map(|m| crate::collision::CollisionMesh::from_igb(m).triangles)
+        .collect();
+    (!triangles.is_empty()).then(|| crate::collision::CollisionMesh::from_triangles(triangles))
+}
+
 pub fn spawn_level_content(
     commands: &mut Commands,
     loader: &skylands_formats::AssetLoader,
@@ -1676,7 +1695,12 @@ pub fn spawn_level_content(
         return false;
     };
 
-    let col_mesh = crate::collision::CollisionMesh::from_igb(&model);
+    let mut col_mesh = crate::collision::CollisionMesh::from_igb(&model);
+    if let Some(floor) = arena_floor(loader, level_name) {
+        let mut triangles = std::mem::take(&mut col_mesh.triangles);
+        triangles.extend(floor.triangles);
+        col_mesh = crate::collision::CollisionMesh::from_triangles(triangles);
+    }
     if !col_mesh.triangles.is_empty() {
         if let Some(ref mut env) = env_col {
             env.mesh = col_mesh;
@@ -5227,6 +5251,22 @@ mod tests {
         eprintln!("moved after 2 s: {moved}, errors: {errors}");
         assert!(moved >= 5, "{moved}");
         assert_eq!(errors, 0);
+    }
+
+    #[test]
+    fn arena_challenges_stand_on_their_arena_mesh() {
+        // `Arena_Challenge_300_000` holds its props; the floor is `Arena_Mesh_300`.
+        let dir = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|d| d.join("level/Arena_Mesh_300.bld").exists());
+        let Some(dir) = dir else { return };
+        let mut loader = skylands_formats::AssetLoader::new(Default::default());
+        loader.mount(dir.join("level/Arena_Mesh_300.bld")).unwrap();
+        let floor = arena_floor(&loader, "Arena_Challenge_300_000.bld").unwrap();
+        let y = floor.raycast_down([-205.0, 300.0, -30.0], 400.0).unwrap().0;
+        assert!((y - 150.5).abs() < 1.0, "{y}");
+        assert!(arena_floor(&loader, "Level_302_Chompywurm.bld").is_none());
     }
 
     #[test]

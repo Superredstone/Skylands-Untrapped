@@ -498,6 +498,18 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         landing queue within 200 ft of them, "Unload Dropship" never finishes, and the
         arena stays in "Stage 1 - 01 - Unload". The dock height (~156 m) suggests the
         floor is about there.
+      - Arena floor now loaded: `spawn_level_content` adds `Arena_Mesh_<arena>.bld`'s
+        collision for `Arena_Challenge_<arena>_<nnn>` (`arena_floor`). The pairing is by
+        name only: no script or DOL string builds it (`global.bld` has an unused
+        `"Arena_Mesh_BaseString"`). The floor is at y 149..162 and covers about half
+        its bounding box (x -250..-159, z -75..15).
+      - Falling tried again with that floor and reverted again. Both docked dropships sit
+        at y ~155.5, at floor height, over spots with no floor triangle (x -190 / -200,
+        z -61 / -72). Passengers detached there fall to the kill plane and the stage
+        stalls. The dropships must dock onto a landing pad, probably the
+        `300_Arena_Platform.ai` actors, whose model collision is not in the level
+        collision. Next: collision for placed / scripted actors' models (the platforms),
+        then falling.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
