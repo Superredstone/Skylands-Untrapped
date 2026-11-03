@@ -1840,7 +1840,10 @@ impl<'a> Vm<'a> {
             if self.set.set_members.contains_key(&o) {
                 return RefTarget::Alias(vec![Ref::Obj(o)]);
             }
-            if self.index.macros.contains_key(&o) {
+            // A macro, also one with no body in this file: an `OpDefineMacroSpecialization`
+            // that names another file's macro (`Init_Setup.ai` passes "System - Manage
+            // Unpaused Game Systems" as a "run macro").
+            if self.index.macros.contains_key(&o) || self.set.macro_names.contains_key(&o) {
                 return RefTarget::Macro(o);
             }
             if self.index.behaviors.contains(&o) {
@@ -2695,6 +2698,20 @@ impl<'a> Vm<'a> {
     /// of the field).
     fn cross_file_ref_arg(&self, path: &[Ref]) -> RefTarget {
         let t = self.ref_target(path);
+        // A macro with no body here is `global.bld`'s macro of that name.
+        if let RefTarget::Macro(m) = t {
+            if !self.index.macros.contains_key(&m) {
+                let global = self.set.macro_names.get(&m).and_then(|name| {
+                    let gi = self.global_index?;
+                    let &(si, oi) = gi.by_name.get(name)?;
+                    Some(self.global?.scripts[si].ops[oi].offset)
+                });
+                if let Some(g) = global {
+                    return RefTarget::Macro(g);
+                }
+            }
+            return t;
+        }
         if !matches!(t, RefTarget::Null | RefTarget::Unknown) {
             return t;
         }
@@ -4784,6 +4801,36 @@ mod tests {
         let mut vm = Vm::new(&l, Some(&g));
         vm.global_index = Some(&gi);
         assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(1));
+    }
+
+    #[test]
+    fn vm_a_bodiless_macro_specialization_names_the_global_macro() {
+        // `Init_Setup.ai` passes "System - Manage Unpaused Game Systems" (an
+        // `OpDefineMacroSpecialization` with no ops in its file) as a "run macro" to
+        // `global.bld`: it is `global.bld`'s macro of that name.
+        let g = script_set(
+            vec![
+                ins(
+                    0x500,
+                    1,
+                    Op::DefineMacro {
+                        name: "Target".into(),
+                    },
+                ),
+                ins(0x501, 0, Op::Interface),
+            ],
+            &[],
+        );
+        let spec = 0x100;
+        let mut l = script_set(vec![], &[]);
+        l.macro_names.insert(spec, "Target".into());
+        let gi = VmIndex::new(&g);
+        let mut vm = Vm::new(&l, Some(&g));
+        vm.global_index = Some(&gi);
+        assert_eq!(
+            vm.cross_file_ref_arg(&[Ref::Obj(spec)]),
+            RefTarget::Macro(0x500)
+        );
     }
 
     #[test]

@@ -596,8 +596,40 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         variables are `OpCreateVariable`s whose descriptor reads "create
         variable||with|members", with a pointer at +0x44: their members most likely
         come from a "with members" initializer on the variable, a format not decoded
-        yet. Next: decode that initializer (start at `0x18df08` +0x44), then list the
-        arena / adventure modes' init macros.
+        yet.
+      - Ruled out: nothing points at the mode variables except call arguments
+        (`Set Game Mode(mode = "game mode - arena")`, RHSReferenceStacks at `0x18ded0` /
+        `0x17fcf8`); no static `ScriptSet` holds macros. Inside global.bld, "System -
+        Manage Unpaused Game Systems" (`@459e78`) is only referenced by its own
+        OpCodeList.
+      - Found the boot: `character/Init_Setup.bld` (the only other file naming "Manage
+        Unpaused Game Systems"). `Init_Setup.ai` STARTUP is the game's boot sequence:
+        "System - System Update Macros - Setup" [6], "System - Level Loading - Init
+        Level Loader" [17], controller mapping, "Text - Init Text Data", "Calc - Init
+        Math Constants", "UI - Init UI Containers", "Portal - Set Up Object Level
+        Loads", "Save Init - Init Savegame", "Combat - Init Combat" [51], "Game - Init
+        Player HUD Params", "Menu - Init Menu System"... Init_Setup_GameSystems.ai
+        "Combat - Init Combat" adds a permanent update macro ([30]..[35]: `run macro` by
+        reference, `permanent` = 1), most likely "Manage Unpaused Game Systems". Its
+        other scripts: Init_Setup_{Adventure, Allies, Audio, Minions, SaveGame, UI_VFX,
+        StreamLoader, Plat_Wii, ...}. Neither `main.dol` nor global.bld names
+        Init_Setup, so how the engine picks it up is not known.
+      - Init_Setup.ai STARTUP runs cleanly in the VM against global.bld (test probe):
+        no error, 4 `SystemUpdate_Manager` spawns (one per control layer), 7 update
+        entries in the shared store. Their `"macro"` came out `Unknown`: the "run macro"
+        argument is an `OpDefineMacroSpecialization` (no ops in Init_Setup, name at +0x08,
+        `OpDefineMacroStack` at +0x38) naming a global.bld macro. Fixed: `ref_target`
+        treats any `macro_names` object as a macro, and `cross_file_ref_arg` passes a
+        bodiless one as global.bld's macro of that name. Registered updates now: "System -
+        Manage Unpaused Game Systems" (`@459e78`, sets "Game Timer"), "Level Loading
+        Internal - System Update", "Camera - System - Update Wrapper", "VFX - Mood Box -
+        Update" / "Cleanup on Level Switch", "System - Data Mining - Update", "Portal -
+        Defeat Action".
+      - Next: wire it into core: load `character/Init_Setup.bld` at boot, run
+        `Init_Setup.ai` STARTUP once into the shared global store, and run the spawned
+        `SystemUpdate_Manager` actors (a global.bld script: an actor whose program is
+        global.bld itself, home = global) every tick, sharing that store with the
+        level's actors.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
