@@ -91,7 +91,7 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
   (block, not run) and the per-tick body. `OpUserBehavior` blocks after it are event handlers (not run).
 - Engine fields are `EXID` name hashes (FNV-1a, lower case), cracked against `main.dol` strings:
   `my` `4c2dfe93`, `Script Timer` `6fb9e9ff` (seconds), `my.<0xc545bc21>.facing|tilt|roll`
-  (degrees; parent name unknown), `relative facing|tilt|roll` (added every tick: windmill -2),
+  (degrees; parent name unknown), `relative facing|tilt|roll` (a one-shot turn by the value when written, read back as 0: setter `0x800766dc`, getter `0x800766cc`; the windmill writes -2 every tick),
   `my.vertical offset` `6c749d1e`, `my.scale.uniform` (percent), `visible` `54fa99a1`,
   `tint.alpha`, `distance`, `location`, `movement.ground max speed`, `collision volume.*`.
 - `OpSlideValue`: `_LHS` +0x1c, `_RHS` +0x20, `_secondsRHS` +0x24, `_easeOutRHS` +0x28, `_easeInRHS` +0x2c.
@@ -525,9 +525,19 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         (template -> points, filled on level load) and places a passenger at the
         parent's position + its rotation x the node point.
       - Falling tried a third time with nodes: 3 of 12 passengers land (y 153..158),
-        the rest still drop past the arena rim. Next: check the dropship's rotation at
-        its dock (`transform.rotation` from the script's `orientation.facing`, against
-        the dock waypoint's facing): the deck should face the floor. Then falling.
+        the rest still drop past the arena rim.
+      - Facing checked: "Airship - Orientation" turns the dropship by writing
+        `orientation.relative facing` (eased difference to "Orientation - facing
+        target" = next waypoint's facing, capped at 3) each tick. That field is a one-shot
+        turn (setter `0x800766dc` multiplies the object's matrix by the rotation at once;
+        getter `0x800766cc` reads 0); we used to keep re-adding the last value. Fixed.
+        Docked facings were unchanged by the fix and follow the script, so facing is not
+        why passengers miss the floor.
+      - Likely: released passengers stand on the dropship's own deck (its model
+        collision, a moving actor), then "Single Enemy Unload"'s landing queue (Set
+        Queue -> the enemy system's queue movement) takes them into the arena; detach
+        sets "can fall to death". Next: collision of moving actors' models (the dropship
+        deck) and enemy queue movement, before falling.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

@@ -4875,8 +4875,9 @@ mod tests {
         assert_eq!(script.script, 1);
         assert_eq!(t.translation, base.translation);
         assert_eq!(t.scale, Vec3::splat(2.0));
-        // The seeded rate spins the clone 45 ticks x -2 degrees; the spawner stays put.
-        let expected = Quat::from_rotation_y((-90f32).to_radians());
+        // The seeded `relative facing` turns the clone once (-2 degrees: the engine applies
+        // it when written); the spawner stays put.
+        let expected = Quat::from_rotation_y((-2f32).to_radians());
         assert!(
             t.rotation.dot(expected).abs() > 1.0 - 1e-6,
             "{:?}",

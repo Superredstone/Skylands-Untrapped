@@ -643,6 +643,9 @@ impl ScriptProgram {
             }
         }
 
+        // `relative facing` is a one-shot turn: its setter (`0x800766dc`) rotates the
+        // object by the value at once, and its getter (`0x800766cc`) reads 0. A script that
+        // writes it every tick turns every tick; one that stops writing stops turning.
         use field::*;
         for (rate, angle) in [
             (RELATIVE_FACING, FACING),
@@ -653,6 +656,7 @@ impl ScriptProgram {
             if r != 0.0 {
                 let a = st.get(&[MY, ORIENTATION, angle]).unwrap_or(0.0);
                 st.set(&[MY, ORIENTATION, angle], a + r);
+                st.engine.remove(&[MY, ORIENTATION, rate][..]);
             }
         }
         st.vars = std::mem::take(&mut vm.vars);
@@ -2636,6 +2640,30 @@ mod tests {
         }
         assert_eq!(st.get(&[MY, ORIENTATION, FACING]), Some(84.0));
         assert!(st.error.is_none());
+    }
+
+    #[test]
+    fn relative_facing_turns_once_per_write() {
+        // The engine applies `relative facing` when it is written and reads it back as 0:
+        // a start-up write turns the actor once, not every tick after.
+        let p = program(
+            vec![ins(
+                10,
+                0,
+                Op::SetValue {
+                    lhs: vec![h(MY), h(ORIENTATION), h(RELATIVE_FACING)],
+                    rhs: lit(-2.0),
+                },
+            )],
+            vec![],
+        );
+        let mut st = ActorScriptState::default();
+        st.set(&[MY, ORIENTATION, FACING], 90.0);
+        for _ in 0..3 {
+            p.tick(0, &mut st, 1.0 / 60.0);
+        }
+        assert_eq!(st.get(&[MY, ORIENTATION, FACING]), Some(88.0));
+        assert_eq!(st.get(&[MY, ORIENTATION, RELATIVE_FACING]), None);
     }
 
     #[test]
