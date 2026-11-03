@@ -1900,10 +1900,14 @@ impl<'a> Vm<'a> {
                     && (1..=p.len()).all(|k| !self.refs_of(&p[..k]).contains_key(&p[..k])) =>
             {
                 // A record variable is the record itself (`"New Info"`, returned by
-                // reference); a field of a record, record-typed or not, is a reference that
-                // is `null` until set (`"trapping data"."villain just captured data"`).
+                // reference), and so is a field that is a record (an embedded structure:
+                // `@14bdd8 = "enemyInfo"."internalStateTracking"`, which "Set State"
+                // writes through). Any other field is a reference that is `null` until set
+                // (`"trapping data"."villain just captured data"`).
+                let record = |r: Option<&Ref>| matches!(r, Some(Ref::Obj(v)) if self.set.records.contains(v));
                 match p[..] {
                     [Ref::Obj(v)] if self.set.records.contains(&v) => RefTarget::Alias(p),
+                    [_, _, ..] if record(path.last()) => RefTarget::Alias(p),
                     _ => RefTarget::Null,
                 }
             }
@@ -4805,6 +4809,66 @@ mod tests {
         s.handle_ids = vec![NULL_HASH];
         s.handle_ns = vec![name_hash("level.bld")];
         assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(0));
+    }
+
+    #[test]
+    fn vm_reference_to_a_record_field_is_that_record() {
+        // "Enemy System - System - Update": `@14bdd8 = "enemyInfo"."internalStateTracking"`
+        // (an embedded structure), then `@14bdd8."changeState" == 1` sees what "Set State"
+        // wrote through `"enemyInfo"."internalStateTracking"."changeState"`.
+        let (rec, ist, cs, alias, r) = (0x100, 0x110, 0x120, 0x130, 0x140);
+        let mut s = script_set(
+            vec![
+                ins(1, 5, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    Op::SetRef {
+                        lhs: vec![Ref::Obj(alias)],
+                        rhs: vec![Ref::Obj(rec), Ref::Obj(ist)],
+                        desc: String::new(),
+                    },
+                ),
+                ins(
+                    4,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Obj(rec), Ref::Obj(ist), Ref::Obj(cs)],
+                        rhs: lit(I(1)),
+                    },
+                ),
+                ins(
+                    5,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(alias), Ref::Obj(cs)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[
+                (rec, "enemyInfo"),
+                (ist, "internalStateTracking"),
+                (cs, "changeState"),
+                (alias, "tracking"),
+                (r, "r"),
+            ],
+        );
+        for v in [rec, ist, cs, alias] {
+            s.vars.get_mut(&v).unwrap().type_name = "OpCreateVariable".into();
+        }
+        s.records.extend([rec, ist]);
+        assert_eq!(out_of(Vm::new(&s, None).call("m", &[]).unwrap(), "r"), I(1));
     }
 
     #[test]

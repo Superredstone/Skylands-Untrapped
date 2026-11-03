@@ -5400,7 +5400,8 @@ mod tests {
         assert_eq!(names, ["Stage 1 - 02 - Unload"]);
         // Passengers leave "disabled": `LootSystem_Init.ai` runs "Game - Initialize Enemy
         // System Globals" (`State_Disabled` 0, `State_Spawn` 1, ...), so the enemy system's
-        // start-up swaps the "disabled" start state for the patrol one.
+        // start-up swaps the "disabled" start state for the patrol one. Spawn then moves
+        // them on to Idle, whose behaviour the update switches to (`@14cb54`).
         let mut q = world.query::<(&ActorScript, &SpawnedActor)>();
         let passengers: Vec<_> = q
             .iter(world)
@@ -5408,9 +5409,6 @@ mod tests {
             .filter_map(|(a, _)| program.behavior_name(a.script, a.state.behavior()?))
             .collect();
         assert!(!passengers.is_empty());
-        assert!(
-            passengers.iter().all(|b| *b != "disabled"),
-            "{passengers:?}"
-        );
+        assert!(passengers.iter().all(|b| *b == "idle"), "{passengers:?}");
     }
 }

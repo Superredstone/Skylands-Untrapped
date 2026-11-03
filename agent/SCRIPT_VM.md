@@ -473,10 +473,22 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         state comes from `patrolBehaviorState`: passengers go Spawn (1), then Idle (2). A
         reference to a variable that holds a value now reads that value. The identity read
         remains only for references to variables that hold no value.
+      - Spawn -> Idle: "Set State" writes `"enemyInfo"."internalStateTracking"."changeState"
+        = 1`; the update reads it through `@14bdd8`, which Prescript binds to
+        `"enemyInfo"."internalStateTracking"` ([340]) and which used to bind null (the
+        "field is null until set" rule). `internalStateTracking` is a record (an embedded
+        structure); a reference to a field that is a record is that record. Fields that
+        are not records (`"villain just captured data"`) stay null until set. Now `@14cb54
+        set behavior <currentState.behavior>` runs, and every passenger is in "idle" by
+        30 s.
+      - Next: leaving Idle. The Sporeasaur "idle" behaviour calls the targeting macro
+        (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
+        Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
+        ([1058]). The arena test's hero stands at the origin.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
   unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Passengers leave
-  "disabled" for Spawn, then Idle (29). After unloading, the dropships fly on past their last
+  "disabled" and are in "idle" by 30 s (29). After unloading, the dropships fly on past their last
   waypoint and keep climbing; what should end their flight is not traced.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.
