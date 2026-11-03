@@ -5398,5 +5398,19 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Stage 1 - 02 - Unload"]);
+        // Passengers leave "disabled": `LootSystem_Init.ai` runs "Game - Initialize Enemy
+        // System Globals" (`State_Disabled` 0, `State_Spawn` 1, ...), so the enemy system's
+        // start-up swaps the "disabled" start state for the patrol one.
+        let mut q = world.query::<(&ActorScript, &SpawnedActor)>();
+        let passengers: Vec<_> = q
+            .iter(world)
+            .filter(|(_, c)| c.template.starts_with("Enemy_S4_"))
+            .filter_map(|(a, _)| program.behavior_name(a.script, a.state.behavior()?))
+            .collect();
+        assert!(!passengers.is_empty());
+        assert!(
+            passengers.iter().all(|b| *b != "disabled"),
+            "{passengers:?}"
+        );
     }
 }

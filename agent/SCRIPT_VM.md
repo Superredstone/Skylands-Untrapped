@@ -450,13 +450,33 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       - "Return From Disabled Logic" runs when `description.state` has been above 0 (the
         update sets `internalCleanupState` to 1 then) and is 0 again. Here it never rises
         above 0, and no script in `global.bld` or the arena passes a non-default state to
-        the creature state setter (`@ea128`). Next: read the enemy queue / state machine
-        ("currentQueue", "spawnQueue", the per-state logic after `@14ce24`) systematically,
-        to find which branch is meant to leave the "disabled" state after an unload.
+        the creature state setter (`@ea128`).
+      - Fixed: the `"EnemySystem_Globals"."State_*"` numbers are plain created variables
+        (no `ValueInfo` initial value). `LevelSystems.ai` "Game - Initialize Enemy System
+        Globals" (`@209ddc`) assigns them: Disabled 0, Spawn 1, Idle 2, Alerted 3,
+        Battle 4, AttackPrimary 5, Secondary 6, Tertiary 7, Death 8, plus the Color /
+        Knockback / FreezeFrame / Hazard / Enemy_DMG globals. No op names it. Its caller is
+        `LootSystem_Init.ai` STARTUP: `<global>.<x> = @209ddc` ([22]), then `use ?`
+        through it. "Game - Populate Enemy Stats" is called the same way ([32]); a scan of
+        all 1337 `.bld` files finds no other caller. Our VM already ran it, but the level
+        wrote `Handle(29).<its own State_Spawn>` into the actor's own store, while
+        `global.bld` read `Obj(946380).<its own State_Spawn>`.
+      - Now a record that `global.bld` exports is one object for every file. A level
+        reaches it by `EXID` handle, `global.bld` by its root variable; both are keyed
+        `GLOBAL_ROOT_BASE + root index`, with fields by name, in the shared store
+        (`Vm::global_root`, inside `field_keys`). Two follow-ons: a field holding a value
+        is that variable when referenced (`"startingState" =
+        "EnemySystem_Globals"."State_Spawn"` used to give null); `spawn
+        "EnemySystem_Globals"."ForCloning_EnemyInfo"` checks record-ness on the path as
+        written.
+      - Result: Init's `startingState == State_Disabled` (`@14b63c`) holds, so the start
+        state comes from `patrolBehaviorState`: passengers go Spawn (1), then Idle (2). A
+        reference to a variable that holds a value now reads that value. The identity read
+        remains only for references to variables that hold no value.
         `call_global` binds reference arguments with plain `ref_target`.
   Now: stage 1 dropships climb to their dock waypoint (y 155.9), dock (~10 s) and
-  unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Not right yet: the
-  passengers stay "disabled" (29). After unloading, the dropships fly on past their last
+  unload; the arena moves on through "Stage 1 - 02 / 03 - Unload". Passengers leave
+  "disabled" for Spawn, then Idle (29). After unloading, the dropships fly on past their last
   waypoint and keep climbing; what should end their flight is not traced.
   `tools/rea-bridge/maptrace.py` maps a trace onto the dumps; `ActorScriptState::references()`
   lists an actor's stored references.

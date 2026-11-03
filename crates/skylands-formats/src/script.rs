@@ -1536,6 +1536,14 @@ const INSTANCE_BASE: usize = 1 << 40;
 /// `605040`), and instances are shared between files.
 const FIELD_BASE: usize = 1 << 41;
 
+/// A record exported by `global.bld` (`"EnemySystem_Globals"`), by its root index: one
+/// object for every file. A level reaches it through its `EXID` handle, `global.bld`
+/// through its own variable; both key it here, with fields keyed by name
+/// (`LevelSystems.ai` "Game - Initialize Enemy System Globals", run by
+/// `LootSystem_Init.ai`, sets `"EnemySystem_Globals"."State_Spawn"` = 1 for the enemy
+/// system to read).
+const GLOBAL_ROOT_BASE: usize = INSTANCE_BASE + (1 << 39);
+
 /// A variable by name, the way field keys name fields (`Vm::cross_file_ref_arg`).
 fn named_var(name: &str) -> usize {
     FIELD_BASE | name_hash(name) as usize
@@ -1871,6 +1879,11 @@ impl<'a> Vm<'a> {
         match p.first() {
             Some(Ref::Obj(_)) if self.refs.get(&p[..1]) == Some(&RefTarget::Null) => {
                 RefTarget::Null
+            }
+            // A field holding a value is that variable ("Enemy System - System - Init":
+            // `"startingState" = "EnemySystem_Globals"."State_Spawn"`).
+            Some(Ref::Obj(_)) if p.len() > 1 && self.vars_of(&p).contains_key(&p) => {
+                RefTarget::Alias(p)
             }
             // A script's own variable that no `OpSetReference` ever pointed anywhere (nor
             // any record it is part of) is `null`: `Sky_Traps.ai` asks
@@ -2283,6 +2296,9 @@ impl<'a> Vm<'a> {
     /// A data-object instance path with its fields keyed by name (`FIELD_BASE`), so every
     /// file names them alike; other paths as they are.
     fn field_keys(&self, mut p: Vec<Ref>) -> Vec<Ref> {
+        if let Some(root) = self.global_root(&p) {
+            p[0] = Ref::Obj(root);
+        }
         if is_instance(&p) {
             for r in &mut p[1..] {
                 if let Ref::Obj(f) = *r {
@@ -2294,6 +2310,28 @@ impl<'a> Vm<'a> {
             }
         }
         p
+    }
+
+    /// `GLOBAL_ROOT_BASE` key of a field path into a record `global.bld` exports.
+    fn global_root(&self, p: &[Ref]) -> Option<usize> {
+        if p.len() < 2 {
+            return None;
+        }
+        let (g, index) = match (p[0], self.home, self.global) {
+            (Ref::Handle(h), None, Some(g)) => {
+                let i = h as usize;
+                if *self.set.handle_ns.get(i)? != name_hash("global.bld") {
+                    return None;
+                }
+                let id = *self.set.handle_ids.get(i)? as usize;
+                (g, id.checked_sub(g.export_base)?)
+            }
+            (Ref::Obj(o), Some(_), _) => (self.set, self.set.roots.iter().position(|&r| r == o)?),
+            _ => return None,
+        };
+        g.records
+            .contains(g.roots.get(index)?)
+            .then_some(GLOBAL_ROOT_BASE + index)
     }
 
     /// The slot an `OpSetReference` rebinds: the variable path itself, with only what leads
@@ -3402,8 +3440,10 @@ impl<'a> Vm<'a> {
                     // (copy semantics not reversed; exact for one instance per actor).
                     if actor.is_none() && referenced.is_none() {
                         if let Ok(p) = self.canon(template) {
-                            if matches!(p.last(), Some(Ref::Obj(v)) if self.set.records.contains(v))
-                            {
+                            // The record as written (a `global.bld` record's field is keyed by
+                            // name: `"EnemySystem_Globals"."ForCloning_EnemyInfo"`).
+                            let record = |r: Option<&Ref>| matches!(r, Some(Ref::Obj(v)) if self.set.records.contains(v));
+                            if record(p.last()) || record(template.last()) {
                                 let inst = self.instantiate(&p);
                                 self.refs
                                     .insert(vec![Ref::Obj(ins.offset)], RefTarget::Alias(inst));
@@ -3705,11 +3745,11 @@ impl<'a> Vm<'a> {
     }
 
     fn read(&mut self, path: &[Ref]) -> Value {
-        // A reference read as a value is the referenced object's identity: a state's
-        // `."key"` (`= "stateName"`, a reference to `"EnemySystem_Globals".State_Idle`) is
-        // compared with `"stateName":Int` in "Enemy System - State - Set State", and no
-        // script assigns the `State_*` variables. Variables are identified by name, since
-        // each file reaches them through its own copy of the fields.
+        // A reference to a variable that holds no value, read as a value, is the
+        // referenced object's identity (by name, since each file reaches it through its
+        // own copy of the fields). One that holds a value reads that value: a state's
+        // `."key"` (`= "stateName"`, a reference to `"EnemySystem_Globals".State_Idle`,
+        // 2 once "Game - Initialize Enemy System Globals" ran).
         if let Some(id) = self.referenced_identity(path) {
             return Value::Int(id);
         }
@@ -4646,6 +4686,90 @@ mod tests {
         // Without `global.bld`'s index the call keeps its literals, as before.
         let mut vm = Vm::new(&l, Some(&g));
         assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(-1));
+    }
+
+    #[test]
+    fn vm_global_records_are_one_object_for_every_file() {
+        // `LevelSystems.ai` "Game - Initialize Enemy System Globals" sets
+        // `"EnemySystem_Globals"."State_Spawn"` = 1 through its handle and its own copy of
+        // the field; `global.bld`'s enemy system reads it through its own variables.
+        let (root, gspawn, gout) = (0x500, 0x510, 0x520);
+        let mut g = script_set(
+            vec![
+                ins(
+                    1,
+                    3,
+                    Op::DefineMacro {
+                        name: "Read".into(),
+                    },
+                ),
+                ins(2, 1, Op::Interface),
+                param(gout, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    set(
+                        gout,
+                        Rhs {
+                            a: Operand::Read {
+                                path: vec![Ref::Obj(root), Ref::Obj(gspawn)],
+                                kind: NumKind::Int,
+                            },
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[
+                (root, "EnemySystem_Globals"),
+                (gspawn, "State_Spawn"),
+                (gout, "out"),
+            ],
+        );
+        g.roots = vec![root];
+        g.records.insert(root);
+        let (stub, lspawn, lout, r) = (0xd00, 0x100, 0x110, 0x120);
+        let mut l = script_set(
+            vec![
+                ins(1, 7, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                ins(
+                    3,
+                    0,
+                    Op::SetValue {
+                        lhs: vec![Ref::Handle(0), Ref::Obj(lspawn)],
+                        rhs: lit(I(1)),
+                    },
+                ),
+                ins(4, 2, Op::UseMacro { target: Some(stub) }),
+                ins(5, 1, Op::Interface),
+                param(lout, PARAM_OUTPUT, Some(lit(I(-1)))),
+                ins(
+                    6,
+                    0,
+                    set(
+                        r,
+                        Rhs {
+                            a: rd(lout),
+                            arith: -1,
+                            b: None,
+                            func: 0,
+                        },
+                    ),
+                ),
+            ],
+            &[(lspawn, "State_Spawn"), (lout, "out"), (r, "r")],
+        );
+        l.handle_ids = vec![0];
+        l.handle_ns = vec![name_hash("global.bld")];
+        l.macro_names.insert(stub, "Read".into());
+        let gi = VmIndex::new(&g);
+        let mut vm = Vm::new(&l, Some(&g));
+        vm.global_index = Some(&gi);
+        assert_eq!(out_of(vm.call("m", &[]).unwrap(), "r"), I(1));
     }
 
     #[test]
