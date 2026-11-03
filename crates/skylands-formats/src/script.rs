@@ -1633,11 +1633,12 @@ pub enum Effect {
         from: u64,
         distance: f32,
     },
-    /// `<object>.attach node = <parent>`: the object follows `parent` (engine id), or is
-    /// let go (`null`).
+    /// `<object>.attach node = <parent>[.attach nodes[node]]`: the object follows `parent`
+    /// (engine id), on its attach node `node` when one is named, or is let go (`null`).
     Attach {
         target: Vec<u32>,
         parent: Option<u64>,
+        node: Option<usize>,
     },
     /// `OpDisplace` of the engine object `target` (name-hash path).
     Displace {
@@ -3019,8 +3020,17 @@ impl<'a> Vm<'a> {
                                     self.member_id(&t)
                                 }),
                             };
+                            // `.attach nodes[i]`: the index is the op's `RHSReferenceStack` index.
+                            let node = match self.set.ref_index.get(&ins.offset) {
+                                Some(i) => usize::try_from(self.eval(i)?.as_f32() as i64).ok(),
+                                None => None,
+                            };
                             if let Some(t) = self.target(object) {
-                                self.emit(t, |target| Effect::Attach { target, parent });
+                                self.emit(t, |target| Effect::Attach {
+                                    target,
+                                    parent,
+                                    node,
+                                });
                             }
                             continue;
                         }

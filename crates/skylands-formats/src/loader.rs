@@ -624,6 +624,31 @@ mod tests {
     }
 
     #[test]
+    fn test_dropship_passenger_nodes_sit_on_its_deck() {
+        // `312_AirPirateTransport.mdl`: "Passenger 1L" is on bone `J_upperDeck`, moved by
+        // its `BoneAttachInfo._transform` (6 ft left, 3 ft up, 7 ft forward).
+        let p1 = Path::new("assets/files/level/Arena_Challenge_300_000.bld");
+        let p2 = Path::new("../../assets/files/level/Arena_Challenge_300_000.bld");
+        let path = if p1.exists() { p1 } else { p2 };
+        if !path.exists() {
+            return;
+        }
+        let mut loader = AssetLoader::default();
+        loader.mount(path).unwrap();
+        let m = loader.load_igb("Arena_Challenge_300_000.bld").unwrap();
+        let a = m
+            .actor_models
+            .iter()
+            .find(|a| a.actor == "GroupTransport_Helecopter")
+            .unwrap();
+        assert_eq!(a.attach_nodes[3].name, "Passenger 1L");
+        let p = a.attach_node_points(&m.skeletons)[3].unwrap();
+        for (got, want) in p.iter().zip([1.8288, 6.047, 3.9875]) {
+            assert!((got - want).abs() < 1e-3, "{p:?}");
+        }
+    }
+
+    #[test]
     fn test_mount_dir_and_resolve_targets() {
         let p1 = Path::new("assets/files");
         let p2 = Path::new("../../assets/files");

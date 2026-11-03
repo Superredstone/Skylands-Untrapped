@@ -1430,6 +1430,17 @@ impl Skeleton {
     pub fn get_bone_index(&self, name: &str) -> Option<usize> {
         self.name_to_index.get(name).copied()
     }
+
+    /// Model-space bind transform of bone `i`: its local transforms up to the root.
+    pub fn bind_global(&self, i: usize) -> [f32; 16] {
+        let mut m = self.bones[i].local_transform;
+        let mut p = self.bones[i].parent;
+        while let Some(j) = p {
+            m = mat4_mul(&self.bones[j].local_transform, &m);
+            p = self.bones[j].parent;
+        }
+        m
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1989,11 +2000,32 @@ pub struct ActorModel {
     pub transitions: Vec<AnimationTransition>,
 }
 
-/// `BoneAttachInfo`: `+0x08` node name, `_boneName` `+0x1c`.
+impl ActorModel {
+    /// Model-space position of each of its `attach nodes`, at the bind pose (`None`: the
+    /// node's bone is not in the rig).
+    pub fn attach_node_points(&self, skeletons: &[Skeleton]) -> Vec<Option<[f32; 3]>> {
+        let skel = self.skeleton.and_then(|s| skeletons.get(s));
+        self.attach_nodes
+            .iter()
+            .map(|n| {
+                let bone = match skel {
+                    Some(s) => s.bind_global(s.get_bone_index(&n.bone)?),
+                    None => mat4_identity(),
+                };
+                let m = mat4_mul(&bone, &n.transform);
+                Some([m[12], m[13], m[14]])
+            })
+            .collect()
+    }
+}
+
+/// `BoneAttachInfo`: `+0x08` node name, `_boneName` `+0x1c`, `_transform` `+0x24`
+/// (translation, then Euler degrees at `+0x30`) relative to the bone.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AttachNode {
     pub name: String,
     pub bone: String,
+    pub transform: [f32; 16],
 }
 
 /// `tfbAnimationState`: `+0x08` name, `_id` `+0x0c`, `_animations` `+0x14`
@@ -3747,9 +3779,16 @@ impl IgbModel {
                     .map(list_items)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|n| AttachNode {
-                        name: cstr(n + 0x08),
-                        bone: cstr(n + 0x1c),
+                    .map(|n| {
+                        let euler =
+                            |o: usize| [0, 1, 2].map(|k| Self::read_f32(data, o + k * 4, endian));
+                        let mut transform = mat4_from_euler_deg(euler(n + 0x30));
+                        transform[12..15].copy_from_slice(&euler(n + 0x24));
+                        AttachNode {
+                            name: cstr(n + 0x08),
+                            bone: cstr(n + 0x1c),
+                            transform,
+                        }
                     })
                     .collect();
                 // Drawables in mesh order, with the joint of their entity.

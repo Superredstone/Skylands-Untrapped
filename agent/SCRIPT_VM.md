@@ -506,10 +506,28 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
       - Falling tried again with that floor and reverted again. Both docked dropships sit
         at y ~155.5, at floor height, over spots with no floor triangle (x -190 / -200,
         z -61 / -72). Passengers detached there fall to the kill plane and the stage
-        stalls. The dropships must dock onto a landing pad, probably the
-        `300_Arena_Platform.ai` actors, whose model collision is not in the level
-        collision. Next: collision for placed / scripted actors' models (the platforms),
-        then falling.
+        stalls. The original also detaches them there: Navigate Waypoints at the dock
+        waypoint (roll 2), when `"Command - docked"` = 0 ([462]), detaches every onboard
+        enemy, then sets docked = 1 ([478]).
+      - No landing pad: nothing but the dropships sits at the docks.
+        `300_Arena_Platform.ai` only warps players within 35 ft to a safe spot. The
+        nearest floor is 2.5 / 5.8 / 6.8 m from the three docks, at y 152 / 163 / 149.
+        Our passengers ride at the dropship's centre (offset ~0); in the original they
+        sit on its attach nodes ("Transport - Attach Enemy": `attach node =
+        transport.attach nodes[i]`, Handle(38), then a displace by the node's
+        distance / heading / pitch).
+      - Attach nodes done: `BoneAttachInfo._transform` (+0x24 translation, +0x30 Euler
+        degrees, relative to its bone) is parsed (`AttachNode::transform`), and
+        `ActorModel::attach_node_points` gives model-space positions at the bind pose.
+        On the dropship (`312_AirPirateTransport.mdl`), "Passenger 1L..3R" sit on
+        `J_upperDeck` at x +/-1.83 m, y 6.05 m, z -1.8..4 m. `Effect::Attach` carries the
+        node index (the op's `RHSReferenceStack` index). Core keeps `AttachNodes`
+        (template -> points, filled on level load) and places a passenger at the
+        parent's position + its rotation x the node point.
+      - Falling tried a third time with nodes: 3 of 12 passengers land (y 153..158),
+        the rest still drop past the arena rim. Next: check the dropship's rotation at
+        its dock (`transform.rotation` from the script's `orientation.facing`, against
+        the dock waypoint's facing): the deck should face the floor. Then falling.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

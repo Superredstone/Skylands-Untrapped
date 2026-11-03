@@ -65,6 +65,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<ActivePortal>()
             .init_resource::<MagicMoment>()
             .init_resource::<CloneEffects>()
+            .init_resource::<AttachNodes>()
             .init_resource::<ActorEffects>()
             .init_resource::<PlacementRefs>()
             .init_resource::<PendingPlacementRefs>()

@@ -521,6 +521,11 @@ pub struct ScriptVarBoard {
 #[derive(Resource, Debug, Default)]
 pub struct CloneEffects(pub Vec<(Entity, u32, skylands_formats::script::Effect)>);
 
+/// Model-space positions (metres) of each actor template's `attach nodes`, at the bind
+/// pose, from the level's `tfbActorInfo` models (`ActorModel::attach_node_points`).
+#[derive(Resource, Debug, Default)]
+pub struct AttachNodes(pub std::collections::HashMap<String, Vec<Option<Vec3>>>);
+
 /// Script effects on other actors (`Effect::ForActor`), for `clone_effect_system`.
 #[derive(Resource, Debug, Default)]
 pub struct ActorEffects(pub Vec<(Entity, skylands_formats::script::Effect)>);

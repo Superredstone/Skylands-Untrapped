@@ -1695,6 +1695,20 @@ pub fn spawn_level_content(
         return false;
     };
 
+    commands.insert_resource(AttachNodes(
+        model
+            .actor_models
+            .iter()
+            .filter(|a| !a.attach_nodes.is_empty())
+            .map(|a| {
+                let points = a.attach_node_points(&model.skeletons);
+                (
+                    a.actor.clone(),
+                    points.into_iter().map(|p| p.map(Vec3::from)).collect(),
+                )
+            })
+            .collect(),
+    ));
     let mut col_mesh = crate::collision::CollisionMesh::from_igb(&model);
     if let Some(floor) = arena_floor(loader, level_name) {
         let mut triangles = std::mem::take(&mut col_mesh.triangles);
@@ -2332,6 +2346,7 @@ pub fn clone_effect_system(
     mut effects: ResMut<ActorEffects>,
     mut refs: ResMut<PlacementRefs>,
     mut new_refs: ResMut<PendingPlacementRefs>,
+    nodes: Option<Res<AttachNodes>>,
     mut clones: Query<
         (
             Entity,
@@ -2374,6 +2389,22 @@ pub fn clone_effect_system(
         .iter()
         .filter_map(|(e, .., t)| Some((e, t?.translation)))
         .collect();
+    // An attach node of a parent, in the world: its rotation applied to the node's
+    // model-space position.
+    let node_offset: std::collections::HashMap<(Entity, usize), Vec3> = clones
+        .iter()
+        .filter_map(|(e, c, _, _, t)| {
+            let points = nodes.as_ref()?.0.get(&c?.template)?;
+            let rot = t?.rotation;
+            Some(
+                points
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(i, p)| Some(((e, i), rot * (*p)?))),
+            )
+        })
+        .flatten()
+        .collect();
     for (entity, effect) in work {
         let Ok((entity, _, mut script, tint, transform)) = clones.get_mut(entity) else {
             continue;
@@ -2402,11 +2433,24 @@ pub fn clone_effect_system(
                 }
                 continue;
             }
-            Effect::Attach { ref target, parent } if target == &[MY] => {
+            Effect::Attach {
+                ref target,
+                parent,
+                node,
+            } if target == &[MY] => {
                 let parent = parent.and_then(|p| Entity::try_from_bits(p).ok());
                 match parent.and_then(|p| Some((p, *at.get(&p)?))) {
                     Some((p, pos)) => {
-                        let here = at.get(&entity).copied().unwrap_or(pos);
+                        // On a named attach node: there; else where it is now.
+                        let here = match node.and_then(|n| node_offset.get(&(p, n))) {
+                            Some(&o) => pos + o,
+                            None => at.get(&entity).copied().unwrap_or(pos),
+                        };
+                        if let Some(t) = transform {
+                            let mut t = t;
+                            t.translation = here;
+                        }
+                        at.insert(entity, here);
                         commands.entity(entity).insert(AttachedTo {
                             parent: p,
                             offset: here - pos,
@@ -4496,6 +4540,7 @@ mod tests {
                 Effect::Attach {
                     target: vec![MY],
                     parent: Some(from),
+                    node: None,
                 },
             ),
         ];
@@ -4514,6 +4559,7 @@ mod tests {
             Effect::Attach {
                 target: vec![MY],
                 parent: None,
+                node: None,
             },
         )];
         app.update();
@@ -4523,6 +4569,68 @@ mod tests {
             .translation = Vec3::ZERO;
         app.update();
         assert_eq!(at(&app), Vec3::new(20.0, 5.0, 3.0));
+    }
+
+    #[test]
+    fn test_passenger_attached_to_a_node_sits_on_it() {
+        // "Transport - Attach Enemy": `"enemy".attach node = "transport".attach nodes[3]`
+        // ("Passenger 1L"): the passenger goes to that node, turned with the transport.
+        use skylands_formats::script::Effect;
+        use skylands_formats::script_runtime::field::*;
+        let mut app = App::new();
+        app.init_resource::<CloneEffects>();
+        app.init_resource::<ActorEffects>();
+        app.init_resource::<PlacementRefs>();
+        app.init_resource::<PendingPlacementRefs>();
+        app.insert_resource(AttachNodes(
+            [(
+                "GroupTransport_Helecopter".to_string(),
+                vec![None, None, None, Some(Vec3::new(1.8, 6.0, 4.0))],
+            )]
+            .into(),
+        ));
+        app.add_systems(
+            Update,
+            (clone_effect_system, apply_deferred, attach_system).chain(),
+        );
+        let spawner = app.world_mut().spawn_empty().id();
+        let transport = app
+            .world_mut()
+            .spawn((
+                SpawnedActor {
+                    parent: spawner,
+                    serial: 1,
+                    template: "GroupTransport_Helecopter".into(),
+                    template_offset: 0,
+                },
+                Transform::from_xyz(10.0, 5.0, 0.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            ))
+            .id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                SpawnedActor {
+                    parent: spawner,
+                    serial: 0,
+                    template: "Enemy".into(),
+                    template_offset: 0,
+                },
+                Transform::from_xyz(0.0, 100.0, 0.0),
+            ))
+            .id();
+        app.world_mut().resource_mut::<ActorEffects>().0 = vec![(
+            enemy,
+            Effect::Attach {
+                target: vec![MY],
+                parent: Some(transport.to_bits()),
+                node: Some(3),
+            },
+        )];
+        app.update();
+        let at = app.world().get::<Transform>(enemy).unwrap().translation;
+        // Turned 90 degrees about Y: (1.8, 6, 4) -> (4, 6, -1.8).
+        assert!(at.distance(Vec3::new(14.0, 11.0, -1.8)) < 1e-4, "{at}");
     }
 
     #[test]
@@ -5281,17 +5389,20 @@ mod tests {
         loader
             .mount(dir.join("level/Arena_Challenge_300_000.bld"))
             .unwrap();
+        loader.mount(dir.join("level/Arena_Mesh_300.bld")).unwrap();
         let mut app = build_test_app();
         let world = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut env = world.resource::<EnvironmentCollision>().clone();
         let mut commands = Commands::new(&mut queue, world);
         assert!(spawn_level_content(
             &mut commands,
             &loader,
             "Arena_Challenge_300_000.bld",
-            None,
+            Some(&mut env),
             &CampaignProgress::default(),
         ));
+        world.insert_resource(env);
         queue.apply(world);
         world.spawn((Hero, Transform::IDENTITY));
         // 5 s at 60 Hz.
