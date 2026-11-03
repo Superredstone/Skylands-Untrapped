@@ -533,11 +533,52 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         getter `0x800766cc` reads 0); we used to keep re-adding the last value. Fixed.
         Docked facings were unchanged by the fix and follow the script, so facing is not
         why passengers miss the floor.
-      - Likely: released passengers stand on the dropship's own deck (its model
-        collision, a moving actor), then "Single Enemy Unload"'s landing queue (Set
-        Queue -> the enemy system's queue movement) takes them into the arena; detach
-        sets "can fall to death". Next: collision of moving actors' models (the dropship
-        deck) and enemy queue movement, before falling.
+      - Not the landing queue: "Set Queue" (`queueToSet` 0) rebinds the enemy's own
+        `"spawnQueue"` variable (`find variable "spawnQueue" on <enemy>`, [2527]..[2534])
+        and forces the Spawn state; the update's Spawn branch follows `spawnQueue`
+        ([543]..[549]). None of the passenger scripts has a `spawnQueue` (nor `idleQueue`,
+        `startTrigger`, `startState`); the name occurs once in the whole level, not as a
+        variable. So in the original too the find fails, Spawn finds no queue,
+        "patrolComplete" = 1 and Set State goes to Idle, as ours does. In our run Set
+        Queue never reaches its `queueToSet == 0` branch.
+      - Open: how passengers get from the dock onto the floor. Candidates: they stand on
+        the dropship deck (its model collision) and the enemy's own movement (targeting
+        -> Alerted -> Battle moves toward the target) walks them off; or the engine's
+        "can fall to death" fall.
+      - Targeting never runs: with the hero on the arena floor (-205, 150.5, -30),
+        25..40 m (80..130 ft) from the passengers, inside their 500 ft `noticeRange`,
+        they stay "idle" for 50 s. "Targeting Update" (`@15cfe0`) stops at its first gate
+        every tick: `@11f6a4."updateTimer" < "Game Timer"` ([1968]).
+      - "Game Timer" is set only by GameSystems.ai "System - Manage Unpaused Game
+        Systems" (`"Game Timer" = "timer"`, an update macro of signature "System -
+        Update Macro" `@114d78`). Update macros are called every frame by global.bld's
+        `SystemUpdate_Manager.ai` actor from its update layer lists, with `timer =
+        Script Timer - start time` (also System.ai [1214], TRG_Checks_Manager.ai
+        [214]). Our runtime runs no global.bld actors (update managers, game-mode
+        systems), so "Game Timer" stays 0.
+      - The update framework (System.ai): "System - System Update Internal - Start
+        System Update Manager" (`@4e74b8`) spawns a `SystemUpdate_Manager` per control
+        layer (`"System Update Controls"."all layers"`). Updates are added to a layer's
+        `"updates"` list (`"start time"` per entry) by "System - Add/Remove System Update
+        Macro - Update Constantly" (`@114c68`), or run once by "Immediately Execute
+        System Update". GameSystems.ai "System - Set Game Mode" runs a mode's "game mode
+        init macros" / "game mode exit macros". No op names "Manage Unpaused Game
+        Systems" (`@459e78`): it is registered through game-mode data (macro references
+        in records), so the per-frame call hangs on the global boot chain (game modes,
+        control layers, update managers). Decision: run that chain (boot chain).
+      - Map so far: `extract_level_markers` on global.bld gives 16 markers, 10 of them
+        script controllers: WiiSpecificSetup, Minion_Tuning, EnemySystem_Global,
+        Macros_UI (UI.ai), Pause Controller, Macros_Sound, Macros_Music,
+        movementUpdate, Portal_Manager, TRG_Checker (TRG_Checks_Manager.ai). We spawn
+        none of them (only the level's markers). GameSystems.ai (`Macros_GameSystems`
+        0x45877c), System.ai (`Macros_System` 0x4d8440) and SystemUpdate_Manager.ai
+        (0x4e77fc) are `tfbActorInfo` templates but not among the markers.
+        `ScriptSet::placements` holds every `tfbActorInfo` (all 68 scripted ones), so
+        it does not tell which are placed. No `main.dol` string names them. Next: find
+        how GameSystems / System actors come to exist (a placement list the marker
+        extraction skips, or a spawn by one of the 10 controllers: TRG_Checks_Manager.ai
+        and Portal_Manager.ai are candidates), then the boot from there to "System - Set
+        Game Mode".
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
