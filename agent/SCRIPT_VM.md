@@ -574,11 +574,30 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         0x45877c), System.ai (`Macros_System` 0x4d8440) and SystemUpdate_Manager.ai
         (0x4e77fc) are `tfbActorInfo` templates but not among the markers.
         `ScriptSet::placements` holds every `tfbActorInfo` (all 68 scripted ones), so
-        it does not tell which are placed. No `main.dol` string names them. Next: find
-        how GameSystems / System actors come to exist (a placement list the marker
-        extraction skips, or a spawn by one of the 10 controllers: TRG_Checks_Manager.ai
-        and Portal_Manager.ai are candidates), then the boot from there to "System - Set
-        Game Mode".
+        it does not tell which are placed. No `main.dol` string names them.
+      - They are placed, but inactive: global.bld has 70 scripted `tfbActorInfo`
+        placements, 10 active (the controllers above), the rest inactive macro
+        libraries ("Macros_*", GameSystems.ai, System.ai, SystemUpdate_Manager.ai...).
+        None of the 10 controllers spawns them. Their macros run when called; their
+        bodies don't run.
+      - "System - Set Game Mode" (GameSystems.ai `@17fc78`) is called by Spyro_AdventureData.ai
+        "Level - _Level Defintion" ([60], story levels' definition), "System - Level
+        Loading - Quit", "Level - Load - Load to Ally Challenge", and CutsceneFeatures.ai.
+        The arena never calls it: it runs in a mode set earlier (hub / boot), kept in
+        global state. The mode's "game mode init macros" (data) presumably register the
+        update macros and start the update managers ("Start System Update Manager"
+        `@4e74b8` has no direct caller).
+      - Game-mode records (GameSystems.ai vars): "Game Mode Control" (ScriptStructure
+        `0x16f95c`) . "game mode" (`0x16f9b0`, a reference), and one record per mode:
+        title `0x17fc04`, adventure `0x17fd30`, arena `0x18df08`, heroic challenge
+        `0x1b1368`, horde `0x16fa48`, pvp `0x41cc64`. Their "game mode init macros"
+        (`0x4597ac`) / "game mode exit macros" (`0x4598e4`) are only read (Set Game Mode
+        loops them); no op writes them, by name or by field hash `2f11e249`. The mode
+        variables are `OpCreateVariable`s whose descriptor reads "create
+        variable||with|members", with a pointer at +0x44: their members most likely
+        come from a "with members" initializer on the variable, a format not decoded
+        yet. Next: decode that initializer (start at `0x18df08` +0x44), then list the
+        arena / adventure modes' init macros.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
