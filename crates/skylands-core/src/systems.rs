@@ -2039,9 +2039,14 @@ pub fn global_systems_system(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
     asset_server: Option<Res<GameAssetServer>>,
+    env: Option<Res<EnvironmentCollision>>,
     mut global: ResMut<GlobalScripts>,
     heroes: Query<Entity, (With<Hero>, Without<CombatCreature>)>,
 ) {
+    // The level collision scripts probe (`"Ray Cast"`), shared with the script tick.
+    if let Some(env) = env.filter(|e| e.is_changed() || global.mesh.is_none()) {
+        global.mesh = Some(std::sync::Arc::new(env.mesh.clone()));
+    }
     if global.systems.is_none() {
         let Some(server) = asset_server else { return };
         let Ok(loader) = server.loader.lock() else {
@@ -2155,6 +2160,7 @@ pub fn actor_script_system(
                 .chain(heroes.iter().map(|(e, t)| (e.to_bits(), t.translation)))
                 .collect(),
             placements: placements.as_ref().map(|p| p.0.clone()).unwrap_or_default(),
+            mesh: global.mesh.clone(),
         });
     let board_key =
         |e: Entity, placed: Option<&PlacementOffset>| placed.map_or(e.to_bits() as usize, |p| p.0);
@@ -2357,6 +2363,8 @@ pub fn actor_script_system(
 struct ActorFieldSnapshot {
     actors: std::collections::HashMap<u64, Vec3>,
     placements: std::collections::HashMap<usize, Transform>,
+    /// The level collision, for `"Ray Cast"` and ground reads.
+    mesh: Option<std::sync::Arc<crate::collision::CollisionMesh>>,
 }
 
 impl ActorFieldSnapshot {
@@ -2388,6 +2396,26 @@ impl skylands_formats::script::MemberFields for ActorFieldSnapshot {
     fn placement_field(&self, me: u64, placement: usize, field: u32) -> Option<f32> {
         let at = self.placements.get(&placement)?.translation;
         Self::towards(at - *self.actors.get(&me)?, field)
+    }
+
+    fn position(&self, id: u64) -> Option<[f32; 3]> {
+        self.actors.get(&id).map(|v| v.to_array())
+    }
+
+    /// Ground types are not in our collision mesh: 0 (walkable).
+    fn ray_cast(&self, from: [f32; 3], to: [f32; 3]) -> Option<skylands_formats::script::RayHit> {
+        let (point, normal) = self.mesh.as_ref()?.raycast_segment(from, to)?;
+        Some(skylands_formats::script::RayHit {
+            point,
+            normal,
+            ground_type: 0,
+        })
+    }
+
+    /// The highest collision surface under `at`, within 500 m.
+    fn ground_below(&self, at: [f32; 3]) -> Option<(f32, i32)> {
+        let (y, _) = self.mesh.as_ref()?.raycast_down(at, 500.0)?;
+        Some((y, 0))
     }
 }
 
@@ -4515,6 +4543,7 @@ mod tests {
                 0x40,
                 Transform::from_xyz(0.0, 0.0, 10.0),
             )]),
+            mesh: None,
         };
         // Lengths in feet (`0x80075154`: metres x 3.2808399).
         assert_eq!(snap.field(1, 2, 0x2eb3_1462), Some(5.0 * FEET_PER_METRE));

@@ -512,6 +512,8 @@ pub struct GlobalScripts {
     pub systems: Option<skylands_formats::GlobalSystems>,
     /// The level's own variable board (reset with the level).
     pub board: ScriptVarBoard,
+    /// The level collision, for scripts' `"Ray Cast"` and ground reads.
+    pub mesh: Option<std::sync::Arc<crate::collision::CollisionMesh>>,
 }
 
 /// Script effects on `OpSpawn` clones through reference variables, by spawner and

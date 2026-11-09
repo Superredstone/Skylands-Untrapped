@@ -695,9 +695,53 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         controllers' variable table (`native_vars`). Controllers are on again.
       - Result: Creature Startup finds UI.ai's "creature info", the enemies' creature
         infos get faction 1, the registered hero (faction 0) is a foe, and by 30 s 13 of
-        19 passengers are in "battle" (the rest "idle"). Next: what "battle" does with
-        them (they still stand where they were detached, ~170 m up), and the dropships'
-        flight end.
+        19 passengers are in "battle" (the rest "idle").
+      - Battle (Sporeasaur): "Manage Combat Spacing" (EnemySystem_Global `@155760`,
+        inner 12 / outer 25) finds the hero beyond the outer range and calls "Enemy
+        System - Movement - Move To Safely" (`@156208`, toThisActor = target). That first
+        runs Combat.ai "Character - Check for Walkable Surface" (`@fbe08`): it places
+        engine probe objects (`$7b201a36.$652b04df` / `.$6a8e75aa`, `@d9ef0`) ahead of the
+        creature (`displace` by the creature's facing) and reads engine ground data from
+        them: `vertical offset` against "WalkableSurface_MaxRange" and a ground type
+        `$9ca1c77e.$5127f14d` ("walk to ground type"). None of that is modelled, so
+        `"walkable"` decides nothing useful and no velocity is ever set; the passengers
+        also stand in mid-air (no fall, no floor under most).
+      - Names (FNV against `main.dol` strings): `7b201a36` "Ray Cast", `652b04df`
+        "start", `6a8e75aa` "end", `07413a2f` "has contact", `9ca1c77e` "ground",
+        `5127f14d` "type", `6c749d1e` "vertical offset", `dad64577` "collision volume",
+        `95876e1f` "width". "Check for Walkable Surface" (`@fbe08`, Combat.ai [1737]):
+        - from actor `ground.type` >= 50 (and not airborne / vertical offset > 2):
+          unwalkable;
+        - else places `"Ray Cast".start` / `.end` on the from actor (`distance = 0`),
+          lifts them (`vertical offset` 0.1, or 1 on ground type >= 63), displaces
+          `end` ahead along `heading` by the move distance, and reads `"has contact"`
+          (an obstacle in the way) and `$e68b9c52.pitch` (probably the contact normal:
+          slopes beyond 45 degrees);
+        - then moves the measurement actor `@d9ef0` there and reads its `vertical
+          offset` (height above the ground below) against "WalkableSurface_MaxRange",
+          casting down from `start.vertical offset` = the from actor's collision volume
+          height (`$d5bdbb42`) to `end.vertical offset` = -range, with the hit's
+          `"Ray Cast".type` (>= 50 unwalkable).
+      - Built: the VM tracks probes within a tick (`Vm::probes`: `"Ray Cast".start` /
+        `.end` and anything set `distance = 0`, which puts it on the op's reference point
+        or `my`; `vertical offset` lifts it, `displace` moves it). Reads: `"Ray Cast"."has
+        contact"` casts start -> end (`MemberFields::ray_cast`), `.type` and the normal's
+        `pitch` / `heading` come from that hit (`RayHit`), a probe's `vertical offset` is
+        its height above `MemberFields::ground_below` and its `ground.type` that ground's
+        type. Core answers from the level collision (`CollisionMesh::raycast_segment`,
+        `raycast_down`; the mesh is shared via `GlobalScripts::mesh`); ground types read 0.
+        Now "Check for Walkable Surface" decides: walkable most ticks, heights within
+        "WalkableSurface_MaxRange" (225 ft). All 19 passengers are in "battle" by 30 s,
+        but none moves: Move To Safely sets no velocity yet (one StunGun moved 9 m).
+        Next: what Move To Safely does after a walkable result (SmartPaths / "Movement"
+        macros, `velocity`), and falling.
+      - Design notes (as built): the VM reads these through
+        `MemberFields` (core's snapshot); "Ray Cast" start / end and `@d9ef0` are
+        positions the VM tracks within the tick (distance / vertical offset writes,
+        displace), and reads of `has contact`, `type`, the contact angles and a probe's
+        `vertical offset` / `ground.type` are queries against the level collision mesh
+        (core passes an `Arc` of it into the snapshot). Ground types are not in our
+        collision mesh yet (read 0: walkable); the original's values are not reversed.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

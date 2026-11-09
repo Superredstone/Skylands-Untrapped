@@ -506,6 +506,52 @@ impl CollisionMesh {
         Self::from_triangles(triangles)
     }
 
+    /// The first triangle the segment `from` -> `to` crosses: hit point and normal
+    /// (Möller–Trumbore over the grid cells the segment's box covers).
+    pub fn raycast_segment(&self, from: [f32; 3], to: [f32; 3]) -> Option<([f32; 3], [f32; 3])> {
+        let d = vec3_sub(to, from);
+        let cell = |v: f32| (v / GRID_CELL_SIZE).floor() as i32;
+        let (gx0, gx1) = (cell(from[0].min(to[0])), cell(from[0].max(to[0])));
+        let (gz0, gz1) = (cell(from[2].min(to[2])), cell(from[2].max(to[2])));
+        let mut tested = std::collections::HashSet::new();
+        let mut best: Option<(f32, [f32; 3])> = None;
+        for gx in gx0..=gx1 {
+            for gz in gz0..=gz1 {
+                let Some(indices) = self.spatial_grid.get(&(gx, gz)) else {
+                    continue;
+                };
+                for &idx in indices {
+                    if !tested.insert(idx) {
+                        continue;
+                    }
+                    let tri = &self.triangles[idx];
+                    let e1 = vec3_sub(tri.v1, tri.v0);
+                    let e2 = vec3_sub(tri.v2, tri.v0);
+                    let p = vec3_cross(d, e2);
+                    let det = vec3_dot(e1, p);
+                    if det.abs() < 1e-8 {
+                        continue;
+                    }
+                    let s = vec3_sub(from, tri.v0);
+                    let u = vec3_dot(s, p) / det;
+                    if !(0.0..=1.0).contains(&u) {
+                        continue;
+                    }
+                    let q = vec3_cross(s, e1);
+                    let v = vec3_dot(d, q) / det;
+                    if v < 0.0 || u + v > 1.0 {
+                        continue;
+                    }
+                    let t = vec3_dot(e2, q) / det;
+                    if (0.0..=1.0).contains(&t) && best.is_none_or(|(b, _)| t < b) {
+                        best = Some((t, tri.normal));
+                    }
+                }
+            }
+        }
+        best.map(|(t, n)| (vec3_add(from, vec3_scale(d, t)), n))
+    }
+
     pub fn raycast_down(&self, origin: [f32; 3], max_dist: f32) -> Option<(f32, [f32; 3])> {
         let (x, z) = (origin[0], origin[2]);
         let gx = (x / GRID_CELL_SIZE).floor() as i32;
@@ -596,6 +642,27 @@ impl Default for Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_segment_raycast_hits_the_first_triangle() {
+        // A wall at z = 2 across x/y -5..5, and one at z = 4: a segment from z = 0 to z = 6
+        // meets the near one, facing back along the segment.
+        let wall = |z: f32| {
+            [
+                Triangle::new([-5.0, -5.0, z], [5.0, -5.0, z], [-5.0, 5.0, z]),
+                Triangle::new([5.0, -5.0, z], [5.0, 5.0, z], [-5.0, 5.0, z]),
+            ]
+        };
+        let mesh = CollisionMesh::from_triangles(wall(4.0).into_iter().chain(wall(2.0)).collect());
+        let (p, n) = mesh
+            .raycast_segment([0.0, 0.0, 0.0], [0.0, 0.0, 6.0])
+            .unwrap();
+        assert!((p[2] - 2.0).abs() < 1e-4, "{p:?}");
+        assert!((n[2].abs() - 1.0).abs() < 1e-4, "{n:?}");
+        assert!(mesh
+            .raycast_segment([0.0, 0.0, 0.0], [0.0, 0.0, 1.5])
+            .is_none());
+    }
 
     #[test]
     fn test_triangle_vertical_raycast() {

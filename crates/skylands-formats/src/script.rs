@@ -1404,6 +1404,10 @@ pub struct Vm<'a> {
     /// The object field measurements are taken from while an op with a
     /// `ScriptSet::relative` reference point reads its LHS (`None`: `my`).
     origin: Option<RefTarget>,
+    /// Probes placed this tick, by their target (the field stripped).
+    probes: Vec<(Target, Probe)>,
+    /// The last `"Ray Cast"` contact (`has contact`, then `type` / the normal).
+    ray_hit: Option<RayHit>,
     /// Offset of the op running (`ScriptSet::relative_reads` keys).
     cur_op: usize,
     /// Script sets by canonical path: members as far as the VM can tell who they are.
@@ -1594,6 +1598,7 @@ const ROLL_HASH: u32 = 0x16ff_3d1e;
 /// Object an effect acts on: an engine object of this actor, a clone being set up
 /// (index into `Vm::spawning`, key as the clone's own `my` path), or an earlier clone
 /// through a reference variable (`serial`, key as its `my` path).
+#[derive(Debug, Clone, PartialEq)]
 enum Target {
     Engine(Vec<u32>),
     Clone(usize, Vec<u32>),
@@ -1621,6 +1626,80 @@ pub trait MemberFields: Send + Sync + std::fmt::Debug {
     fn placement_field(&self, me: u64, placement: usize, field: u32) -> Option<f32> {
         self.waypoint_field(me, placement, [0.0; 3], field)
     }
+    /// World position (metres) of actor `id`.
+    fn position(&self, _id: u64) -> Option<[f32; 3]> {
+        None
+    }
+    /// The level collision between two world points (the engine's `"Ray Cast"`).
+    fn ray_cast(&self, _from: [f32; 3], _to: [f32; 3]) -> Option<RayHit> {
+        None
+    }
+    /// The ground below world point `at`: its height (metres) and ground type.
+    fn ground_below(&self, _at: [f32; 3]) -> Option<(f32, i32)> {
+        None
+    }
+}
+
+/// Where a ray met the level collision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    pub point: [f32; 3],
+    /// Unit surface normal.
+    pub normal: [f32; 3],
+    /// Ground type of the surface (not in our collision: 0).
+    pub ground_type: i32,
+}
+
+const RAY_CAST: u32 = 0x7b20_1a36;
+const RAY_START: u32 = 0x652b_04df;
+const RAY_END: u32 = 0x6a8e_75aa;
+const HAS_CONTACT: u32 = 0x0741_3a2f;
+const GROUND: u32 = 0x9ca1_c77e;
+const TYPE_HASH: u32 = 0x5127_f14d;
+const VERTICAL_OFFSET_HASH: u32 = 0x6c74_9d1e;
+/// `"Ray Cast".<e68b9c52>`: the contact's normal (`.pitch` > 45: a floor).
+const RAY_NORMAL: u32 = 0xe68b_9c52;
+const PITCH_HASH: u32 = 0xbd32_4ab1;
+const HEADING_HASH: u32 = 0x9f48_1715;
+
+/// A point the script places and measures within a tick: `"Ray Cast".start` / `.end`, a
+/// measurement actor (`distance = 0` puts it on the op's reference point, `vertical
+/// offset` lifts it, `displace` moves it). World metres.
+#[derive(Debug, Clone, Copy, Default)]
+struct Probe {
+    base: [f32; 3],
+    lift: f32,
+}
+
+impl Probe {
+    fn at(&self) -> [f32; 3] {
+        [self.base[0], self.base[1] + self.lift * FEET, self.base[2]]
+    }
+}
+
+/// Metres per foot (script lengths are feet).
+const FEET: f32 = 0.3048;
+
+/// A target and its last field (`"Ray Cast".end.distance` -> `"Ray Cast".end`, distance).
+fn split_field(t: Target) -> Option<(Target, u32)> {
+    Some(match t {
+        Target::Engine(mut k) => {
+            let f = k.pop()?;
+            (Target::Engine(k), f)
+        }
+        Target::Clone(i, mut k) => {
+            let f = k.pop()?;
+            (Target::Clone(i, k), f)
+        }
+        Target::Spawned(s, mut k) => {
+            let f = k.pop()?;
+            (Target::Spawned(s, k), f)
+        }
+        Target::Actor(a, mut k) => {
+            let f = k.pop()?;
+            (Target::Actor(a, k), f)
+        }
+    })
 }
 
 /// The save slot as scripts see it through `global.bld` "System - Save - Get Save Param"
@@ -1794,6 +1873,8 @@ impl<'a> Vm<'a> {
             native_vars: Default::default(),
             found_own: HashMap::new(),
             origin: None,
+            probes: Vec::new(),
+            ray_hit: None,
             cur_op: 0,
             sets: HashMap::new(),
             clone_ids: HashMap::new(),
@@ -2050,6 +2131,87 @@ impl<'a> Vm<'a> {
     /// The reference point op `at` measures its LHS from (`ScriptSet::relative`).
     fn relative_origin(&self, at: usize) -> Option<RefTarget> {
         self.set.relative.get(&at).map(|p| self.ref_target(p))
+    }
+
+    /// The probe a target names (`"Ray Cast".end`, a measurement actor), if placed.
+    fn probe(&self, t: &Target) -> Option<Probe> {
+        self.probes.iter().find(|(k, _)| k == t).map(|(_, p)| *p)
+    }
+    fn set_probe(&mut self, t: Target, f: impl FnOnce(&mut Probe)) {
+        match self.probes.iter_mut().find(|(k, _)| *k == t) {
+            Some((_, p)) => f(p),
+            None => {
+                let mut p = Probe::default();
+                f(&mut p);
+                self.probes.push((t, p));
+            }
+        }
+    }
+    /// Where `distance = 0` puts a probe: the op's reference point, else this actor.
+    fn origin_position(&self) -> Option<[f32; 3]> {
+        let id = match &self.origin {
+            Some(o) => self.member_id(o)?,
+            None => self.self_id?,
+        };
+        self.fields.as_ref()?.position(id)
+    }
+    /// A probe write (`"Ray Cast".start.distance = 0`, `.vertical offset = 0.1`): `true`
+    /// when it only places the probe (the engine's `"Ray Cast"`).
+    fn write_probe(&mut self, path: &[Ref], v: Value) -> bool {
+        let Some((obj, f)) = self.target(path).and_then(split_field) else {
+            return false;
+        };
+        let ray = matches!(&obj, Target::Engine(k) if k.first() == Some(&RAY_CAST));
+        match f {
+            DISTANCE_HASH if v.as_f32() == 0.0 => match self.origin_position() {
+                Some(at) => self.set_probe(obj, |p| p.base = at),
+                None => return false,
+            },
+            VERTICAL_OFFSET_HASH if ray || self.probe(&obj).is_some() => {
+                self.set_probe(obj, |p| p.lift = v.as_f32())
+            }
+            _ => return false,
+        }
+        ray
+    }
+    /// A probe read: `"Ray Cast".has contact` (casts start -> end), `.type` and the
+    /// contact normal's `pitch` / `heading` (degrees; a floor is 90), a probe's
+    /// `vertical offset` (feet above the ground below) and `ground.type`.
+    fn read_probe(&mut self, path: &[Ref]) -> Option<Value> {
+        let (obj, f) = self.target(path).and_then(split_field)?;
+        if let Target::Engine(k) = &obj {
+            match (&k[..], f) {
+                ([RAY_CAST], HAS_CONTACT) => {
+                    let start = self.probe(&Target::Engine(vec![RAY_CAST, RAY_START]))?;
+                    let end = self.probe(&Target::Engine(vec![RAY_CAST, RAY_END]))?;
+                    self.ray_hit = self.fields.as_ref()?.ray_cast(start.at(), end.at());
+                    return Some(Value::Int(self.ray_hit.is_some() as i32));
+                }
+                ([RAY_CAST], TYPE_HASH) => {
+                    return Some(Value::Int(self.ray_hit.map_or(0, |h| h.ground_type)));
+                }
+                ([RAY_CAST, RAY_NORMAL], PITCH_HASH | HEADING_HASH) => {
+                    let n = self.ray_hit?.normal;
+                    let deg = match f {
+                        PITCH_HASH => n[1].clamp(-1.0, 1.0).asin(),
+                        _ => n[0].atan2(n[2]),
+                    };
+                    return Some(Value::Float(deg.to_degrees()));
+                }
+                _ => {}
+            }
+        }
+        let (obj, ground) = match split_field(obj.clone()) {
+            Some((o, GROUND)) if f == TYPE_HASH => (o, true),
+            _ => (obj, false),
+        };
+        let at = self.probe(&obj)?.at();
+        let (y, ground_type) = self.fields.as_ref()?.ground_below(at)?;
+        match (ground, f) {
+            (true, _) => Some(Value::Int(ground_type)),
+            (false, VERTICAL_OFFSET_HASH) => Some(Value::Float((at[1] - y) / FEET)),
+            _ => None,
+        }
     }
 
     /// Engine id of a member (`None`: a placement, `null`, what only the engine knows).
@@ -3494,6 +3656,21 @@ impl<'a> Vm<'a> {
                             })
                         };
                         let (len, heading, pitch) = (f(len)?, f(heading)?, f(pitch)?);
+                        // A probe moves (heading 0 = +Z, pitch 90 = up); `"Ray Cast"` is
+                        // only a probe.
+                        if self.probe(&target).is_some() {
+                            let (sh, ch) = heading.to_radians().sin_cos();
+                            let (sp, cp) = pitch.to_radians().sin_cos();
+                            let d = [cp * sh, sp, cp * ch].map(|c| c * len * FEET);
+                            self.set_probe(target.clone(), |p| {
+                                for (b, d) in p.base.iter_mut().zip(d) {
+                                    *b += d;
+                                }
+                            });
+                        }
+                        if matches!(&target, Target::Engine(k) if k.first() == Some(&RAY_CAST)) {
+                            continue;
+                        }
                         self.emit(target, |target| Effect::Displace {
                             target,
                             len,
@@ -3928,6 +4105,9 @@ impl<'a> Vm<'a> {
     }
 
     fn read(&mut self, path: &[Ref]) -> Value {
+        if let Some(v) = self.read_probe(path) {
+            return v;
+        }
         // A reference to a variable that holds no value, read as a value, is the
         // referenced object's identity (by name, since each file reaches it through its
         // own copy of the fields). One that holds a value reads that value: a state's
@@ -4037,6 +4217,9 @@ impl<'a> Vm<'a> {
     }
 
     fn write(&mut self, path: &[Ref], v: Value) {
+        if self.write_probe(path, v) {
+            return;
+        }
         if let Ok(p) = self.canon(path) {
             if let Some((a, name)) = self.found_slot(&p) {
                 self.board.entry(a).or_default().insert(name, v);
@@ -5010,6 +5193,127 @@ mod tests {
         vm.sets.insert(vec![Ref::Obj(find)], vec![a, b.clone()]);
         assert_eq!(vm.read(&[Ref::Obj(find), Ref::Handle(0)]), I(2));
         assert_eq!(vm.indexed_target(&[Ref::Obj(find)], 1), b);
+    }
+
+    #[test]
+    fn vm_ray_cast_probes_the_level_collision() {
+        // "Character - Check for Walkable Surface": `"Ray Cast".start` / `.end` placed on
+        // the actor (`distance = 0`), lifted (`vertical offset`), `end` displaced ahead;
+        // `has contact` casts between them, the normal's `pitch` says floor or wall. A
+        // probe's `vertical offset` reads its height above the ground below.
+        #[derive(Debug)]
+        struct Level;
+        impl MemberFields for Level {
+            fn field(&self, _: u64, _: u64, _: u32) -> Option<f32> {
+                None
+            }
+            fn position(&self, id: u64) -> Option<[f32; 3]> {
+                (id == 7).then_some([0.0, 10.0, 0.0])
+            }
+            // A wall at z = 2 m.
+            fn ray_cast(&self, from: [f32; 3], to: [f32; 3]) -> Option<RayHit> {
+                (from[2] < 2.0 && to[2] >= 2.0).then_some(RayHit {
+                    point: [0.0, from[1], 2.0],
+                    normal: [0.0, 0.0, -1.0],
+                    ground_type: 3,
+                })
+            }
+            // The floor at y = 9 m.
+            fn ground_below(&self, _: [f32; 3]) -> Option<(f32, i32)> {
+                Some((9.0, 0))
+            }
+        }
+        let (contact, ty, pitch, high, r) = (0x100, 0x110, 0x120, 0x130, 0x140);
+        let h = |i: u32| Ref::Handle(i);
+        let set_h = |o: usize, p: Vec<Ref>, v: f32| {
+            ins(
+                o,
+                0,
+                Op::SetValue {
+                    lhs: p,
+                    rhs: lit(Value::Float(v)),
+                },
+            )
+        };
+        let read = |o: usize, out: usize, p: Vec<Ref>| {
+            ins(
+                o,
+                0,
+                set(
+                    out,
+                    Rhs {
+                        a: Operand::Read {
+                            path: p,
+                            kind: NumKind::Float,
+                        },
+                        arith: -1,
+                        b: None,
+                        func: 0,
+                    },
+                ),
+            )
+        };
+        // Handles: 0 Ray Cast, 1 start, 2 end, 3 distance, 4 vertical offset, 5 has
+        // contact, 6 type, 7 normal, 8 pitch, 9 my.
+        let mut s = script_set(
+            vec![
+                ins(1, 13, Op::DefineMacro { name: "m".into() }),
+                ins(2, 1, Op::Interface),
+                param(r, PARAM_OUTPUT, Some(lit(I(0)))),
+                set_h(3, vec![h(0), h(1), h(3)], 0.0),
+                set_h(4, vec![h(0), h(2), h(3)], 0.0),
+                set_h(5, vec![h(0), h(1), h(4)], 1.0),
+                set_h(6, vec![h(0), h(2), h(4)], 1.0),
+                ins(
+                    7,
+                    0,
+                    Op::Displace {
+                        target: vec![h(0), h(2)],
+                        mode: 0,
+                        len: Some(lit(Value::Float(10.0))),
+                        heading: Some(lit(Value::Float(0.0))),
+                        pitch: Some(lit(Value::Float(0.0))),
+                    },
+                ),
+                read(8, contact, vec![h(0), h(5)]),
+                read(9, ty, vec![h(0), h(6)]),
+                read(10, pitch, vec![h(0), h(7), h(8)]),
+                // A probe on `my`: 1 ft up, 1 m above the floor below.
+                set_h(11, vec![h(9), h(3)], 0.0),
+                set_h(12, vec![h(9), h(4)], 1.0),
+                read(13, high, vec![h(9), h(4)]),
+            ],
+            &[
+                (contact, "contact"),
+                (ty, "type"),
+                (pitch, "pitch"),
+                (high, "high"),
+                (r, "r"),
+            ],
+        );
+        s.handle_ids = vec![
+            RAY_CAST,
+            RAY_START,
+            RAY_END,
+            DISTANCE_HASH,
+            VERTICAL_OFFSET_HASH,
+            HAS_CONTACT,
+            TYPE_HASH,
+            RAY_NORMAL,
+            PITCH_HASH,
+            MY_HASH,
+        ];
+        s.handle_ns = vec![name_hash("level.bld"); 10];
+        let mut vm = Vm::new(&s, None);
+        vm.self_id = Some(7);
+        vm.fields = Some(std::sync::Arc::new(Level));
+        vm.call("m", &[]).unwrap();
+        let v = |o: usize| vm.vars.get(&vec![Ref::Obj(o)]).map(|v| v.as_f32());
+        assert_eq!(v(contact), Some(1.0));
+        assert_eq!(v(ty), Some(3.0));
+        assert!(v(pitch).is_some_and(|p| p.abs() < 1e-3), "{:?}", v(pitch));
+        let high = v(high).unwrap();
+        assert!((high - (1.0 + 0.3048) / 0.3048).abs() < 1e-3, "{high}");
     }
 
     #[test]
