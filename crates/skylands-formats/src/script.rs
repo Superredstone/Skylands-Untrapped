@@ -1396,6 +1396,10 @@ pub struct Vm<'a> {
     /// `OpFindVariable` ops bound to one of them (`find variable "Mod Controller"` on its
     /// own placement): those read and write the variable itself.
     pub own_vars: HashMap<String, usize>,
+    /// `global.bld`'s own actors (its active controllers), by engine id: their variables
+    /// by name, which live in the shared `global.bld` store (`find variable "creature info"
+    /// on "Creature Struct Owner"`, the UI controller).
+    pub native_vars: std::sync::Arc<HashMap<u64, HashMap<String, usize>>>,
     found_own: HashMap<usize, usize>,
     /// The object field measurements are taken from while an op with a
     /// `ScriptSet::relative` reference point reads its LHS (`None`: `my`).
@@ -1557,6 +1561,11 @@ const FIELD_BASE: usize = 1 << 41;
 /// `LootSystem_Init.ai`, sets `"EnemySystem_Globals"."State_Spawn"` = 1 for the enemy
 /// system to read).
 const GLOBAL_ROOT_BASE: usize = INSTANCE_BASE + (1 << 39);
+
+/// A record variable of `global.bld` (not exported), by its offset: one object in the
+/// shared store, fields by name, the same from every file (UI.ai's "creature info", which
+/// UI.ai's STARTUP makes the creature registry `@e678c` refer to).
+const GLOBAL_RECORD_BASE: usize = INSTANCE_BASE + (1 << 38);
 
 /// A variable by name, the way field keys name fields (`Vm::cross_file_ref_arg`).
 fn named_var(name: &str) -> usize {
@@ -1782,6 +1791,7 @@ impl<'a> Vm<'a> {
             ref_board: HashMap::new(),
             found: HashMap::new(),
             own_vars: HashMap::new(),
+            native_vars: Default::default(),
             found_own: HashMap::new(),
             origin: None,
             cur_op: 0,
@@ -2352,6 +2362,17 @@ impl<'a> Vm<'a> {
         p
     }
 
+    /// The `global.bld` root object a level file's handle `h` names.
+    fn handle_root(&self, h: u32) -> Option<usize> {
+        let g = self.global.filter(|_| self.home.is_none())?;
+        let i = h as usize;
+        if *self.set.handle_ns.get(i)? != name_hash("global.bld") {
+            return None;
+        }
+        let id = (*self.set.handle_ids.get(i)? as usize).checked_sub(g.export_base)?;
+        g.roots.get(id).copied()
+    }
+
     /// `GLOBAL_ROOT_BASE` key of a field path into a record `global.bld` exports.
     fn global_root(&self, p: &[Ref]) -> Option<usize> {
         if p.len() < 2 {
@@ -2366,7 +2387,14 @@ impl<'a> Vm<'a> {
                 let id = *self.set.handle_ids.get(i)? as usize;
                 (g, id.checked_sub(g.export_base)?)
             }
-            (Ref::Obj(o), Some(_), _) => (self.set, self.set.roots.iter().position(|&r| r == o)?),
+            (Ref::Obj(o), Some(_), _) => match self.set.roots.iter().position(|&r| r == o) {
+                Some(index) => (self.set, index),
+                // A `global.bld` record variable that is not exported.
+                None => {
+                    return (self.set.records.contains(&o) && !self.refs.contains_key(&p[..1]))
+                        .then_some(GLOBAL_RECORD_BASE + o);
+                }
+            },
             _ => return None,
         };
         // A record, or another exported object reached through a script field (the
@@ -2429,6 +2457,14 @@ impl<'a> Vm<'a> {
     /// A reference as every actor would read it: `my` and this actor's clones as engine
     /// ids. `global.bld` state is shared by all actors, so it stores these.
     fn absolute(&self, t: RefTarget) -> RefTarget {
+        // A `global.bld` record, as every file keys it.
+        if let (RefTarget::Alias(p), Some(_)) = (&t, self.home) {
+            if matches!(p[..], [Ref::Obj(o)] if self.set.records.contains(&o) && !self.set.roots.contains(&o))
+            {
+                let Ref::Obj(o) = p[0] else { unreachable!() };
+                return RefTarget::Alias(vec![Ref::Obj(GLOBAL_RECORD_BASE + o)]);
+            }
+        }
         match t {
             RefTarget::Engine(ref k) if *k == [MY_HASH] => self.self_id.map_or(t, RefTarget::Actor),
             RefTarget::Spawned(s) => self.clone_ids.get(&s).map_or(t, |&id| RefTarget::Actor(id)),
@@ -2683,6 +2719,7 @@ impl<'a> Vm<'a> {
         sub.globals = std::mem::take(&mut self.globals);
         sub.clone_ids = std::mem::take(&mut self.clone_ids);
         sub.self_key = self.self_key;
+        sub.native_vars = self.native_vars.clone();
         sub.save = self.save.clone();
         sub.engine_sets = std::mem::take(&mut self.engine_sets);
         sub.self_id = self.self_id;
@@ -3637,6 +3674,14 @@ impl<'a> Vm<'a> {
                             continue;
                         }
                     }
+                    // A variable of one of `global.bld`'s own actors.
+                    if let RefTarget::Actor(id) = self.ref_target(target) {
+                        if let Some(&var) = self.native_vars.get(&id).and_then(|m| m.get(name)) {
+                            self.found.remove(&ins.offset);
+                            self.found_own.insert(ins.offset, var);
+                            continue;
+                        }
+                    }
                     // This actor's own variable.
                     let own = self.own_vars.get(name).copied();
                     if let (Some(var), true) = (own, self.board_key(target) == self.self_key) {
@@ -3756,6 +3801,17 @@ impl<'a> Vm<'a> {
     fn canon(&self, path: &[Ref]) -> Result<Vec<Ref>, i32> {
         let mut p = path.to_vec();
         for _ in 0..8 {
+            // A `global.bld` export reached by handle whose object holds a reference in the
+            // shared store (`$63b` = `@e678c`, which UI.ai points at its "creature info").
+            if let Some(&Ref::Handle(h)) = p.first() {
+                let held = self
+                    .handle_root(h)
+                    .and_then(|r| self.global_refs.get(&vec![Ref::Obj(r)]));
+                if let Some(RefTarget::Alias(a)) = held {
+                    p = a.iter().chain(&p[1..]).copied().collect();
+                    continue;
+                }
+            }
             let Some(Ref::Obj(o)) = p.first() else { break };
             // `<set>.first` / `.last`: that member's record (`"EnemyTypeDatas".last."lookupID"
             // = ...`; also at the end, for the prefix `ref_slot` resolves). Before the alias

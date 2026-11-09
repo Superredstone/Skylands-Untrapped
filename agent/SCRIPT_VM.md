@@ -675,9 +675,29 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         after `find variable "creature info" on @123e64` ([1943]), and that find fails.
         `@123e64` is the `PlacementReference` "Creature Struct Owner", bound in UI.ai
         STARTUP ([28], `= my`); the same STARTUP creates the registry `@e678c` ([22]).
-        UI.ai is one of global.bld's 10 active controllers, none of which we run. Next:
-        run global.bld's active controllers (markers) as native actors with their own
-        identity in `GlobalSystems`, so their STARTUPs set up the combat system.
+        UI.ai is one of global.bld's 10 active controllers, none of which we run.
+      - Tried running the 10 controllers (`extract_level_markers` Controller markers of
+        global.bld) as native actors, each with an engine id (`1 << 62` + i), their own
+        variables in the shared store, and `find variable` on them binding those
+        variables (UI.ai owns "creature info"). All 10 run without VM errors, but the
+        arena regresses: passengers stay "disabled". Bisect: UI.ai alone does it. Its
+        STARTUP rebinds `@e678c = "creature info"` (UI's own record `0x123960`, [22]),
+        `"Creature Struct Owner" = my` ([28]) and other roots (`DamageType_Basic`,
+        `StateType_HurtReactBasic`, "mood box control", "menu data", "camera control",
+        "save control"...). After [22], global.bld reaches the registry as `[0x123960,
+        <global field>]` (raw), while Init_Setup reaches it through `$63b` root-keyed:
+        the two no longer meet.
+      - Fixed with record keys: in global.bld's VMs a path rooted at a (non-exported)
+        global.bld record variable is keyed `GLOBAL_RECORD_BASE + var` (fields by name),
+        unless the variable holds a reference; `absolute` stores a reference to such a
+        record in that form; a level file's handle whose root object holds a reference
+        in the shared store follows it (`Vm::handle_root`). Level actors also get the
+        controllers' variable table (`native_vars`). Controllers are on again.
+      - Result: Creature Startup finds UI.ai's "creature info", the enemies' creature
+        infos get faction 1, the registered hero (faction 0) is a foe, and by 30 s 13 of
+        19 passengers are in "battle" (the rest "idle"). Next: what "battle" does with
+        them (they still stand where they were detached, ~170 m up), and the dropships'
+        flight end.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

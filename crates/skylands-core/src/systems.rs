@@ -2016,7 +2016,20 @@ pub fn global_systems(
     loader: &skylands_formats::AssetLoader,
 ) -> Option<skylands_formats::GlobalSystems> {
     let parse = |p: &str| skylands_formats::ScriptSet::parse(&loader.load_raw(p).ok()?);
-    skylands_formats::GlobalSystems::new(parse("Init_Setup.bld")?, parse("global.bld")?)
+    // `global.bld`'s active controllers (its placed script actors).
+    let controllers: Vec<String> = loader
+        .load_igb("global.bld")
+        .ok()?
+        .extract_level_markers()
+        .into_iter()
+        .filter(|m| m.kind == skylands_formats::igb::MarkerKind::Controller)
+        .filter_map(|m| m.script)
+        .collect();
+    skylands_formats::GlobalSystems::new(
+        parse("Init_Setup.bld")?,
+        parse("global.bld")?,
+        &controllers,
+    )
 }
 
 /// Starts the game's boot once `Init_Setup.bld` can be read, then runs it and the
@@ -2214,6 +2227,7 @@ pub fn actor_script_system(
         }
         actor.state.board = std::mem::take(&mut board.vars);
         actor.state.ref_board = std::mem::take(&mut board.refs);
+        actor.state.native_vars = global.store.native_vars.clone();
         actor.state.global_vars = std::mem::take(&mut global.store.vars);
         actor.state.global_refs = std::mem::take(&mut global.store.refs);
         actor.state.global_sets = std::mem::take(&mut global.store.sets);
@@ -5609,7 +5623,14 @@ mod tests {
             .filter_map(|(a, _)| program.behavior_name(a.script, a.state.behavior()?))
             .collect();
         assert!(!passengers.is_empty());
-        assert!(passengers.iter().all(|b| *b == "idle"), "{passengers:?}");
+        // With global.bld's controllers running (UI.ai: the creature registry and its
+        // "Creature Struct Owner"), their creature info gets its faction, so the hero
+        // (registered as a player creature) is a foe: they notice it and go to battle.
+        assert!(
+            passengers.iter().all(|b| *b != "disabled"),
+            "{passengers:?}"
+        );
+        assert!(passengers.contains(&"battle"), "{passengers:?}");
         // The boot (`Init_Setup.ai`) started `global.bld`'s update managers, which run
         // "System - Manage Unpaused Game Systems": "Game Timer" follows the game.
         let global = world.resource::<GlobalScripts>();

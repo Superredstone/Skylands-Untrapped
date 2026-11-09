@@ -83,10 +83,13 @@ pub struct GlobalStore {
     pub vars: HashMap<Vec<Ref>, Value>,
     pub refs: HashMap<Vec<Ref>, RefTarget>,
     pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
+    /// `global.bld`'s controllers' variables by name, by their engine id.
+    pub native_vars: std::sync::Arc<HashMap<u64, HashMap<String, usize>>>,
 }
 
 impl GlobalStore {
     fn lend(&mut self, st: &mut ActorScriptState) {
+        st.native_vars = self.native_vars.clone();
         st.global_vars = std::mem::take(&mut self.vars);
         st.global_refs = std::mem::take(&mut self.refs);
         st.global_sets = std::mem::take(&mut self.sets);
@@ -107,28 +110,70 @@ pub struct GlobalSystems {
     boot_script: usize,
     boot_state: ActorScriptState,
     native: ScriptProgram,
+    /// `global.bld`'s active controllers (its placed script actors: UI.ai creates the
+    /// creature registry and is the "Creature Struct Owner"), ticked first.
+    controllers: Vec<(usize, ActorScriptState)>,
+    native_vars: std::sync::Arc<HashMap<u64, HashMap<String, usize>>>,
     actors: Vec<(usize, ActorScriptState)>,
 }
 
+/// Engine ids of `global.bld`'s controllers (no entity of their own).
+pub const CONTROLLER_ID_BASE: u64 = 1 << 62;
+
 impl GlobalSystems {
-    pub fn new(init_setup: ScriptSet, global: ScriptSet) -> Option<Self> {
+    /// `controllers`: script names of `global.bld`'s active controller placements.
+    pub fn new(init_setup: ScriptSet, global: ScriptSet, controllers: &[String]) -> Option<Self> {
         let boot = ScriptProgram::new(init_setup, Some(global.clone()));
         let boot_script = boot
             .set
             .scripts
             .iter()
             .position(|s| s.name.ends_with("/Init_Setup.ai"))?;
+        let native = ScriptProgram::native(global);
+        let mut native_vars = HashMap::new();
+        let controllers: Vec<_> = controllers
+            .iter()
+            .filter_map(|name| native.find(name))
+            .enumerate()
+            .map(|(i, si)| {
+                let id = CONTROLLER_ID_BASE + i as u64;
+                let st = ActorScriptState {
+                    self_id: Some(id),
+                    self_key: Some(id as usize),
+                    native_shared: true,
+                    ..Default::default()
+                };
+                let vars: HashMap<String, usize> = native
+                    .declared(si, &st)
+                    .map(|(v, n)| (n.to_string(), v))
+                    .collect();
+                native_vars.insert(id, vars);
+                (si, st)
+            })
+            .collect();
         Some(Self {
             boot,
             boot_script,
             boot_state: ActorScriptState::default(),
-            native: ScriptProgram::native(global),
+            native,
+            controllers,
+            native_vars: std::sync::Arc::new(native_vars),
             actors: Vec::new(),
         })
     }
 
     /// One tick: the boot actor, then the `global.bld` actors it has spawned so far.
     pub fn tick(&mut self, store: &mut GlobalStore, dt: f32) {
+        store.native_vars = self.native_vars.clone();
+        for (si, a) in &mut self.controllers {
+            store.lend(a);
+            self.native.tick(*si, a, dt);
+            store.take_back(a);
+            // Their sprites, sounds and effects on level actors are not modelled.
+            a.spawns.clear();
+            a.actor_effects.clear();
+            a.clone_effects.clear();
+        }
         let st = &mut self.boot_state;
         store.lend(st);
         self.boot.tick(self.boot_script, st, dt);
@@ -268,6 +313,11 @@ fn ease_curve(u: f32, a: f32, b: f32) -> f32 {
 #[derive(Debug, Clone, Default)]
 pub struct ActorScriptState {
     vars: HashMap<Vec<Ref>, Value>,
+    /// `GlobalStore::native_vars`, lent for the tick.
+    pub native_vars: std::sync::Arc<HashMap<u64, HashMap<String, usize>>>,
+    /// A `global.bld` controller (one of a kind): its own variables live in the shared
+    /// store too, where other actors' `find variable` reaches them.
+    pub native_shared: bool,
     pub engine: HashMap<Vec<u32>, Value>,
     sliders: Vec<Slider>,
     started: bool,
@@ -737,9 +787,14 @@ impl ScriptProgram {
             .declared(si, st)
             .map(|(var, name)| (name.to_string(), var))
             .collect();
+        vm.native_vars = st.native_vars.clone();
         // A `global.bld` actor runs on the shared store itself (as `Vm::call_global`
         // does), its own variables laid over it for the tick.
-        let own: HashSet<usize> = vm.own_vars.values().copied().collect();
+        let own: HashSet<usize> = if st.native_shared {
+            HashSet::new()
+        } else {
+            vm.own_vars.values().copied().collect()
+        };
         if self.native {
             vm.home = Some(&self.set);
         }
@@ -3304,7 +3359,30 @@ mod global_systems_tests {
             .find(|(_, v)| v.name == "Game Timer")
             .unwrap()
             .0;
-        let mut sys = GlobalSystems::new(init, global).unwrap();
+        let controllers: Vec<String> = {
+            let mut loader = crate::AssetLoader::default();
+            let dir = ["assets/files", "../../assets/files"]
+                .into_iter()
+                .find(|d| {
+                    std::path::Path::new(d)
+                        .join("permanent/global.bld")
+                        .exists()
+                })
+                .unwrap();
+            loader
+                .mount(std::path::Path::new(dir).join("permanent/global.bld"))
+                .unwrap();
+            loader
+                .load_igb("global.bld")
+                .unwrap()
+                .extract_level_markers()
+                .into_iter()
+                .filter(|m| m.kind == crate::igb::MarkerKind::Controller)
+                .filter_map(|m| m.script)
+                .collect()
+        };
+        assert_eq!(controllers.len(), 10);
+        let mut sys = GlobalSystems::new(init, global, &controllers).unwrap();
         let mut store = GlobalStore::default();
         for _ in 0..120 {
             sys.tick(&mut store, 1.0 / 60.0);
