@@ -654,9 +654,30 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         Targets" (no owner targeting sets: [1306]) returns `@e678c."players"`
         (`0x3c5254`), and no op names that set: faction 0 creatures go into `@da234` in
         "Combat - Add/Remove to Targets Set" ([1351]), presumably `players`, which our
-        registration does not reach. Next: find who calls "Add/Remove to Targets Set" for
-        a Skylander (or what `@da234` is), then call `register_creature` from core for the
-        hero.
+        registration does not reach.
+      - "players" traced: `@da234` is an actor set (PortalObject_Minion adds the
+        Skylander actor). Init_Setup "Combat - Init Combat" binds `"combat control"` (=
+        `$63b`, global.bld's `@e678c`, a `ScriptReference`) `."players" = "info for
+        players".first."friends"` ([41]), after `"info for players".count = 1` ([39]).
+        "Object Startup - Minion" runs "Add/Remove to Targets Set" (add info = the new
+        info) after Creature Startup and stores its faction targeting set in the info.
+        `register_creature` now does both, and core registers every `Hero` once
+        (`CombatCreature`).
+      - VM fixes on the way: `set <list>.count = n` resizes the list; `.first`/`.last` look
+        the list up through a referenced prefix; a bare handle to a global.bld
+        `ScriptReference` / `ScriptStructure` (`script_objects`) is a reference to it;
+        exported roots reached through a script field are root-keyed too (`@e678c`),
+        unless the root variable holds a reference (then followed); `<find>.count` and
+        `<find>[i]` use the find's subset, not its first match.
+      - Now: passengers' targeting finds the hero (112..130 ft, `noticeRange` 500) and
+        "Update Target" sets it, but [2198]..[2206] drop it as friendly: the enemy's own
+        `"character parameters"."faction"` reads 0. Creature Startup sets it in the block
+        after `find variable "creature info" on @123e64` ([1943]), and that find fails.
+        `@123e64` is the `PlacementReference` "Creature Struct Owner", bound in UI.ai
+        STARTUP ([28], `= my`); the same STARTUP creates the registry `@e678c` ([22]).
+        UI.ai is one of global.bld's 10 active controllers, none of which we run. Next:
+        run global.bld's active controllers (markers) as native actors with their own
+        identity in `GlobalSystems`, so their STARTUPs set up the combat system.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

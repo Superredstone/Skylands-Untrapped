@@ -171,10 +171,12 @@ impl GlobalSystems {
         self.actors.len()
     }
 
-    /// Register a player's Skylander (`actor`, an engine id) as a combat creature:
-    /// "Combat - Creature Startup" with the arguments `PortalObject_Minion.ai` "Object
-    /// Startup - Minion" passes (faction 0, size 2, character parameters, no targeting
-    /// set-up). Stands in for the portal object chain, which is not run.
+    /// Register a player's Skylander (`actor`, an engine id) as a combat creature, as
+    /// `PortalObject_Minion.ai` "Object Startup - Minion" does: "Combat - Creature
+    /// Startup" (faction 0, size 2, character parameters, no targeting set-up), then
+    /// "Combat - Add/Remove to Targets Set" with the new creature info, whose faction
+    /// targeting set becomes the info's `"<914752>"."<978276>"` ([1351]). Stands in for
+    /// the portal object chain, which is not run.
     pub fn register_creature(
         &self,
         store: &mut GlobalStore,
@@ -198,11 +200,30 @@ impl GlobalSystems {
         ]
         .map(|(n, v)| (n.to_string(), v));
         let refs = [("creature".to_string(), RefTarget::Actor(actor))];
-        let result = vm.call_with_refs("Combat - Creature Startup", &args, &refs);
+        let mut result = vm
+            .call_with_refs("Combat - Creature Startup", &args, &refs)
+            .map(|out| out.get("return creature info ").cloned());
+        if let Ok(Some(RefTarget::Alias(at))) = result.clone() {
+            let info = RefTarget::Alias(at.clone());
+            let add = [("add info".to_string(), info.clone())];
+            result = vm
+                .call_with_refs("Combat - Add/Remove to Targets Set", &[], &add)
+                .and_then(|out| {
+                    if let Some(t) = out.get("faction targetting set") {
+                        let slot: Vec<Ref> = at
+                            .iter()
+                            .copied()
+                            .chain([Ref::Obj(914752), Ref::Obj(978276)])
+                            .collect();
+                        vm.set_ref(&slot, t.clone())?;
+                    }
+                    Ok(Some(info))
+                });
+        }
         store.vars = std::mem::take(&mut vm.vars);
         store.refs = std::mem::take(&mut vm.refs);
         store.sets = std::mem::take(&mut vm.sets);
-        result
+        result.map(|_| ())
     }
 }
 
@@ -3315,6 +3336,14 @@ mod global_systems_tests {
             .filter(|m| m.iter().any(|t| matches!(t, RefTarget::Alias(p) if p.first().is_some_and(|r| held.contains(r)))))
             .count();
         assert!(in_sets >= 3, "{in_sets}");
+        // "Combat - Get Targets" reads `@e678c."players"`, which Init_Setup binds to
+        // `"info for players".first."friends"`: the Skylander's info is in that set.
+        let friends = Ref::Obj((1usize << 41) | crate::script::name_hash("friends") as usize);
+        let in_friends = store.sets.iter().any(|(k, m)| {
+            k.last() == Some(&friends)
+                && m.iter().any(|t| matches!(t, RefTarget::Alias(p) if p.first().is_some_and(|r| held.contains(r))))
+        });
+        assert!(in_friends);
         let t = store
             .vars
             .get(&vec![Ref::Obj(timer)])

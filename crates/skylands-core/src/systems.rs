@@ -2023,9 +2023,11 @@ pub fn global_systems(
 /// `global.bld` actors it spawns (update managers) every tick, before the level's
 /// actors, on the shared `global.bld` store.
 pub fn global_systems_system(
+    mut commands: Commands,
     time: Res<Time<Fixed>>,
     asset_server: Option<Res<GameAssetServer>>,
     mut global: ResMut<GlobalScripts>,
+    heroes: Query<Entity, (With<Hero>, Without<CombatCreature>)>,
 ) {
     if global.systems.is_none() {
         let Some(server) = asset_server else { return };
@@ -2041,6 +2043,13 @@ pub fn global_systems_system(
     let GlobalScripts { store, systems, .. } = &mut *global;
     if let Some(systems) = systems {
         systems.tick(store, dt);
+        // The players' Skylanders, as the portal object scripts register them.
+        for hero in &heroes {
+            if let Err(e) = systems.register_creature(store, hero.to_bits(), 100.0, 0) {
+                debug!("Registering {hero:?} as a combat creature failed: {e:?}");
+            }
+            commands.entity(hero).insert(CombatCreature);
+        }
     }
 }
 
@@ -5033,6 +5042,7 @@ mod tests {
             ref_index: Default::default(),
             use_paths: Default::default(),
             records: Default::default(),
+            script_objects: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };
@@ -5136,6 +5146,7 @@ mod tests {
             ref_index: Default::default(),
             use_paths: Default::default(),
             records: Default::default(),
+            script_objects: Default::default(),
             macro_names: Default::default(),
             opaque_operands: Default::default(),
         };

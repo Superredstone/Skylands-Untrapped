@@ -300,6 +300,9 @@ pub struct ScriptSet {
     /// and `ScriptStructure`s. A record is an object a reference can point at; an unset
     /// variable of an engine type (`"defeated actor"`, `"Enemy - payload"`) is `null`.
     pub records: HashSet<usize>,
+    /// `ScriptReference` / `ScriptStructure` objects: script data an exported handle can
+    /// name (`global.bld`'s creature registry `@e678c`).
+    pub script_objects: HashSet<usize>,
     /// `StringInfo` constants by offset (`RefTarget::String`).
     pub strings: HashSet<usize>,
     /// Per op: the object its LHS (+0x1c stack) is measured from, the stack's `+0x18`
@@ -844,6 +847,16 @@ impl ScriptSet {
             })
             .map(|o| o.offset)
             .collect();
+        let script_objects = objects
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o.type_name.as_deref(),
+                    Some("ScriptReference" | "ScriptStructure")
+                )
+            })
+            .map(|o| o.offset)
+            .collect();
         let use_paths = objects
             .iter()
             .filter(|o| o.type_name.as_deref() == Some("OpUseMacro"))
@@ -1028,6 +1041,7 @@ impl ScriptSet {
             waypoints,
             ref_index,
             records,
+            script_objects,
             use_paths,
             placement_refs,
             set_names,
@@ -1806,6 +1820,18 @@ impl<'a> Vm<'a> {
     }
 
     fn ref_target_raw(&self, path: &[Ref]) -> RefTarget {
+        // A record `global.bld` exports, through its handle (`Init_Setup.ai`: `"combat
+        // control" = $63b`): paths through the reference are that record's.
+        if let ([Ref::Handle(h)], None, Some(g)) = (path, self.home, self.global) {
+            let i = *h as usize;
+            let root = (self.set.handle_ns.get(i) == Some(&name_hash("global.bld")))
+                .then(|| self.set.handle_ids.get(i))
+                .flatten()
+                .and_then(|&id| g.roots.get((id as usize).checked_sub(g.export_base)?));
+            if root.is_some_and(|r| g.script_objects.contains(r)) {
+                return RefTarget::Alias(path.to_vec());
+            }
+        }
         if let Some(k) = self.set.engine_key(path) {
             return match k[..] {
                 [NULL_HASH] => RefTarget::Null,
@@ -2080,7 +2106,13 @@ impl<'a> Vm<'a> {
         };
         // Element `i` of a set (`"active"[i]` in `Combat.ai` "Get Creature Info").
         let Some(owner) = waypoints else {
-            let members = self.members(path);
+            // A `find subset` op: its subset (the op is also a reference to its first
+            // match). "Targeting Update": `@15b5e0 = @15f2b0[loop]`.
+            let members = match path {
+                [Ref::Obj(o)] => self.sets.get(&vec![Ref::Obj(*o)]).cloned(),
+                _ => None,
+            }
+            .unwrap_or_else(|| self.members(path));
             return wrap(members.len())
                 .and_then(|i| members.get(i).cloned())
                 .unwrap_or(RefTarget::Null);
@@ -2337,9 +2369,16 @@ impl<'a> Vm<'a> {
             (Ref::Obj(o), Some(_), _) => (self.set, self.set.roots.iter().position(|&r| r == o)?),
             _ => return None,
         };
-        g.records
-            .contains(g.roots.get(index)?)
-            .then_some(GLOBAL_ROOT_BASE + index)
+        // A record, or another exported object reached through a script field (the
+        // creature registry `@e678c`, Init_Setup's `"combat control"`), unless it holds a
+        // reference now: then the path goes where it refers ("Targeting Update"'s loop
+        // variable `@15b5e0`).
+        let root = *g.roots.get(index)?;
+        if matches!(p[0], Ref::Obj(_)) && self.refs.contains_key(&p[..1]) {
+            return None;
+        }
+        let field = matches!(p[1], Ref::Obj(f) if self.set.vars.contains_key(&f));
+        (g.records.contains(&root) || field).then_some(GLOBAL_ROOT_BASE + index)
     }
 
     /// The slot an `OpSetReference` rebinds: the variable path itself, with only what leads
@@ -2494,18 +2533,36 @@ impl<'a> Vm<'a> {
 
     /// Run macro `name` with `args` bound by parameter name. Returns every interface
     /// parameter (inputs and outputs) after the call, in declaration order.
-    /// Run macro `name` with value and reference arguments, by parameter name.
+    /// Run macro `name` with value and reference arguments, by parameter name; returns
+    /// what each parameter refers to afterwards (reference outputs).
     pub fn call_with_refs(
         &mut self,
         name: &str,
         args: &[(String, Value)],
         refs: &[(String, RefTarget)],
-    ) -> Result<(), VmError> {
+    ) -> Result<HashMap<String, RefTarget>, VmError> {
         let (si, oi) = self
             .set
             .find_macro(name)
             .ok_or_else(|| VmError::UnknownMacro(name.into()))?;
-        self.run_macro_with(si, oi, args, Some(refs))
+        self.run_macro_with(si, oi, args, Some(refs))?;
+        let (params, _) = self.params(si, oi);
+        Ok(params
+            .iter()
+            .filter_map(|&p| {
+                let t = self.refs.get(&vec![Ref::Obj(p)])?.clone();
+                Some((self.set.var_name(p).to_string(), t))
+            })
+            .collect())
+    }
+
+    /// Bind reference `path` (variables of this VM's file) to `t`, as `OpSetReference`.
+    pub fn set_ref(&mut self, path: &[Ref], t: RefTarget) -> Result<(), VmError> {
+        let slot = self
+            .ref_slot(path)
+            .map_err(|_| VmError::Unsupported("reference slot".into()))?;
+        self.refs_of_mut(&slot).insert(slot, t);
+        Ok(())
     }
 
     pub fn call(
@@ -3004,6 +3061,24 @@ impl<'a> Vm<'a> {
             match &ins.op {
                 Op::SetValue { lhs, rhs } => {
                     let v = self.eval(rhs)?;
+                    // `set <list>.count = n` resizes the list: new (empty) records at the
+                    // end, or the last ones dropped (`Init_Setup_GameSystems.ai`: `"combat
+                    // control"."info for players".count = 1`, then `.first."friends"`).
+                    if let Some(list) = self.list_of_count(lhs) {
+                        let n = v.as_f32().max(0.0) as usize;
+                        let have = self.sets_of(&list).get(&list).map_or(0, Vec::len);
+                        for _ in have..n {
+                            let inst = self.new_instance();
+                            self.sets_of_mut(&list)
+                                .entry(list.clone())
+                                .or_default()
+                                .push(RefTarget::Alias(inst));
+                        }
+                        if let Some(s) = self.sets_of_mut(&list).get_mut(&list) {
+                            s.truncate(n);
+                        }
+                        continue;
+                    }
                     self.origin = self.relative_origin(ins.offset);
                     self.write(lhs, v);
                     self.origin = None;
@@ -3690,7 +3765,14 @@ impl<'a> Vm<'a> {
                 let Ref::Handle(h) = p[k - 1] else {
                     return None;
                 };
-                let list = self.field_keys(p[..k - 1].to_vec());
+                // The list as stored: through what its prefix refers to (`"combat
+                // control"."info for players".first`, "combat control" a reference).
+                let raw = self.field_keys(p[..k - 1].to_vec());
+                let list = if self.sets_of(&raw).contains_key(&raw) || k < 3 {
+                    raw
+                } else {
+                    self.canon(&p[..k - 1]).ok()?
+                };
                 let set = self.sets_of(&list).get(&list)?;
                 let m = match self.set.engine_key(&[Ref::Handle(h)]).as_deref()? {
                     [FIRST] => set.first()?,
@@ -3795,6 +3877,15 @@ impl<'a> Vm<'a> {
         // own copy of the fields). One that holds a value reads that value: a state's
         // `."key"` (`= "stateName"`, a reference to `"EnemySystem_Globals".State_Idle`,
         // 2 once "Game - Initialize Enemy System Globals" ran).
+        // `<find subset>.count`: the op is also a reference to its first match, but the
+        // count is the subset's (`"Targeting Update"`: `loop @15f2b0.count`).
+        if let [Ref::Obj(o), Ref::Handle(c)] = path[..] {
+            if self.set.engine_key(&[Ref::Handle(c)]) == Some(vec![SET_COUNT]) {
+                if let Some(m) = self.sets.get(&vec![Ref::Obj(o)]) {
+                    return Value::Int(m.len() as i32);
+                }
+            }
+        }
         if let Some(id) = self.referenced_identity(path) {
             return Value::Int(id);
         }
@@ -4845,6 +4936,24 @@ mod tests {
             vm.cross_file_ref_arg(&[Ref::Obj(spec)]),
             RefTarget::Macro(0x500)
         );
+    }
+
+    #[test]
+    fn vm_a_find_result_counts_and_indexes_its_subset() {
+        // "Targeting Update": `loop @15f2b0.count` and `@15b5e0 = @15f2b0[loop]`. The find
+        // op is also a reference to its first match, but its count and its elements are
+        // the subset's.
+        let find = 0x300;
+        let mut s = script_set(vec![], &[]);
+        s.handle_ids = vec![SET_COUNT];
+        s.handle_ns = vec![name_hash("level.bld")];
+        let mut vm = Vm::new(&s, None);
+        let a = RefTarget::Alias(vec![Ref::Obj(INSTANCE_BASE + 1)]);
+        let b = RefTarget::Alias(vec![Ref::Obj(INSTANCE_BASE + 2)]);
+        vm.refs.insert(vec![Ref::Obj(find)], a.clone());
+        vm.sets.insert(vec![Ref::Obj(find)], vec![a, b.clone()]);
+        assert_eq!(vm.read(&[Ref::Obj(find), Ref::Handle(0)]), I(2));
+        assert_eq!(vm.indexed_target(&[Ref::Obj(find)], 1), b);
     }
 
     #[test]

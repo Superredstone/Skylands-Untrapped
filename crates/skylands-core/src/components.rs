@@ -211,6 +211,11 @@ pub struct AttachedTo {
     pub displaced: [f32; 3],
 }
 
+/// A hero registered as a combat creature in `global.bld`'s creature registry
+/// (`GlobalSystems::register_creature`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CombatCreature;
+
 /// Actor cloned at run time by a script's `OpSpawn` (`Effect::Spawn`).
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedActor {
