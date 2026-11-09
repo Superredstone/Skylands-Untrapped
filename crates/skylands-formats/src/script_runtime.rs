@@ -170,6 +170,40 @@ impl GlobalSystems {
     pub fn actors(&self) -> usize {
         self.actors.len()
     }
+
+    /// Register a player's Skylander (`actor`, an engine id) as a combat creature:
+    /// "Combat - Creature Startup" with the arguments `PortalObject_Minion.ai` "Object
+    /// Startup - Minion" passes (faction 0, size 2, character parameters, no targeting
+    /// set-up). Stands in for the portal object chain, which is not run.
+    pub fn register_creature(
+        &self,
+        store: &mut GlobalStore,
+        actor: u64,
+        hp: f32,
+        element: i32,
+    ) -> Result<(), crate::script::VmError> {
+        let set = &self.native.set;
+        let mut vm = crate::script::Vm::with_index(set, None, Cow::Borrowed(&self.native.index));
+        vm.home = Some(set);
+        vm.vars = std::mem::take(&mut store.vars);
+        vm.refs = std::mem::take(&mut store.refs);
+        vm.sets = std::mem::take(&mut store.sets);
+        let args = [
+            ("hp ", Value::Float(hp)),
+            ("set up targetting", Value::Int(0)),
+            ("size ", Value::Int(2)),
+            ("creature faction", Value::Int(0)),
+            ("needs character parameters ", Value::Int(1)),
+            ("elemental type ", Value::Int(element)),
+        ]
+        .map(|(n, v)| (n.to_string(), v));
+        let refs = [("creature".to_string(), RefTarget::Actor(actor))];
+        let result = vm.call_with_refs("Combat - Creature Startup", &args, &refs);
+        store.vars = std::mem::take(&mut vm.vars);
+        store.refs = std::mem::take(&mut vm.refs);
+        store.sets = std::mem::take(&mut vm.sets);
+        result
+    }
 }
 
 /// `OpSlideValue` in flight: `lhs` moves `from` -> `to` over `seconds`.
@@ -682,9 +716,11 @@ impl ScriptProgram {
             .declared(si, st)
             .map(|(var, name)| (name.to_string(), var))
             .collect();
+        // A `global.bld` actor runs on the shared store itself (as `Vm::call_global`
+        // does), its own variables laid over it for the tick.
+        let own: HashSet<usize> = vm.own_vars.values().copied().collect();
         if self.native {
             vm.home = Some(&self.set);
-            vm.native_own = Some(vm.own_vars.values().copied().collect());
         }
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
@@ -695,6 +731,14 @@ impl ScriptProgram {
         vm.global_vars = std::mem::take(&mut st.global_vars);
         vm.global_refs = std::mem::take(&mut st.global_refs);
         vm.global_sets = std::mem::take(&mut st.global_sets);
+        if self.native {
+            let vars = std::mem::replace(&mut vm.vars, std::mem::take(&mut vm.global_vars));
+            vm.vars.extend(vars);
+            let refs = std::mem::replace(&mut vm.refs, std::mem::take(&mut vm.global_refs));
+            vm.refs.extend(refs);
+            let sets = std::mem::replace(&mut vm.sets, std::mem::take(&mut vm.global_sets));
+            vm.sets.extend(sets);
+        }
         vm.clone_ids = std::mem::take(&mut st.clone_ids);
         vm.self_key = st.self_key;
         vm.save = st.save.clone();
@@ -732,6 +776,27 @@ impl ScriptProgram {
         vm.fold_spawn_slots();
         st.behavior = vm.behavior;
         st.globals = vm.globals;
+        if self.native {
+            fn split<T>(
+                all: &mut HashMap<Vec<Ref>, T>,
+                own: &HashSet<usize>,
+            ) -> HashMap<Vec<Ref>, T> {
+                let mine: Vec<Vec<Ref>> = all
+                    .keys()
+                    .filter(|k| matches!(k.first(), Some(Ref::Obj(o)) if own.contains(o)))
+                    .cloned()
+                    .collect();
+                mine.into_iter()
+                    .filter_map(|k| Some((k.clone(), all.remove(&k)?)))
+                    .collect()
+            }
+            let vars = split(&mut vm.vars, &own);
+            vm.global_vars = std::mem::replace(&mut vm.vars, vars);
+            let refs = split(&mut vm.refs, &own);
+            vm.global_refs = std::mem::replace(&mut vm.refs, refs);
+            let sets = split(&mut vm.sets, &own);
+            vm.global_sets = std::mem::replace(&mut vm.sets, sets);
+        }
         st.refs = std::mem::take(&mut vm.refs);
         st.sets = std::mem::take(&mut vm.sets);
         st.global_vars = std::mem::take(&mut vm.global_vars);
@@ -3233,6 +3298,23 @@ mod global_systems_tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(sys.actors(), 4);
+        // A Skylander registered as a combat creature ("Combat - Creature Startup"):
+        // its creature info holds it, and the creature registry's sets (`active`...)
+        // hold that info.
+        sys.register_creature(&mut store, 42, 100.0, 0).unwrap();
+        let held: Vec<_> = store
+            .refs
+            .iter()
+            .filter(|(k, t)| **t == RefTarget::Actor(42) && crate::script::is_instance(k))
+            .map(|(k, _)| k[0])
+            .collect();
+        assert!(!held.is_empty());
+        let in_sets = store
+            .sets
+            .values()
+            .filter(|m| m.iter().any(|t| matches!(t, RefTarget::Alias(p) if p.first().is_some_and(|r| held.contains(r)))))
+            .count();
+        assert!(in_sets >= 3, "{in_sets}");
         let t = store
             .vars
             .get(&vec![Ref::Obj(timer)])

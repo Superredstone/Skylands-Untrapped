@@ -1431,9 +1431,6 @@ pub struct Vm<'a> {
     /// absolute targets (`Vm::absolute`).
     pub global_sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// The file that called into this one (`global.bld` runs: the level), for templates.
-    /// A `global.bld` actor of its own (`SystemUpdate_Manager`): its variables, then
-    /// everything else in the shared `global.bld` store (`ScriptProgram::native`).
-    pub native_own: Option<HashSet<usize>>,
     pub(crate) home: Option<&'a ScriptSet>,
     /// Setup blocks being run, innermost last.
     spawning: Vec<Spawning>,
@@ -1552,7 +1549,7 @@ fn named_var(name: &str) -> usize {
     FIELD_BASE | name_hash(name) as usize
 }
 
-fn is_instance(p: &[Ref]) -> bool {
+pub(crate) fn is_instance(p: &[Ref]) -> bool {
     matches!(p.first(), Some(Ref::Obj(o)) if *o >= INSTANCE_BASE)
 }
 
@@ -1793,7 +1790,6 @@ impl<'a> Vm<'a> {
             global_refs: HashMap::new(),
             global_sets: HashMap::new(),
             home: None,
-            native_own: None,
             spawning: Vec::new(),
         }
     }
@@ -2183,9 +2179,6 @@ impl<'a> Vm<'a> {
     /// Where a path's values, references and sets live: data-object instances are in the
     /// shared `global.bld` store (this VM's own when it runs `global.bld`).
     fn shared(&self, p: &[Ref]) -> bool {
-        if let Some(own) = &self.native_own {
-            return !matches!(p.first(), Some(Ref::Obj(o)) if own.contains(o));
-        }
         is_instance(p) && self.home.is_none()
     }
     fn vars_of(&self, p: &[Ref]) -> &HashMap<Vec<Ref>, Value> {
@@ -2501,6 +2494,20 @@ impl<'a> Vm<'a> {
 
     /// Run macro `name` with `args` bound by parameter name. Returns every interface
     /// parameter (inputs and outputs) after the call, in declaration order.
+    /// Run macro `name` with value and reference arguments, by parameter name.
+    pub fn call_with_refs(
+        &mut self,
+        name: &str,
+        args: &[(String, Value)],
+        refs: &[(String, RefTarget)],
+    ) -> Result<(), VmError> {
+        let (si, oi) = self
+            .set
+            .find_macro(name)
+            .ok_or_else(|| VmError::UnknownMacro(name.into()))?;
+        self.run_macro_with(si, oi, args, Some(refs))
+    }
+
     pub fn call(
         &mut self,
         name: &str,

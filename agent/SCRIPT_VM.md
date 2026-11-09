@@ -641,6 +641,22 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         Skylander), so [2138] `find subset of "return set" where ."creature".distance <=
         noticeRange` finds nothing and passengers stay "idle". Not verified: that the
         app's own loader finds `Init_Setup.bld` (tests mount it).
+      - Native actors now run on the store itself: their VM's vars / refs / sets are the
+        `GlobalStore` with the actor's own variables laid over it for the tick and split
+        back out after (op-local refs, params and find results are written straight
+        into `Vm::refs`, so a per-path split did not work).
+      - Hero registration (formats only, not called from core yet):
+        `GlobalSystems::register_creature` calls "Combat - Creature Startup" with the
+        arguments `PortalObject_Minion.ai` "Object Startup - Minion" passes (faction 0,
+        size 2, "needs character parameters" 1, "set up targetting" 0), a stand-in for
+        the portal object chain. The creature info then holds the hero and is in
+        `@e678c`'s `active` / `targets` / `attack priority - high` sets. But "Combat - Get
+        Targets" (no owner targeting sets: [1306]) returns `@e678c."players"`
+        (`0x3c5254`), and no op names that set: faction 0 creatures go into `@da234` in
+        "Combat - Add/Remove to Targets Set" ([1351]), presumably `players`, which our
+        registration does not reach. Next: find who calls "Add/Remove to Targets Set" for
+        a Skylander (or what `@da234` is), then call `register_creature` from core for the
+        hero.
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`
