@@ -72,6 +72,104 @@ pub struct ScriptProgram {
     index: VmIndex,
     /// `global.bld`'s index, to run its macros from level scripts.
     global_index: Option<VmIndex>,
+    /// `set` is `global.bld` itself: its actors share the `global.bld` store
+    /// (`Vm::native_own`).
+    native: bool,
+}
+
+/// The `global.bld` store shared by every actor: variables, references and sets.
+#[derive(Debug, Default)]
+pub struct GlobalStore {
+    pub vars: HashMap<Vec<Ref>, Value>,
+    pub refs: HashMap<Vec<Ref>, RefTarget>,
+    pub sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
+}
+
+impl GlobalStore {
+    fn lend(&mut self, st: &mut ActorScriptState) {
+        st.global_vars = std::mem::take(&mut self.vars);
+        st.global_refs = std::mem::take(&mut self.refs);
+        st.global_sets = std::mem::take(&mut self.sets);
+    }
+    fn take_back(&mut self, st: &mut ActorScriptState) {
+        self.vars = std::mem::take(&mut st.global_vars);
+        self.refs = std::mem::take(&mut st.global_refs);
+        self.sets = std::mem::take(&mut st.global_sets);
+    }
+}
+
+/// The game's boot (`character/Init_Setup.bld` `Init_Setup.ai`) and the `global.bld`
+/// actors it spawns (`SystemUpdate_Manager`, one per control layer), which call the
+/// registered update macros every tick ("System - Manage Unpaused Game Systems" sets
+/// "Game Timer").
+pub struct GlobalSystems {
+    boot: ScriptProgram,
+    boot_script: usize,
+    boot_state: ActorScriptState,
+    native: ScriptProgram,
+    actors: Vec<(usize, ActorScriptState)>,
+}
+
+impl GlobalSystems {
+    pub fn new(init_setup: ScriptSet, global: ScriptSet) -> Option<Self> {
+        let boot = ScriptProgram::new(init_setup, Some(global.clone()));
+        let boot_script = boot
+            .set
+            .scripts
+            .iter()
+            .position(|s| s.name.ends_with("/Init_Setup.ai"))?;
+        Some(Self {
+            boot,
+            boot_script,
+            boot_state: ActorScriptState::default(),
+            native: ScriptProgram::native(global),
+            actors: Vec::new(),
+        })
+    }
+
+    /// One tick: the boot actor, then the `global.bld` actors it has spawned so far.
+    pub fn tick(&mut self, store: &mut GlobalStore, dt: f32) {
+        let st = &mut self.boot_state;
+        store.lend(st);
+        self.boot.tick(self.boot_script, st, dt);
+        store.take_back(st);
+        for spawn in std::mem::take(&mut st.spawns) {
+            let Effect::Spawn {
+                template,
+                seed,
+                setup,
+                named_vars,
+                named_refs,
+                ..
+            } = spawn
+            else {
+                continue;
+            };
+            let Some(si) = template.script.as_deref().and_then(|s| self.native.find(s)) else {
+                continue;
+            };
+            let mut a = ActorScriptState {
+                engine: seed,
+                ..Default::default()
+            };
+            for effect in setup {
+                a.apply(effect);
+            }
+            self.native.import_vars(si, &mut a, &named_vars);
+            self.native.import_refs(si, &mut a, &named_refs);
+            self.actors.push((si, a));
+        }
+        for (si, a) in &mut self.actors {
+            store.lend(a);
+            self.native.tick(*si, a, dt);
+            store.take_back(a);
+        }
+    }
+
+    /// `global.bld` actors running (`SystemUpdate_Manager`s).
+    pub fn actors(&self) -> usize {
+        self.actors.len()
+    }
 }
 
 /// `OpSlideValue` in flight: `lhs` moves `from` -> `to` over `seconds`.
@@ -302,6 +400,16 @@ impl ScriptProgram {
             global,
             index,
             global_index,
+            native: false,
+        }
+    }
+
+    /// Actors of `global.bld` itself (`SystemUpdate_Manager`): their own variables are
+    /// theirs, all else lives in the shared `global.bld` store.
+    pub fn native(global: ScriptSet) -> Self {
+        Self {
+            native: true,
+            ..Self::new(global, None)
         }
     }
 
@@ -574,6 +682,10 @@ impl ScriptProgram {
             .declared(si, st)
             .map(|(var, name)| (name.to_string(), var))
             .collect();
+        if self.native {
+            vm.home = Some(&self.set);
+            vm.native_own = Some(vm.own_vars.values().copied().collect());
+        }
         vm.engine
             .insert(vec![field::SCRIPT_TIMER], Value::Float(st.time));
         vm.rng = st.rng;
@@ -3068,5 +3180,64 @@ mod tests {
             }
             eprintln!("{name}: removed={} error={:?}", st.removed, st.error);
         }
+    }
+}
+
+#[cfg(test)]
+mod global_systems_tests {
+    use super::*;
+    fn read(dir: &str, name: &str) -> Option<Vec<u8>> {
+        let p = ["assets/files", "../../assets/files"]
+            .into_iter()
+            .map(|d| {
+                std::path::Path::new(d)
+                    .join(dir)
+                    .join(format!("{name}.bld"))
+            })
+            .find(|p| p.exists())?;
+        let mut m = crate::archive::ArchiveMount::new();
+        m.mount(&p).ok()?;
+        m.read_file("level.bld").ok()
+    }
+
+    #[test]
+    fn boot_starts_the_update_managers_and_game_timer_runs() {
+        // `Init_Setup.ai` STARTUP spawns a `SystemUpdate_Manager` per control layer and
+        // registers "System - Manage Unpaused Game Systems"; the managers call it every
+        // tick, which sets "Game Timer" (enemy targeting waits on it).
+        let (Some(init), Some(global)) =
+            (read("character", "Init_Setup"), read("permanent", "global"))
+        else {
+            return;
+        };
+        let init = ScriptSet::parse(&init).unwrap();
+        let global = ScriptSet::parse(&global).unwrap();
+        let timer = *global
+            .vars
+            .iter()
+            .find(|(_, v)| v.name == "Game Timer")
+            .unwrap()
+            .0;
+        let mut sys = GlobalSystems::new(init, global).unwrap();
+        let mut store = GlobalStore::default();
+        for _ in 0..120 {
+            sys.tick(&mut store, 1.0 / 60.0);
+        }
+        eprintln!(
+            "actors={} timer={:?} errs={:?}",
+            sys.actors(),
+            store.vars.get(&vec![Ref::Obj(timer)]),
+            sys.actors
+                .iter()
+                .filter_map(|(_, a)| a.error.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(sys.actors(), 4);
+        let t = store
+            .vars
+            .get(&vec![Ref::Obj(timer)])
+            .map(|v| v.as_f32())
+            .unwrap_or(0.0);
+        assert!(t > 1.5, "{t}");
     }
 }

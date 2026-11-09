@@ -500,20 +500,18 @@ pub struct ScriptVarBoard {
     pub vars: skylands_formats::script::VarBoard,
     /// References in those variables (`RefBoard`, absolute targets).
     pub refs: skylands_formats::script::RefBoard,
-    /// `global.bld`'s variables, references and sets: one table for the whole level,
-    /// moved into each actor's script state for its tick.
-    pub global_vars: std::collections::HashMap<
-        Vec<skylands_formats::script::Ref>,
-        skylands_formats::script::Value,
-    >,
-    pub global_refs: std::collections::HashMap<
-        Vec<skylands_formats::script::Ref>,
-        skylands_formats::script::RefTarget,
-    >,
-    pub global_sets: std::collections::HashMap<
-        Vec<skylands_formats::script::Ref>,
-        Vec<skylands_formats::script::RefTarget>,
-    >,
+}
+
+/// `global.bld`'s variables, references and sets (one store for the whole game, moved
+/// into each actor's script state for its tick), and the boot actor and `global.bld`
+/// actors that run on it (`GlobalSystems`: `character/Init_Setup.bld`, the
+/// `SystemUpdate_Manager`s).
+#[derive(Resource, Default)]
+pub struct GlobalScripts {
+    pub store: skylands_formats::GlobalStore,
+    pub systems: Option<skylands_formats::GlobalSystems>,
+    /// The level's own variable board (reset with the level).
+    pub board: ScriptVarBoard,
 }
 
 /// Script effects on `OpSpawn` clones through reference variables, by spawner and

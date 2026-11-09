@@ -625,11 +625,22 @@ Code: `crates/skylands-formats/src/script.rs` (`ScriptSet` decoder, `Vm` evaluat
         Internal - System Update", "Camera - System - Update Wrapper", "VFX - Mood Box -
         Update" / "Cleanup on Level Switch", "System - Data Mining - Update", "Portal -
         Defeat Action".
-      - Next: wire it into core: load `character/Init_Setup.bld` at boot, run
-        `Init_Setup.ai` STARTUP once into the shared global store, and run the spawned
-        `SystemUpdate_Manager` actors (a global.bld script: an actor whose program is
-        global.bld itself, home = global) every tick, sharing that store with the
-        level's actors.
+      - Wired: `GlobalSystems` (script_runtime.rs) ticks the boot actor
+        (`Init_Setup.ai` over global.bld) and the global.bld actors it spawns, on a
+        `GlobalStore`. Those actors run under `ScriptProgram::native(global)`: the VM's
+        `home` is global.bld and `native_own` keeps the actor's own variables
+        (`_masterVarList`) per actor, everything else in the shared store (as in
+        `call_global`). Core: `GlobalScripts` resource (store + systems + the level's var
+        board), `global_systems_system` before `actor_script_system`. The global store
+        now persists across levels (it used to reset with the level's board). After 50 s
+        of the arena, "Game Timer" ~50; the targeting gate (`updateTimer < Game Timer`,
+        refreshed +0.35 s) passes.
+      - Next blocker: "Combat - Get Targets" returns `@e678c`'s targets set ([1306]),
+        filled by "Combat - Get/Adjust Creature Info Struct" for registered creatures.
+        Our hero is not registered (the original's portal / player scripts register the
+        Skylander), so [2138] `find subset of "return set" where ."creature".distance <=
+        noticeRange` finds nothing and passengers stay "idle". Not verified: that the
+        app's own loader finds `Init_Setup.bld` (tests mount it).
       - Then: the Sporeasaur "idle" behaviour calls the targeting macro
         (`@9ba4c`: `targetFoes` = 1) and a state check (`@9bc9c`); "Transport - Activate
         Enemy" zeroes their `noticeRange` and Set Queue restores it from `valueTwo`

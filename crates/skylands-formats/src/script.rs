@@ -1431,7 +1431,10 @@ pub struct Vm<'a> {
     /// absolute targets (`Vm::absolute`).
     pub global_sets: HashMap<Vec<Ref>, Vec<RefTarget>>,
     /// The file that called into this one (`global.bld` runs: the level), for templates.
-    home: Option<&'a ScriptSet>,
+    /// A `global.bld` actor of its own (`SystemUpdate_Manager`): its variables, then
+    /// everything else in the shared `global.bld` store (`ScriptProgram::native`).
+    pub native_own: Option<HashSet<usize>>,
+    pub(crate) home: Option<&'a ScriptSet>,
     /// Setup blocks being run, innermost last.
     spawning: Vec<Spawning>,
 }
@@ -1790,6 +1793,7 @@ impl<'a> Vm<'a> {
             global_refs: HashMap::new(),
             global_sets: HashMap::new(),
             home: None,
+            native_own: None,
             spawning: Vec::new(),
         }
     }
@@ -2179,6 +2183,9 @@ impl<'a> Vm<'a> {
     /// Where a path's values, references and sets live: data-object instances are in the
     /// shared `global.bld` store (this VM's own when it runs `global.bld`).
     fn shared(&self, p: &[Ref]) -> bool {
+        if let Some(own) = &self.native_own {
+            return !matches!(p.first(), Some(Ref::Obj(o)) if own.contains(o));
+        }
         is_instance(p) && self.home.is_none()
     }
     fn vars_of(&self, p: &[Ref]) -> &HashMap<Vec<Ref>, Value> {

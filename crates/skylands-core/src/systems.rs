@@ -2011,6 +2011,39 @@ fn npc_dialogue(
 }
 
 /// The level's scripts with `global.bld` for global handles.
+/// The game's boot (`character/Init_Setup.bld`) over `global.bld`, when both are mounted.
+pub fn global_systems(
+    loader: &skylands_formats::AssetLoader,
+) -> Option<skylands_formats::GlobalSystems> {
+    let parse = |p: &str| skylands_formats::ScriptSet::parse(&loader.load_raw(p).ok()?);
+    skylands_formats::GlobalSystems::new(parse("Init_Setup.bld")?, parse("global.bld")?)
+}
+
+/// Starts the game's boot once `Init_Setup.bld` can be read, then runs it and the
+/// `global.bld` actors it spawns (update managers) every tick, before the level's
+/// actors, on the shared `global.bld` store.
+pub fn global_systems_system(
+    time: Res<Time<Fixed>>,
+    asset_server: Option<Res<GameAssetServer>>,
+    mut global: ResMut<GlobalScripts>,
+) {
+    if global.systems.is_none() {
+        let Some(server) = asset_server else { return };
+        let Ok(loader) = server.loader.lock() else {
+            return;
+        };
+        if !loader.has_file("Init_Setup.bld") {
+            return;
+        }
+        global.systems = global_systems(&loader);
+    }
+    let dt = time.timestep().as_secs_f32();
+    let GlobalScripts { store, systems, .. } = &mut *global;
+    if let Some(systems) = systems {
+        systems.tick(store, dt);
+    }
+}
+
 fn level_scripts(loader: &skylands_formats::AssetLoader, level_path: &str) -> Option<LevelScripts> {
     let parse = |p: &str| skylands_formats::ScriptSet::parse(&loader.load_raw(p).ok()?);
     let program = skylands_formats::ScriptProgram::new(parse(level_path)?, parse("global.bld"));
@@ -2034,7 +2067,7 @@ pub fn actor_script_system(
     mut effects: ResMut<ActorEffects>,
     mut refs: ResMut<PlacementRefs>,
     mut new_refs: ResMut<PendingPlacementRefs>,
-    mut board: Local<ScriptVarBoard>,
+    mut global: ResMut<GlobalScripts>,
     placements: Option<Res<PlacementTransforms>>,
     heroes: Query<(Entity, &Transform), (With<Hero>, Without<ActorScript>)>,
     clones: Query<(Entity, &SpawnedActor)>,
@@ -2053,6 +2086,8 @@ pub fn actor_script_system(
     use skylands_formats::script_runtime::field::*;
     let Some(scripts) = scripts else { return };
     // One 60 Hz step per run, also when a runner steps `FixedUpdate` directly.
+    let global = &mut *global;
+    let board = &mut global.board;
     let dt = time.timestep().as_secs_f32();
     // Variables other actors' scripts reach with `OpFindVariable`: one board per level.
     let program = std::sync::Arc::as_ptr(&scripts.0) as usize;
@@ -2170,15 +2205,15 @@ pub fn actor_script_system(
         }
         actor.state.board = std::mem::take(&mut board.vars);
         actor.state.ref_board = std::mem::take(&mut board.refs);
-        actor.state.global_vars = std::mem::take(&mut board.global_vars);
-        actor.state.global_refs = std::mem::take(&mut board.global_refs);
-        actor.state.global_sets = std::mem::take(&mut board.global_sets);
+        actor.state.global_vars = std::mem::take(&mut global.store.vars);
+        actor.state.global_refs = std::mem::take(&mut global.store.refs);
+        actor.state.global_sets = std::mem::take(&mut global.store.sets);
         scripts.0.tick(actor.script, &mut actor.state, dt);
         board.vars = std::mem::take(&mut actor.state.board);
         board.refs = std::mem::take(&mut actor.state.ref_board);
-        board.global_vars = std::mem::take(&mut actor.state.global_vars);
-        board.global_refs = std::mem::take(&mut actor.state.global_refs);
-        board.global_sets = std::mem::take(&mut actor.state.global_sets);
+        global.store.vars = std::mem::take(&mut actor.state.global_vars);
+        global.store.refs = std::mem::take(&mut actor.state.global_refs);
+        global.store.sets = std::mem::take(&mut actor.state.global_sets);
         // The engine mover: `velocity.length` units per second along `velocity.heading` /
         // `pitch` (degrees; heading 0 = +Z, pitch 90 = up, as `OpDisplace`).
         let speed = actor.state.get(&[MY, VELOCITY, LENGTH]).unwrap_or(0.0);
@@ -5391,6 +5426,7 @@ mod tests {
             .mount(dir.join("level/Arena_Challenge_300_000.bld"))
             .unwrap();
         loader.mount(dir.join("level/Arena_Mesh_300.bld")).unwrap();
+        loader.mount(dir.join("character/Init_Setup.bld")).unwrap();
         let mut app = build_test_app();
         let world = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
@@ -5405,7 +5441,8 @@ mod tests {
         ));
         world.insert_resource(env);
         queue.apply(world);
-        world.spawn((Hero, Transform::IDENTITY));
+        world.resource_mut::<GlobalScripts>().systems = global_systems(&loader);
+        world.spawn((Hero, Transform::from_xyz(-205.0, 150.5, -30.0)));
         // 5 s at 60 Hz.
         for _ in 0..300 {
             step_fixed(&mut app);
@@ -5562,5 +5599,17 @@ mod tests {
             .collect();
         assert!(!passengers.is_empty());
         assert!(passengers.iter().all(|b| *b == "idle"), "{passengers:?}");
+        // The boot (`Init_Setup.ai`) started `global.bld`'s update managers, which run
+        // "System - Manage Unpaused Game Systems": "Game Timer" follows the game.
+        let global = world.resource::<GlobalScripts>();
+        assert_eq!(global.systems.as_ref().map(|s| s.actors()), Some(4));
+        let timer = program
+            .global
+            .as_ref()
+            .and_then(|g| g.vars.iter().find(|(_, v)| v.name == "Game Timer"))
+            .map(|(&o, _)| vec![skylands_formats::script::Ref::Obj(o)])
+            .unwrap();
+        let t = global.store.vars.get(&timer).map_or(0.0, |v| v.as_f32());
+        assert!(t > 25.0, "{t}");
     }
 }

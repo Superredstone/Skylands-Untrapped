@@ -37,7 +37,7 @@ pub use script::{
     enemy_stats, hero_max_hp, hero_movement, EnemyStats, HeroMovement, LevelupTable, MinionTuning,
     SaveParams, ScriptSet, Vm, VmError,
 };
-pub use script_runtime::{ActorScriptState, ScriptProgram};
+pub use script_runtime::{ActorScriptState, GlobalStore, GlobalSystems, ScriptProgram};
 pub use sprite::{SpriteDef, SpriteLibrary};
 pub use text::{
     npc_conversations, npc_dialogue, parse_language_pack, Conversation, DialogueLine, LevelString,

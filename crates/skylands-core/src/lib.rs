@@ -66,6 +66,7 @@ impl Plugin for SkylandsCorePlugin {
             .init_resource::<MagicMoment>()
             .init_resource::<CloneEffects>()
             .init_resource::<AttachNodes>()
+            .init_resource::<GlobalScripts>()
             .init_resource::<ActorEffects>()
             .init_resource::<PlacementRefs>()
             .init_resource::<PendingPlacementRefs>()
@@ -90,7 +91,8 @@ impl Plugin for SkylandsCorePlugin {
                     systems::actor_physics_system,
                     systems::hero_combat_system,
                     systems::enemy_ai_system,
-                    systems::actor_script_system,
+                    // The boot and `global.bld`'s own actors, then the level's actors.
+                    (systems::global_systems_system, systems::actor_script_system).chain(),
                     // Attached actors where they are before effects measure them.
                     systems::attach_system,
                     apply_deferred,
